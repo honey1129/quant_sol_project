@@ -37,16 +37,16 @@ def risk_control(side, entry_price, size):
 
     if pnl_pct >= config.TAKE_PROFIT:
         if side == 'long':
-            client.close_long(config.INITIAL_BALANCE,config.LEVERAGE)
+            client.close_long(entry_price * size,config.LEVERAGE)
         else:
-            client.close_short(config.INITIAL_BALANCE,config.LEVERAGE)
+            client.close_short(entry_price * size,config.LEVERAGE)
         log_info(f"✅ {side.upper()} 仓止盈平仓，收益: {pnl_pct * 100:.2f}%, 盈利金额: {profit_amount:.2f} USD")
 
     elif pnl_pct <= -config.STOP_LOSS:
         if side == 'long':
-            client.close_long(config.INITIAL_BALANCE,config.LEVERAGE)
+            client.close_long(entry_price * size,config.LEVERAGE)
         else:
-            client.close_short(config.INITIAL_BALANCE,config.LEVERAGE)
+            client.close_short(entry_price * size,config.LEVERAGE)
         log_info(f"❌ {side.upper()} 仓止损平仓，收益: {pnl_pct * 100:.2f}%, 盈亏金额: {profit_amount:.2f} USD")
 
     else:
