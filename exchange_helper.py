@@ -13,7 +13,7 @@ def init_okx():
                         'defaultMarket': 'swap'}
         })
 
-        if config.USE_SANDBOX:
+        if config.USE_SERVER == "1":
             exchange.set_sandbox_mode(True)
             send_telegram("✅ 当前运行环境：OKX 模拟盘")
         else:
