@@ -50,26 +50,28 @@ def fetch_ohlcv(max_retry=3, sleep_sec=1):
 def risk_control(side, entry_price, size):
     market_price = client.get_price()
 
-    # 盈亏百分比（多空通用逻辑）
     change_pct = (market_price - entry_price) / entry_price
     pnl_pct = change_pct if side == 'long' else -change_pct
 
-    # 判断是否需要平仓
+    profit_amount = pnl_pct * size  # ✅ 计算浮动收益额
+
     if pnl_pct >= config.TAKE_PROFIT:
         if side == 'long':
             client.close_long(size)
         else:
             client.close_short(size)
-        log_info(f"✅ {side.upper()} 仓止盈平仓，收益: {pnl_pct*100:.2f}%")
+        log_info(f"✅ {side.upper()} 仓止盈平仓，收益: {pnl_pct * 100:.2f}%, 盈利金额: {profit_amount:.2f} USD")
 
     elif pnl_pct <= -config.STOP_LOSS:
         if side == 'long':
             client.close_long(size)
         else:
             client.close_short(size)
-        log_info(f"❌ {side.upper()} 仓止损平仓，收益: {pnl_pct*100:.2f}%")
+        log_info(f"❌ {side.upper()} 仓止损平仓，收益: {pnl_pct * 100:.2f}%, 盈亏金额: {profit_amount:.2f} USD")
+
     else:
-        log_info(f"🔄 {side.upper()} 仓监控中，无平仓动作。当前收益: {pnl_pct * 100:.2f}%")
+        log_info(
+            f"🔄 {side.upper()} 仓监控中，无平仓动作。当前收益: {pnl_pct * 100:.2f}%, 当前盈亏: {profit_amount:.2f} USD")
 
 
 # 模型预测信号
