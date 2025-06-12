@@ -42,7 +42,7 @@ def fetch_ohlcv(max_retry=3, sleep_sec=1):
             df[['open', 'high', 'low', 'close', 'volume']] = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
             return df
         except Exception as e:
-            print(f"⚠ 拉取K线失败，第{attempt+1}次重试: {e}")
+            log_error(f"⚠ 拉取K线失败，第{attempt+1}次重试: {e}")
             time.sleep(sleep_sec)
     raise Exception("❌ 超过最大重试次数，fetch_ohlcv() 彻底失败")
 

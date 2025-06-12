@@ -3,6 +3,7 @@ import numpy as np
 import joblib
 import matplotlib.pyplot as plt
 import config
+from live_trading_monitor import log_info
 from utils import fetch_binance_data, add_indicators, get_feature_columns
 import os
 import matplotlib
@@ -75,10 +76,10 @@ def backtest():
     max_dd = ((df['balance'].cummax() - df['balance']) / df['balance'].cummax()).max()
     sharpe = (returns.mean() / returns.std()) * np.sqrt(24*365) if returns.std() > 0 else 0
 
-    print("增强版回测结果：")
-    print(f"最终收益: {cum_return * 100:.2f}%")
-    print(f"最大回撤: {max_dd * 100:.2f}%")
-    print(f"年化夏普: {sharpe:.2f}")
+    log_info("增强版回测结果：")
+    log_info(f"最终收益: {cum_return * 100:.2f}%")
+    log_info(f"最大回撤: {max_dd * 100:.2f}%")
+    log_info(f"年化夏普: {sharpe:.2f}")
 
     # 资金曲线可视化
     plt.figure(figsize=(10, 5))
