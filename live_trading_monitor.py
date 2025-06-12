@@ -73,16 +73,12 @@ def predict_signal(model, df):
 # 下单逻辑
 
 def place_order(signal):
-    price = client.get_price()
-    size = round(config.POSITION_SIZE * config.LEVERAGE / price, 3)
 
     if signal == 'long':
-        client.open_long(size)
-        log_info(f"✅ 开多仓: {size}")
+        client.open_long(config.POSITION_SIZE,config.LEVERAGE)
 
     elif signal == 'short':
-        client.open_short(size)
-        log_info(f"✅ 开空仓: {size}")
+        client.open_short(config.POSITION_SIZE,config.LEVERAGE)
 
     else:
         log_info("当前无信号，继续观望。")
