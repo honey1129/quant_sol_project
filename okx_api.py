@@ -5,9 +5,7 @@ import okx.Account as Account
 import okx.Trade as Trade
 import okx.MarketData as Market
 import okx.PublicData as Public
-
-from live_trading_monitor import log_info, log_error
-
+from utils import log_info, log_error
 
 class OKXClient:
     def __init__(self):
