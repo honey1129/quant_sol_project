@@ -15,12 +15,12 @@ USE_SERVER = "1"
 # 交易品种和模型配置
 SYMBOL = 'SOL-USDT-SWAP'
 LEVERAGE = 3
-POSITION_SIZE = 50
+POSITION_SIZE = 200
 MODEL_PATH = 'models/model_okx.pkl'
 
 # 风控参数（默认初始）
-TAKE_PROFIT = 0.03
-STOP_LOSS = 0.01
+TAKE_PROFIT = 0.05
+STOP_LOSS = 0.03
 
 # 机器学习预测信号阈值
 THRESHOLD_LONG = 0.6
