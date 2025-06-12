@@ -1,0 +1,27 @@
+[project]
+name = "quant-okx-v5-production"
+version = "0.1.0"
+description = "Institutional-grade ML-powered trading bot with OKX v5 API"
+requires-python = ">=3.9"
+
+dependencies = [
+  "numpy==2.0.2",
+  "pandas==2.3.0",
+  "scikit-learn==1.6.1",
+  "joblib==1.5.1",
+  "lightgbm==4.6.0",
+  "ta==0.11.0",
+  "matplotlib==3.9.4",
+  "requests==2.32.4",
+  "python-okx==0.3.9",
+  "aiohttp==3.12.12",
+  "aiodns==3.4.0",
+  "async-timeout==5.0.1",
+  "loguru==0.7.3",
+  "pendulum==3.1.0",
+  "packaging==25.0"
+]
+
+[build-system]
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"

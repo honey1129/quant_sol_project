@@ -1,0 +1,64 @@
+# Python 相关缓存文件
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 虚拟环境 (venv, .venv, env)
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Jupyter notebook checkpoints
+.ipynb_checkpoints
+
+# IDE 配置文件
+.vscode/
+.idea/
+
+# 日志与临时日志
+logs/
+*.log
+
+# 数据缓存、临时文件
+data/
+*.csv
+*.json
+*.xlsx
+
+# 模型文件
+models/
+*.pkl
+*.h5
+*.model
+
+# 训练结果中间缓存
+checkpoints/
+tmp/
+temp/
+
+# API 密钥文件（如果你后续把密钥独立放入 config_secret.py 可防止泄露）
+config_secret.py
+
+# 操作系统文件
+.DS_Store
+Thumbs.db
+
+# PDM/Poetry 编译缓存
+__pypackages__/
+pdm.lock
+poetry.lock
+
+# Pip wheel cache
+*.whl
+
+# SSH 临时 key (如有)
+*.pem
+
+# 编译 C 扩展残留
+build/
+dist/
+*.egg-info/
