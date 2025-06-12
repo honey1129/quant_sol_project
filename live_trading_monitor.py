@@ -2,31 +2,11 @@ import time
 import pandas as pd
 import joblib
 import traceback
-import logging
 from utils import add_indicators, get_feature_columns, send_telegram  # 你已有的工具函数
 import config
+from utils import log_info, log_error
 from okx_api import OKXClient
-import os
 client = OKXClient()
-
-# 自动创建日志目录
-os.makedirs("logs", exist_ok=True)
-
-logging.basicConfig(
-    filename='logs/live_trading.log',
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-
-def log_info(msg):
-    print(msg)
-    logging.info(msg)
-    send_telegram(msg)
-
-def log_error(msg):
-    print("❌", msg)
-    logging.error(msg)
-    send_telegram(f"❌ {msg}")
 
 
 # 获取历史K线数据

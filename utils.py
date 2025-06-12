@@ -4,11 +4,29 @@ import ccxt
 import os
 import requests
 import config
-
+import logging
 # 自动创建目录
 os.makedirs("models", exist_ok=True)
 os.makedirs("logs", exist_ok=True)
 os.makedirs("data", exist_ok=True)
+
+logging.basicConfig(
+    filename='logs/live_trading.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
+def log_info(msg):
+    print(msg)
+    logging.info(msg)
+    send_telegram(msg)
+
+def log_error(msg):
+    print("❌", msg)
+    logging.error(msg)
+    send_telegram(f"❌ {msg}")
+
+
 
 # 拉取历史数据
 def fetch_binance_data(symbol='SOL/USDT', timeframe='1h', limit=1000):
