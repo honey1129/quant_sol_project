@@ -53,7 +53,7 @@ def risk_control(side, entry_price, size):
     change_pct = (market_price - entry_price) / entry_price
     pnl_pct = change_pct if side == 'long' else -change_pct
 
-    profit_amount = pnl_pct * size  # ✅ 计算浮动收益额
+    profit_amount = (market_price - entry_price) * size
 
     if pnl_pct >= config.TAKE_PROFIT:
         if side == 'long':
