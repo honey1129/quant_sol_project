@@ -32,14 +32,16 @@ def live_trade_job():
 def scheduler():
     now = time.localtime()
 
-    # 每天凌晨2点（2:00~2:59之间任意时间触发一次训练+回测）
-    if now.tm_hour == 2:
+    # 每天凌晨2点整点训练 + 回测
+    if now.tm_hour == 2 and now.tm_min == 0:
         safe_run(train_job)
         safe_run(backtest_job)
-    else:
+
+    # 每 15 分钟执行实盘轮询
+    elif now.tm_min % 15 == 0:
         safe_run(live_trade_job)
 
 if __name__ == '__main__':
     while True:
         scheduler()
-        time.sleep(60)  # 每分钟调度一次
+        time.sleep(60)  # 每分钟检查一次
