@@ -29,7 +29,7 @@ def log_error(msg):
 
 
 # 拉取历史数据
-def fetch_binance_data(symbol='SOL/USDT', timeframe='30m', limit=3000):
+def fetch_binance_data(symbol='SOL/USDT', timeframe='1h', limit=3000):
     exchange = ccxt.binance()
     ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
