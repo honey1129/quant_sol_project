@@ -109,10 +109,11 @@ class OKXClient:
                     log_error(f"❌ 保证金不足: 需 {required_margin} USDT，可用 {available_usdt} USDT，取消下单")
                     return False
 
+                # ✅ 直接读取写死的合约参数
                 lot_size = config.LOT_SIZE
                 tick_size = config.TICK_SIZE
 
-                # ✅ 合法计算下单数量
+                # ✅ 合法计算下单数量（注意保险性精度控制）
                 order_value = usd_amount * leverage
                 raw_size = order_value / market_price
                 size = math.floor(raw_size / lot_size) * lot_size
@@ -137,8 +138,10 @@ class OKXClient:
                         f"✅ 下单成功: {side} {posSide} 杠杆: {leverage}x, 本金: {usd_amount} USD, 下单数量: {size} {config.SYMBOL}, 订单ID: {order_id}")
                     return True
                 else:
-                    error_code = result['data'][0].get('sCode', '')
-                    error_msg = result['data'][0].get('sMsg', '')
+                    # ✅ 保险：防止无 data 崩溃
+                    error_data = result.get('data', [{}])[0]
+                    error_code = error_data.get('sCode', '')
+                    error_msg = error_data.get('sMsg', '')
                     log_error(f"❌ 下单失败: 错误码 {error_code}, 原因: {error_msg}")
                     time.sleep(sleep_sec)
 
