@@ -173,12 +173,14 @@ class OKXClient:
     def close_short(self, usd_amount, leverage):
         self.place_order_with_leverage("buy", "short", usd_amount, leverage)
 
-
-    def get_price(self,max_retry=3, sleep_sec=1):
+    def get_price(self, max_retry=3, sleep_sec=1):
         for attempt in range(max_retry):
             try:
                 data = self.market_api.get_ticker(instId=config.SYMBOL)
-                last_price = float(data['data'][0]['last'])
+                price_raw = data['data'][0].get('last', '0')
+                if price_raw in ['', None]:
+                    raise Exception("❌ last价格字段为空")
+                last_price = float(price_raw)
                 return last_price
             except Exception as e:
                 log_error(f"⚠ 获取价格失败，第{attempt + 1}次重试: {e}")
