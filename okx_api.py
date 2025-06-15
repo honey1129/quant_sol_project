@@ -14,21 +14,7 @@ class OKXClient:
         self.trade_api = Trade.TradeAPI(config.OKX_API_KEY, config.OKX_SECRET, config.OKX_PASSWORD, use_server_time=True, flag=config.USE_SERVER)
         self.market_api = Market.MarketAPI(config.OKX_API_KEY, config.OKX_SECRET, config.OKX_PASSWORD, use_server_time=True, flag=config.USE_SERVER)
         self.public_api = Public.PublicAPI(config.OKX_API_KEY, config.OKX_SECRET, config.OKX_PASSWORD, use_server_time=True,flag=config.USE_SERVER)
-        self.instrument_cache = self.get_instrument_info()
 
-    def get_instrument_info(self):
-        for i in range(3):
-            instrument = self.public_api.get_instruments(instType="SWAP", instId=config.SYMBOL)
-            if instrument['data']:
-                lotSz = instrument['data'][0]['lotSz']
-                tickSz = instrument['data'][0]['tickSz']
-                if lotSz and tickSz:
-                    return {
-                        "lotSz": float(lotSz),
-                        "tickSz": float(tickSz)
-                    }
-            time.sleep(1)
-        raise Exception("❌ 无法获取有效合约信息")
 
     def get_account_balance(self):
         result = self.account_api.get_account_balance()
