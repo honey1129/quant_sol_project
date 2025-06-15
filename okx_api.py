@@ -23,13 +23,19 @@ class OKXClient:
     def get_position(self):
         positions = self.account_api.get_positions(instType='SWAP', instId=config.SYMBOL)['data']
         for pos in positions:
-            size = float(pos['pos'])
-            avg_price = float(pos['avgPx']) if pos['avgPx'] else 0
+            size_raw = pos.get('pos', '0')
+            avgPx_raw = pos.get('avgPx', '0')
+
+            # 强保险空值处理
+            size = float(size_raw) if size_raw not in ['', None] else 0.0
+            avg_price = float(avgPx_raw) if avgPx_raw not in ['', None] else 0.0
+
             if size > 0:
                 return 'long', size, avg_price
             elif size < 0:
                 return 'short', abs(size), avg_price
-        return 'none', 0, 0
+
+        return 'none', 0.0, 0.0
 
     def fetch_ohlcv(self,symbol=config.SYMBOL, bar="1H", max_limit=2000, max_retry=3, sleep_sec=1):
         """
