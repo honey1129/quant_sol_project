@@ -21,7 +21,7 @@ def train_job():
 
 def backtest_job():
     logging.info("🟢 开始回测任务")
-    subprocess.run(['python', 'sandbox.py'])
+    subprocess.run(['python', 'backtest.py'])
     logging.info("✅ 回测任务完成")
 
 def live_trade_job():

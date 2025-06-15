@@ -1,30 +1,13 @@
-import time
-import pandas as pd
 import joblib
 import traceback
-from utils import add_indicators, get_feature_columns, send_telegram  # 你已有的工具函数
-import config
 from utils import log_info, log_error
+import config
 from okx_api import OKXClient
+from ml_feature_engineering import merge_multi_period_features
+from position_manager import PositionManager
+
 client = OKXClient()
-
-
-# 获取历史K线数据
-def fetch_ohlcv(max_retry=3, sleep_sec=1):
-    for attempt in range(max_retry):
-        try:
-            raw_data = client.market_api.get_candlesticks(instId=config.SYMBOL, bar='1H', limit=100)['data']
-            raw_data = list(reversed(raw_data))
-            df = pd.DataFrame(raw_data)
-            df = df.iloc[:, :6]
-            df.columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
-            df['timestamp'] = pd.to_datetime(df['timestamp'].astype(float), unit='ms')
-            df[['open', 'high', 'low', 'close', 'volume']] = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
-            return df
-        except Exception as e:
-            log_error(f"⚠ 拉取K线失败，第{attempt+1}次重试: {e}")
-            time.sleep(sleep_sec)
-    raise Exception("❌ 超过最大重试次数，fetch_ohlcv() 彻底失败")
+position_manager = PositionManager()
 
 # 风控逻辑（止盈止损）
 def risk_control(side, entry_price, size):
@@ -32,73 +15,87 @@ def risk_control(side, entry_price, size):
 
     change_pct = (market_price - entry_price) / entry_price
     pnl_pct = change_pct if side == 'long' else -change_pct
-
     profit_amount = (market_price - entry_price) * size
 
     if pnl_pct >= config.TAKE_PROFIT:
         if side == 'long':
-            client.close_long(entry_price * size,config.LEVERAGE)
+            client.close_long(size, config.LEVERAGE)
         else:
-            client.close_short(entry_price * size,config.LEVERAGE)
-        log_info(f"✅ {side.upper()} 仓止盈平仓，收益: {pnl_pct * 100:.2f}%, 盈利金额: {profit_amount:.2f} USD")
+            client.close_short(size, config.LEVERAGE)
+        log_info(f"✅ {side.upper()} 仓止盈平仓，收益率: {pnl_pct * 100:.2f}%, 盈利金额: {profit_amount:.2f} USD")
 
     elif pnl_pct <= -config.STOP_LOSS:
         if side == 'long':
-            client.close_long(entry_price * size,config.LEVERAGE)
+            client.close_long(size, config.LEVERAGE)
         else:
-            client.close_short(entry_price * size,config.LEVERAGE)
-        log_info(f"❌ {side.upper()} 仓止损平仓，收益: {pnl_pct * 100:.2f}%, 盈亏金额: {profit_amount:.2f} USD")
-
+            client.close_short(size, config.LEVERAGE)
+        log_info(f"❌ {side.upper()} 仓止损平仓，收益率: {pnl_pct * 100:.2f}%, 盈亏金额: {profit_amount:.2f} USD")
     else:
-        log_info(
-            f"🔄 {side.upper()} 仓监控中，无平仓动作。当前收益: {pnl_pct * 100:.2f}%, 当前盈亏: {profit_amount:.2f} USD")
+        log_info(f"🔄 {side.upper()} 仓监控中，无平仓动作。当前收益率: {pnl_pct * 100:.2f}%, 当前盈亏: {profit_amount:.2f} USD")
 
+# 多周期机器学习模型预测信号
+def predict_signal(model):
+    data_dict = client.fetch_data()
+    merged_df = merge_multi_period_features(data_dict)
+    X_live = merged_df.drop(columns=['future_return', 'target'], errors='ignore').iloc[-1:].astype(float)
 
-# 模型预测信号
-def predict_signal(model, df):
-    features = get_feature_columns()
-    X_live = df[features].iloc[-1:].astype(float)
     prob = model.predict_proba(X_live)[0]
     long_prob, short_prob = prob[1], prob[0]
 
     log_info(f"实时预测 - 多: {long_prob:.3f} 空: {short_prob:.3f}")
 
+    return long_prob, short_prob
+
+# 仓位动态调整核心逻辑
+def adjust_position(model):
+    long_prob, short_prob = predict_signal(model)
+    account_balance = client.get_account_balance()
+    total_balance = float(account_balance['data'][0]['totalEq'])
+
+    side, current_size, entry_price = client.get_position()
+    current_value = current_size * entry_price  # 当前持仓价值
+
+    # 判断信号方向
     if long_prob > config.THRESHOLD_LONG:
-        return 'long'
+        target_ratio = position_manager.calculate_target_ratio(long_prob)
+        delta = position_manager.calculate_adjust_amount(total_balance, current_value, target_ratio)
+
+        if delta > 0:
+            client.open_long(delta, config.LEVERAGE)
+            log_info(f"📈 动态加多仓: {delta} USD")
+        elif delta < 0:
+            client.close_long(abs(delta), config.LEVERAGE)
+            log_info(f"📉 动态减多仓: {abs(delta)} USD")
+        else:
+            log_info("当前多仓已达目标仓位，无需调整。")
+
     elif short_prob > config.THRESHOLD_SHORT:
-        return 'short'
+        target_ratio = position_manager.calculate_target_ratio(short_prob)
+        delta = position_manager.calculate_adjust_amount(total_balance, current_value, target_ratio)
+
+        if delta > 0:
+            client.open_short(delta, config.LEVERAGE)
+            log_info(f"📈 动态加空仓: {delta} USD")
+        elif delta < 0:
+            client.close_short(abs(delta), config.LEVERAGE)
+            log_info(f"📉 动态减空仓: {abs(delta)} USD")
+        else:
+            log_info("当前空仓已达目标仓位，无需调整。")
     else:
-        return 'neutral'
+        log_info("当前无明显信号，暂不调整仓位。")
 
-# 下单逻辑
-
-def place_order(signal):
-
-    if signal == 'long':
-        client.open_long(config.POSITION_SIZE,config.LEVERAGE)
-
-    elif signal == 'short':
-        client.open_short(config.POSITION_SIZE,config.LEVERAGE)
-
-    else:
-        log_info("当前无信号，继续观望。")
-
-# 主逻辑
+# 主逻辑入口
 def run():
     try:
-        df = fetch_ohlcv()  # 你已有完整的K线数据抓取逻辑
-        df = add_indicators(df)
         model = joblib.load(config.MODEL_PATH)
-        account_balance  = client.get_account_balance()
-        log_info(f"📊 当前账户余额: {account_balance['data'][0]['totalEq']} USDT")
-        side, size, entry_price = client.get_position()
-        log_info(f"📊 当前仓位: {side} | 仓位: {size} | 开仓价: {entry_price}")
 
+        # 风控模块仍然保留
+        side, size, entry_price = client.get_position()
         if side != 'none':
             risk_control(side, entry_price, size)
-        else:
-            signal = predict_signal(model, df)
-            place_order(signal)
+
+        # 核心动态仓位管理模块
+        adjust_position(model)
 
     except Exception as e:
         log_error(f"实盘运行异常: {e}")
