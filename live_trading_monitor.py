@@ -40,7 +40,7 @@ def predict_signal(model):
     merged_df = merge_multi_period_features(data_dict)
 
     # 核心变化在这里：实盘加载训练时保存的特征列
-    feature_cols = joblib.load('model/feature_list.pkl')
+    feature_cols = joblib.load('models/feature_list.pkl')
 
     # 只取训练时使用过的特征列，保持和训练时完全一致
     X_live = merged_df[feature_cols].iloc[-1:].astype(float)
