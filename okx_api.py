@@ -15,9 +15,26 @@ class OKXClient:
         self.market_api = Market.MarketAPI(config.OKX_API_KEY, config.OKX_SECRET, config.OKX_PASSWORD, use_server_time=True, flag=config.USE_SERVER)
         self.public_api = Public.PublicAPI(config.OKX_API_KEY, config.OKX_SECRET, config.OKX_PASSWORD, use_server_time=True,flag=config.USE_SERVER)
 
-
     def get_account_balance(self):
         result = self.account_api.get_account_balance()
+
+        # 防御性提取 totalEq（全账户权益）
+        total_eq_raw = result['data'][0].get('totalEq', '0')
+        total_eq = float(total_eq_raw) if total_eq_raw not in ['', None] else 0.0
+        result['data'][0]['totalEq'] = total_eq
+
+        # ✅ 重点：提取 USDT 子账户详情
+        details = result['data'][0].get('details', [])
+        usdt_detail = next((d for d in details if d.get('ccy') == 'USDT'), None)
+
+        if usdt_detail:
+            avail_eq_raw = usdt_detail.get('availEq', '0')
+            avail_eq = float(avail_eq_raw) if avail_eq_raw not in ['', None] else 0.0
+        else:
+            avail_eq = 0.0
+
+        result['data'][0]['availEq'] = avail_eq  # 重写主返回的 availEq 供后续兼容逻辑
+
         return result
 
     def get_position(self):

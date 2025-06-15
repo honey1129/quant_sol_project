@@ -55,8 +55,9 @@ def predict_signal(model):
 def adjust_position(model):
     long_prob, short_prob = predict_signal(model)
     account_balance = client.get_account_balance()
-    total_balance = float(account_balance['data'][0]['totalEq'])
-
+    details = account_balance['data'][0]['details']
+    usdt_detail = next((d for d in details if d['ccy'] == 'USDT'), None)
+    total_balance = float(usdt_detail['eq']) if usdt_detail else 0.0
     side, current_size, entry_price = client.get_position()
     current_value = current_size * entry_price  # 当前持仓价值
 

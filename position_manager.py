@@ -20,7 +20,7 @@ class PositionManager:
         """
         根据账户余额、当前持仓金额、目标仓位比例，计算加减仓金额
         """
-        target_amount = account_balance * config.LEVERAGE * target_ratio
+        target_amount = account_balance * target_ratio
         delta = target_amount - current_position_value
 
         # 按照调仓单位调整，防止频繁小幅调整
