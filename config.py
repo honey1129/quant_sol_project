@@ -13,6 +13,9 @@ OKX_PASSWORD = 'Liu*7046937'
 # 是否使用模拟盘 (0为实盘，1为模拟盘)
 USE_SERVER = "1"
 
+# 合约下单单位与价格精度
+LOT_SIZE = 0.01   # 最小下单数量 (单位: 合约张数)
+TICK_SIZE = 0.01  # 最小价格变动 (单位: USD)
 
 USE_SERVER_TIME = True
 

@@ -14,6 +14,21 @@ class OKXClient:
         self.trade_api = Trade.TradeAPI(config.OKX_API_KEY, config.OKX_SECRET, config.OKX_PASSWORD, use_server_time=True, flag=config.USE_SERVER)
         self.market_api = Market.MarketAPI(config.OKX_API_KEY, config.OKX_SECRET, config.OKX_PASSWORD, use_server_time=True, flag=config.USE_SERVER)
         self.public_api = Public.PublicAPI(config.OKX_API_KEY, config.OKX_SECRET, config.OKX_PASSWORD, use_server_time=True,flag=config.USE_SERVER)
+        self.instrument_cache = self.get_instrument_info()
+
+    def get_instrument_info(self):
+        for i in range(3):
+            instrument = self.public_api.get_instruments(instType="SWAP", instId=config.SYMBOL)
+            if instrument['data']:
+                lotSz = instrument['data'][0]['lotSz']
+                tickSz = instrument['data'][0]['tickSz']
+                if lotSz and tickSz:
+                    return {
+                        "lotSz": float(lotSz),
+                        "tickSz": float(tickSz)
+                    }
+            time.sleep(1)
+        raise Exception("❌ 无法获取有效合约信息")
 
     def get_account_balance(self):
         result = self.account_api.get_account_balance()
@@ -108,15 +123,8 @@ class OKXClient:
                     log_error(f"❌ 保证金不足: 需 {required_margin} USDT，可用 {available_usdt} USDT，取消下单")
                     return False
 
-                # ✅ 实时获取合约信息 (增加API返回稳定性保护)
-                instrument = self.public_api.get_instruments(instType="SWAP", instId=config.SYMBOL)
-
-                if not instrument['data'] or not instrument['data'][0].get('lotSz') or not instrument['data'][0].get(
-                        'tickSz'):
-                    raise Exception("❌ 获取合约信息失败，API返回空值或缺失字段")
-
-                lot_size = float(instrument['data'][0]['lotSz'])
-                tick_size = float(instrument['data'][0]['tickSz'])
+                lot_size = config.LOT_SIZE
+                tick_size = config.TICK_SIZE
 
                 # ✅ 合法计算下单数量
                 order_value = usd_amount * leverage
