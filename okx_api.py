@@ -99,18 +99,24 @@ class OKXClient:
             try:
                 market_price = self.get_price()
 
-                # 关键1：实时获取合约信息
+                # 关键：保证金安全校验
+                account_info = self.get_account_balance()
+                available_usdt = float(account_info['data'][0]['availEq'])
+                required_margin = usd_amount  # 本金即所需保证金 (cross模式)
+
+                if required_margin > available_usdt:
+                    log_error(f"❌ 保证金不足：需要 {required_margin} USDT，可用 {available_usdt} USDT，取消下单")
+                    return False
+
+                # 实时获取合约信息
                 instrument = self.public_api.get_instruments(instType="SWAP", instId=config.SYMBOL)
                 lot_size = float(instrument['data'][0]['lotSz'])
                 tick_size = float(instrument['data'][0]['tickSz'])
 
-                # 计算目标下单币数量
                 order_value = usd_amount * leverage
                 raw_size = order_value / market_price
-
-                # 关键2：做合法精度修正 (向下取整)
                 size = math.floor(raw_size / lot_size) * lot_size
-                size = round(size, 6)  # 保险性控制小数位
+                size = round(size, 6)
 
                 if size < lot_size:
                     raise Exception(f"⚠ 下单失败：换算后 size = {size} 小于最小下单单位 lot_size = {lot_size}")
