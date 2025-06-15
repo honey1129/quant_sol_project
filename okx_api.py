@@ -102,6 +102,11 @@ class OKXClient:
         return data_dict
 
     def place_order_with_leverage(self, side, posSide, usd_amount, leverage, max_retry=3, sleep_sec=1):
+        if not isinstance(usd_amount, (int, float)):
+            try:
+                usd_amount = float(usd_amount)
+            except Exception:
+                raise Exception(f"❌ usd_amount 类型异常: 传入了无法转换的值 '{usd_amount}'")
         for attempt in range(max_retry):
             try:
                 market_price = self.get_price()

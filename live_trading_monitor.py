@@ -63,7 +63,7 @@ def adjust_position(model):
     # 判断信号方向
     if long_prob > config.THRESHOLD_LONG:
         target_ratio = position_manager.calculate_target_ratio(long_prob)
-        delta = position_manager.calculate_adjust_amount(total_balance, current_value, target_ratio)
+        delta = float(position_manager.calculate_adjust_amount(total_balance, current_value, target_ratio) or 0)
 
         if delta > 0:
             client.open_long(delta, config.LEVERAGE)
@@ -76,7 +76,7 @@ def adjust_position(model):
 
     elif short_prob > config.THRESHOLD_SHORT:
         target_ratio = position_manager.calculate_target_ratio(short_prob)
-        delta = position_manager.calculate_adjust_amount(total_balance, current_value, target_ratio)
+        delta = float(position_manager.calculate_adjust_amount(total_balance, current_value, target_ratio) or 0)
 
         if delta > 0:
             client.open_short(delta, config.LEVERAGE)
