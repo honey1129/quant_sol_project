@@ -83,5 +83,9 @@ def train():
     joblib.dump(model, config.MODEL_PATH)
     print(f"✅ 模型已保存至: {config.MODEL_PATH}")
 
+    # 【新增】保存训练时使用的特征列表
+    joblib.dump(feature_cols, 'model/feature_list.pkl')
+    print("✅ 特征列已保存至: model/feature_list.pkl")
+
 if __name__ == '__main__':
     train()

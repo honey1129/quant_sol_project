@@ -34,10 +34,16 @@ def risk_control(side, entry_price, size):
         log_info(f"🔄 {side.upper()} 仓监控中，无平仓动作。当前收益率: {pnl_pct * 100:.2f}%, 当前盈亏: {profit_amount:.2f} USD")
 
 # 多周期机器学习模型预测信号
+d# 多周期机器学习模型预测信号
 def predict_signal(model):
     data_dict = client.fetch_data()
     merged_df = merge_multi_period_features(data_dict)
-    X_live = merged_df.drop(columns=['future_return', 'target'], errors='ignore').iloc[-1:].astype(float)
+
+    # 核心变化在这里：实盘加载训练时保存的特征列
+    feature_cols = joblib.load('model/feature_list.pkl')
+
+    # 只取训练时使用过的特征列，保持和训练时完全一致
+    X_live = merged_df[feature_cols].iloc[-1:].astype(float)
 
     prob = model.predict_proba(X_live)[0]
     long_prob, short_prob = prob[1], prob[0]
