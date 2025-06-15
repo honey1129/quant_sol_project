@@ -99,28 +99,35 @@ class OKXClient:
             try:
                 market_price = self.get_price()
 
-                # 关键：保证金安全校验
+                # ✅ 资金安全校验 (账户可用保证金检查)
                 account_info = self.get_account_balance()
                 available_usdt = float(account_info['data'][0]['availEq'])
-                required_margin = usd_amount  # 本金即所需保证金 (cross模式)
+                required_margin = usd_amount  # cross模式下，本金即为保证金需求
 
                 if required_margin > available_usdt:
-                    log_error(f"❌ 保证金不足：需要 {required_margin} USDT，可用 {available_usdt} USDT，取消下单")
+                    log_error(f"❌ 保证金不足: 需 {required_margin} USDT，可用 {available_usdt} USDT，取消下单")
                     return False
 
-                # 实时获取合约信息
+                # ✅ 实时获取合约信息 (增加API返回稳定性保护)
                 instrument = self.public_api.get_instruments(instType="SWAP", instId=config.SYMBOL)
+
+                if not instrument['data'] or not instrument['data'][0].get('lotSz') or not instrument['data'][0].get(
+                        'tickSz'):
+                    raise Exception("❌ 获取合约信息失败，API返回空值或缺失字段")
+
                 lot_size = float(instrument['data'][0]['lotSz'])
                 tick_size = float(instrument['data'][0]['tickSz'])
 
+                # ✅ 合法计算下单数量
                 order_value = usd_amount * leverage
                 raw_size = order_value / market_price
                 size = math.floor(raw_size / lot_size) * lot_size
                 size = round(size, 6)
 
                 if size < lot_size:
-                    raise Exception(f"⚠ 下单失败：换算后 size = {size} 小于最小下单单位 lot_size = {lot_size}")
+                    raise Exception(f"⚠ 下单失败: 换算后 size = {size} 小于最小下单单位 lot_size = {lot_size}")
 
+                # ✅ 发单
                 result = self.trade_api.place_order(
                     instId=config.SYMBOL,
                     tdMode="cross",
@@ -136,13 +143,16 @@ class OKXClient:
                         f"✅ 下单成功: {side} {posSide} 杠杆: {leverage}x, 本金: {usd_amount} USD, 下单数量: {size} {config.SYMBOL}, 订单ID: {order_id}")
                     return True
                 else:
-                    error_code = result['data'][0]['sCode']
-                    error_msg = result['data'][0]['sMsg']
+                    error_code = result['data'][0].get('sCode', '')
+                    error_msg = result['data'][0].get('sMsg', '')
                     log_error(f"❌ 下单失败: 错误码 {error_code}, 原因: {error_msg}")
                     time.sleep(sleep_sec)
+
             except Exception as e:
                 log_error(f"⚠ 下单异常({attempt + 1}): {e}")
                 time.sleep(sleep_sec)
+
+        # 超过重试次数后失败
         raise Exception("❌ 超过最大重试次数，下单失败")
 
 
