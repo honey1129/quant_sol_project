@@ -1,8 +1,9 @@
+import os
 import joblib
 import traceback
 import numpy as np
 from core.signal_engine import SignalSmoother, bayesian_weighted_predict, load_models
-from utils.utils import log_info, log_error
+from utils.utils import log_info, log_error, BASE_DIR
 from config import config
 from core.okx_api import OKXClient
 from core.ml_feature_engineering import merge_multi_period_features, add_advanced_features
@@ -11,9 +12,7 @@ from core.position_manager import PositionManager
 # 初始化对象
 client = OKXClient()
 position_manager = PositionManager()
-
-# 初始化信号平滑器
-smoother = SignalSmoother(alpha=config.SMOOTH_ALPHA)
+smoother = SignalSmoother(alpha=float(config.SMOOTH_ALPHA))  # alpha注意强转为float
 
 # 止盈止损逻辑
 def risk_control(side, entry_price, size):
@@ -43,13 +42,15 @@ def predict_signal(model_dict, model_weights):
     data_dict = client.fetch_data()
     merged_df = merge_multi_period_features(data_dict)
     merged_df = add_advanced_features(merged_df)
-    feature_cols = joblib.load(config.FEATURE_LIST_PATH)
+
+    feature_path = os.path.join(BASE_DIR, config.FEATURE_LIST_PATH)
+    feature_cols = joblib.load(feature_path)
+
     prob = bayesian_weighted_predict(model_dict, merged_df, feature_cols, model_weights)
     smoothed_prob = smoother.smooth(prob)
 
     long_prob, short_prob = smoothed_prob[1], smoothed_prob[0]
     money_flow_ratio = merged_df['money_flow_ratio'].iloc[-1]
-
     merged_df['log_return'] = np.log(merged_df['5m_close'] / merged_df['5m_close'].shift(1))
     volatility = merged_df['log_return'].rolling(288).std().iloc[-1] * np.sqrt(288)
 
@@ -67,8 +68,8 @@ def adjust_position(long_prob, short_prob, money_flow_ratio, volatility):
 
     side, current_size, entry_price = client.get_position()
     current_value = current_size * entry_price if entry_price > 0 else 0
-    max_position_value = total_balance * config.MAX_POSITION_RATIO
-    MIN_ADJUST_AMOUNT = config.MIN_ADJUST_AMOUNT
+    max_position_value = total_balance * float(config.MAX_POSITION_RATIO)
+    MIN_ADJUST_AMOUNT = float(config.MIN_ADJUST_AMOUNT)
 
     # 信号反转平仓逻辑
     if long_prob > config.THRESHOLD_LONG and side == 'short':
@@ -124,10 +125,11 @@ def adjust_position(long_prob, short_prob, money_flow_ratio, volatility):
     else:
         log_info("📊 当前无明显信号，仓位保持不变")
 
-# 主运行函数
+# 主运行入口
 def run():
     try:
-        model_dict = load_models(config.MODEL_PATHS)
+        model_paths = {name: os.path.join(BASE_DIR, path) for name, path in config.MODEL_PATHS.items()}
+        model_dict = load_models(model_paths)
         model_weights = config.MODEL_WEIGHTS
 
         side, size, entry_price = client.get_position()

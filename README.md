@@ -86,7 +86,7 @@ python train/train.py
 ## 📊 策略回测
 直接运行：
 ```bash
-python backtest/backtest.py
+python -m backtest.backtest
 ```
 * 支持多周期全量回测
 * 自动加载训练好的模型和特征
@@ -100,39 +100,6 @@ python run/live_trading_monitor.py
 ```
 ---
 
-## 🚀 部署流程
-
-### 1️⃣ 训练模型
-
-先使用 `train/train.py` 完成机器学习训练：
-
-```bash
-python train/train.py
-```
-
-训练好的模型将保存在：
-
-```bash
-models/model_okx.pkl
-```
-
-### 2️⃣ 回测验证（可选）
-
-使用 `backtest/backtest.py` 进行策略回测与压力测试：
-
-```bash
-python backtest/backtest.py
-```
-
-### 3️⃣ 启动实盘系统
-
-正式实盘轮询执行逻辑：
-
-```bash
-python run/live_trading_monitor.py
-```
-
----
 
 ## ⚠ 注意事项
 

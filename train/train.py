@@ -4,20 +4,21 @@ import joblib
 import lightgbm as lgb
 from sklearn.model_selection import train_test_split
 from sklearn.utils import resample
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, classification_report
 from config import config
 import os
+import xgboost as xgb
 
 from core.ml_feature_engineering import merge_multi_period_features, add_advanced_features
 from core.okx_api import OKXClient
 from utils.utils import log_info, BASE_DIR
 
 # 统一拼接绝对路径
-model_path = os.path.join(BASE_DIR, config.MODEL_PATH)
+lgb_path = os.path.join(BASE_DIR,config.MODEL_PATHS.get("lgb_v1"))
+xgb_path = os.path.join(BASE_DIR, config.MODEL_PATHS.get("xgb_v1"))
+rf_path  = os.path.join(BASE_DIR, config.MODEL_PATHS.get("rf_v1"))
 feature_path = os.path.join(BASE_DIR, config.FEATURE_LIST_PATH)
-
-# 自动创建模型目录
-os.makedirs(os.path.dirname(model_path), exist_ok=True)
 
 def create_labels(df, future_window=5, threshold=0.002):
     df['future_return'] = df['5m_close'].shift(-future_window) / df['5m_close'] - 1
@@ -51,7 +52,8 @@ def train():
     X_bal, y_bal = balance_samples(X, y)
     X_train, X_test, y_train, y_test = train_test_split(X_bal, y_bal, test_size=0.2, shuffle=False)
 
-    model = lgb.LGBMClassifier(
+    # LightGBM
+    lgb_model = lgb.LGBMClassifier(
         n_estimators=500,
         learning_rate=0.02,
         max_depth=6,
@@ -65,16 +67,31 @@ def train():
         random_state=42
     )
 
-    model.fit(X_train, y_train)
+    lgb_model.fit(X_train, y_train)
+    joblib.dump(lgb_model, lgb_path)
+    log_info(f"✅ LGB 模型已保存至: {lgb_path}")
 
-    y_pred = model.predict(X_test)
+    # XGBoost
+    xgb_model = xgb.XGBClassifier(
+        n_estimators=500, learning_rate=0.02, max_depth=6,
+        subsample=0.8, colsample_bytree=0.8, reg_alpha=0.1, reg_lambda=1.0,
+        random_state=42
+    )
+    xgb_model.fit(X_train, y_train)
+    joblib.dump(xgb_model, xgb_path)
+    log_info(f"✅ XGB 模型已保存至: {xgb_path}")
+
+    # Random Forest
+    rf_model = RandomForestClassifier(n_estimators=300, max_depth=6, random_state=42)
+    rf_model.fit(X_train, y_train)
+    joblib.dump(rf_model, rf_path)
+    log_info(f"✅ RF 模型已保存至: {rf_path}")
+
+    # 评估示例（以LightGBM为例）
+    y_pred = lgb_model.predict(X_test)
     acc = accuracy_score(y_test, y_pred)
     log_info(f"✅ 模型准确率: {acc:.4f}")
     log_info(f"分类报告:\n{classification_report(y_test, y_pred, digits=4)}")
-
-    # ✅ 用绝对路径存储模型与特征文件
-    joblib.dump(model, model_path)
-    log_info(f"✅ 模型已保存至: {model_path}")
 
     joblib.dump(feature_cols, feature_path)
     log_info(f"✅ 特征列已保存至: {feature_path}")
