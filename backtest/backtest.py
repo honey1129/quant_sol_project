@@ -2,6 +2,7 @@ import joblib
 import traceback
 import time
 import numpy as np
+import pandas as pd
 from tqdm import tqdm
 from core import position_manager, okx_api, ml_feature_engineering, signal_engine
 from config import config
@@ -96,6 +97,8 @@ class Backtester:
         复用实盘信号融合逻辑，保持一致性
         """
         X_row = row[self.feature_cols].values.reshape(1, -1).astype(float)
+        X_row = pd.DataFrame(X_row, columns=self.feature_cols)
+
         weighted_sum = np.zeros(2)
         total_weight = sum(self.model_weights.values())
 
