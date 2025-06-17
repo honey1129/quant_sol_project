@@ -118,7 +118,7 @@ class OKXClient:
             time.sleep(0.3)
         return data_dict
 
-    def place_order_with_leverage(self, side, posSide, usd_amount, leverage, max_retry=3, sleep_sec=1):
+    def place_order_with_leverage(self, side, posSide, usd_amount, leverage,reduce_only=False, max_retry=3, sleep_sec=1):
         if not isinstance(usd_amount, (int, float)):
             try:
                 usd_amount = float(usd_amount)
@@ -157,7 +157,8 @@ class OKXClient:
                     side=side,
                     posSide=posSide,
                     ordType="market",
-                    sz=str(size)
+                    sz=str(size),
+                    reduceOnly=reduce_only
                 )
 
                 if result['code'] == "0":
@@ -184,16 +185,16 @@ class OKXClient:
 
     ### 封装开仓/平仓逻辑（实盘高复用接口）
     def open_long(self, usd_amount, leverage):
-        self.place_order_with_leverage("buy", "long", usd_amount, leverage)
+        self.place_order_with_leverage("buy", "long", usd_amount, leverage,reduce_only=False)
 
     def open_short(self, usd_amount, leverage):
-        self.place_order_with_leverage("sell", "short", usd_amount, leverage)
+        self.place_order_with_leverage("sell", "short", usd_amount, leverage,reduce_only=True)
 
     def close_long(self, usd_amount, leverage):
-        self.place_order_with_leverage("sell", "long", usd_amount, leverage)
+        self.place_order_with_leverage("sell", "long", usd_amount, leverage,reduce_only=True)
 
     def close_short(self, usd_amount, leverage):
-        self.place_order_with_leverage("buy", "short", usd_amount, leverage)
+        self.place_order_with_leverage("buy", "short", usd_amount, leverage,reduce_only=False)
 
     def get_price(self, max_retry=3, sleep_sec=1):
         for attempt in range(max_retry):
