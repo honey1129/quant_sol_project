@@ -16,6 +16,10 @@ smoother = SignalSmoother(alpha=float(config.SMOOTH_ALPHA))  # alpha注意强转
 
 # 止盈止损逻辑
 def risk_control(side, entry_price, size):
+    if size == 0:
+        log_info("当前无持仓，跳过风控平仓逻辑")
+        return
+
     market_price = client.get_price()
     change_pct = (market_price - entry_price) / entry_price
     pnl_pct = change_pct if side == 'long' else -change_pct
