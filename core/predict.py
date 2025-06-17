@@ -3,6 +3,8 @@
 import os
 import joblib
 import numpy as np
+import pandas as pd
+
 from config import config
 from core.ml_feature_engineering import merge_multi_period_features
 from core.okx_api import OKXClient
@@ -23,6 +25,7 @@ class MultiPeriodSignalPredictor:
         # 获取最近一行数据
         feature_cols = joblib.load(os.path.join(BASE_DIR, config.FEATURE_LIST_PATH))
         X_live = merged_df[feature_cols].iloc[-1:].astype(float)
+        X_live = pd.DataFrame(X_live, columns=feature_cols)
 
         # 多模型融合预测
         weighted_sum = np.zeros(2)

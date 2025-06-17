@@ -1,6 +1,8 @@
 import os
 import numpy as np
 import joblib
+import pandas as pd
+
 from config import config
 from utils.utils import BASE_DIR
 
@@ -19,6 +21,8 @@ def load_models(model_paths):
 # ============================
 def ensemble_predict(models, merged_df, feature_cols):
     X_live = merged_df[feature_cols].iloc[-1:].astype(float)
+    X_live = pd.DataFrame(X_live, columns=feature_cols)  # ✅ 加入这一行保证 feature names 一致
+
     predictions = []
 
     for name, model in models.items():
@@ -33,6 +37,7 @@ def ensemble_predict(models, merged_df, feature_cols):
 # ============================
 def bayesian_weighted_predict(models, merged_df, feature_cols, model_weights):
     X_live = merged_df[feature_cols].iloc[-1:].astype(float)
+    X_live = pd.DataFrame(X_live, columns=feature_cols)  # ✅ 加入这一行保证 feature names 一致
     weighted_sum = np.zeros(2)
     total_weight = sum(model_weights.values())
 
