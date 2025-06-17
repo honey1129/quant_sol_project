@@ -15,31 +15,38 @@ position_manager = PositionManager()
 smoother = SignalSmoother(alpha=float(config.SMOOTH_ALPHA))  # alpha注意强转为float
 
 # 止盈止损逻辑
-def risk_control(side, entry_price, size):
-    if size == 0:
-        log_info("当前无持仓，跳过风控平仓逻辑")
-        return
-
+def risk_control():
     market_price = client.get_price()
-    change_pct = (market_price - entry_price) / entry_price
-    pnl_pct = change_pct if side == 'long' else -change_pct
-    profit_amount = (market_price - entry_price) * size
-    usd_amount = size * entry_price / config.LEVERAGE
-    if pnl_pct >= config.TAKE_PROFIT:
-        if side == 'long':
-            client.close_long(usd_amount, config.LEVERAGE)
-        else:
-            client.close_short(usd_amount, config.LEVERAGE)
-        log_info(f"✅ {side.upper()} 仓止盈平仓，收益率: {pnl_pct * 100:.2f}%, 盈利金额: {profit_amount:.2f} USD")
+    long_pos, short_pos = client.get_position()
 
-    elif pnl_pct <= -config.STOP_LOSS:
-        if side == 'long':
+    # 多仓风控
+    if long_pos['size'] > 0:
+        entry_price = long_pos['entry_price']
+        size = long_pos['size']
+        pnl_pct = (market_price - entry_price) / entry_price
+        usd_amount = size * entry_price / config.LEVERAGE
+
+        if pnl_pct >= config.TAKE_PROFIT:
             client.close_long(usd_amount, config.LEVERAGE)
-        else:
+            log_info(f"✅ LONG 止盈平仓，收益率: {pnl_pct*100:.2f}%")
+        elif pnl_pct <= -config.STOP_LOSS:
+            client.close_long(usd_amount, config.LEVERAGE)
+            log_info(f"❌ LONG 止损平仓，收益率: {pnl_pct*100:.2f}%")
+
+    # 空仓风控
+    if short_pos['size'] > 0:
+        entry_price = short_pos['entry_price']
+        size = short_pos['size']
+        pnl_pct = (entry_price - market_price) / entry_price
+        usd_amount = size * entry_price / config.LEVERAGE
+
+        if pnl_pct >= config.TAKE_PROFIT:
             client.close_short(usd_amount, config.LEVERAGE)
-        log_info(f"❌ {side.upper()} 仓止损平仓，收益率: {pnl_pct * 100:.2f}%, 盈亏金额: {profit_amount:.2f} USD")
-    else:
-        log_info(f"🔄 {side.upper()} 仓监控中，无平仓动作。当前收益率: {pnl_pct * 100:.2f}%, 当前盈亏: {profit_amount:.2f} USD")
+            log_info(f"✅ SHORT 止盈平仓，收益率: {pnl_pct*100:.2f}%")
+        elif pnl_pct <= -config.STOP_LOSS:
+            client.close_short(usd_amount, config.LEVERAGE)
+            log_info(f"❌ SHORT 止损平仓，收益率: {pnl_pct*100:.2f}%")
+
 
 # 预测信号模块
 def predict_signal(model_dict, model_weights):
@@ -66,86 +73,60 @@ def predict_signal(model_dict, model_weights):
 # 仓位调整核心
 def adjust_position(long_prob, short_prob, money_flow_ratio, volatility):
     account_balance = client.get_account_balance()
-    details = account_balance['data'][0]['details']
-    usdt_detail = next((d for d in details if d['ccy'] == 'USDT'), None)
-    total_balance = float(usdt_detail['eq']) if usdt_detail else 0.0
+    usdt_balance = float(account_balance['data'][0]['availEq'])
 
-    side, current_size, entry_price = client.get_position()
-    current_value = current_size * entry_price if entry_price > 0 else 0
-    max_position_value = total_balance * float(config.MAX_POSITION_RATIO)
+    long_pos, short_pos = client.get_position()
+
+    adjusted_balance = position_manager.volatility_adjust_balance(usdt_balance, volatility)
+    max_position_value = usdt_balance * float(config.MAX_POSITION_RATIO)
     MIN_ADJUST_AMOUNT = float(config.MIN_ADJUST_AMOUNT)
 
-    # 信号反转平仓逻辑
-    if long_prob > config.THRESHOLD_LONG and side == 'short':
-        if current_size > 0:
-            principal_amount = current_value / config.LEVERAGE
-            client.close_short(principal_amount, config.LEVERAGE)
-            log_info(f"🔄 信号反转，已平空仓: 本金 {principal_amount} USD")
-        side, current_size, entry_price = 'none', 0, 0
-
-    if short_prob > config.THRESHOLD_SHORT and side == 'long':
-        if current_size > 0:
-            principal_amount = current_value / config.LEVERAGE
-            client.close_long(principal_amount, config.LEVERAGE)
-            log_info(f"🔄 信号反转，已平多仓: 本金 {principal_amount} USD")
-        side, current_size, entry_price = 'none', 0, 0
-
-    current_value = current_size * entry_price if entry_price > 0 else 0
-    adjusted_balance = position_manager.volatility_adjust_balance(total_balance, volatility)
-
-    # 多头逻辑
+    # 多仓逻辑
     if long_prob > config.THRESHOLD_LONG:
         target_ratio = position_manager.calculate_target_ratio(long_prob, money_flow_ratio, volatility)
         target_value = min(adjusted_balance * target_ratio, max_position_value)
-        delta_value = target_value - current_value
+        delta_value = target_value - long_pos['size'] * long_pos['entry_price']
         delta_principal = delta_value / config.LEVERAGE
 
-        if abs(delta_principal) >= MIN_ADJUST_AMOUNT:
-            if delta_principal > 0:
-                client.open_long(delta_principal, config.LEVERAGE)
-                log_info(f"📈 加多仓: {delta_principal} USD 本金")
-            else:
-                client.close_long(abs(delta_principal), config.LEVERAGE)
-                log_info(f"📉 减多仓: {abs(delta_principal)} USD 本金")
-        else:
-            log_info("🟢 多仓已达目标，无需调整")
+        if delta_principal > MIN_ADJUST_AMOUNT:
+            client.open_long(delta_principal, config.LEVERAGE)
+        elif delta_principal < -MIN_ADJUST_AMOUNT:
+            client.close_long(abs(delta_principal), config.LEVERAGE)
 
-    # 空头逻辑
-    elif short_prob > config.THRESHOLD_SHORT:
+    # 空仓逻辑
+    if short_prob > config.THRESHOLD_SHORT:
         target_ratio = position_manager.calculate_target_ratio(short_prob, money_flow_ratio, volatility)
         target_value = min(adjusted_balance * target_ratio, max_position_value)
-        delta_value = target_value - current_value
+        delta_value = target_value - short_pos['size'] * short_pos['entry_price']
         delta_principal = delta_value / config.LEVERAGE
 
-        if abs(delta_principal) >= MIN_ADJUST_AMOUNT:
-            if delta_principal > 0:
-                client.open_short(delta_principal, config.LEVERAGE)
-                log_info(f"📈 加空仓: {delta_principal} USD 本金")
-            else:
-                client.close_short(abs(delta_principal), config.LEVERAGE)
-                log_info(f"📉 减空仓: {abs(delta_principal)} USD 本金")
-        else:
-            log_info("🟢 空仓已达目标，无需调整")
-    else:
-        log_info("📊 当前无明显信号，仓位保持不变")
+        if delta_principal > MIN_ADJUST_AMOUNT:
+            client.open_short(delta_principal, config.LEVERAGE)
+        elif delta_principal < -MIN_ADJUST_AMOUNT:
+            client.close_short(abs(delta_principal), config.LEVERAGE)
+
 
 # 主运行入口
 def run():
     try:
+        # 1. 模型加载
         model_paths = {name: os.path.join(BASE_DIR, path) for name, path in config.MODEL_PATHS.items()}
         model_dict = load_models(model_paths)
         model_weights = config.MODEL_WEIGHTS
 
-        side, size, entry_price = client.get_position()
-        if side != 'none':
-            risk_control(side, entry_price, size)
+        # 2. 风控止盈止损（先平仓，避免后续重复调整）
+        risk_control()
 
+        # 3. 获取新预测信号
         long_prob, short_prob, money_flow_ratio, volatility = predict_signal(model_dict, model_weights)
+
+        # 4. 根据最新信号动态调仓
         adjust_position(long_prob, short_prob, money_flow_ratio, volatility)
 
     except Exception as e:
         log_error(f"实盘运行异常: {e}")
         log_error(traceback.format_exc())
+
 
 if __name__ == '__main__':
     run()

@@ -39,20 +39,27 @@ class OKXClient:
 
     def get_position(self):
         positions = self.account_api.get_positions(instType='SWAP', instId=config.SYMBOL)['data']
+
+        long_position = {'size': 0.0, 'entry_price': 0.0}
+        short_position = {'size': 0.0, 'entry_price': 0.0}
+
         for pos in positions:
+            pos_side = pos.get('posSide', '')
             size_raw = pos.get('pos', '0')
             avgPx_raw = pos.get('avgPx', '0')
 
-            # 强保险空值处理
             size = float(size_raw) if size_raw not in ['', None] else 0.0
             avg_price = float(avgPx_raw) if avgPx_raw not in ['', None] else 0.0
 
-            if size > 0:
-                return 'long', size, avg_price
-            elif size < 0:
-                return 'short', abs(size), avg_price
+            if pos_side == 'long':
+                long_position['size'] = size
+                long_position['entry_price'] = avg_price
 
-        return 'none', 0.0, 0.0
+            elif pos_side == 'short':
+                short_position['size'] = size
+                short_position['entry_price'] = avg_price
+
+        return long_position, short_position
 
     def fetch_ohlcv(self,symbol=config.SYMBOL, bar="1H", max_limit=2000, max_retry=3, sleep_sec=1):
         """
@@ -194,7 +201,12 @@ class OKXClient:
 
     # 平多仓
     def close_long(self, usd_amount, leverage):
+        long_pos, _ = self.get_position()
+        if long_pos['size'] == 0:
+            log_info("🟢 无多仓位，跳过平多")
+            return
         self.place_order_with_leverage("sell", "long", usd_amount, leverage, reduce_only=True)
+
 
     # 开空仓
     def open_short(self, usd_amount, leverage):
@@ -202,6 +214,10 @@ class OKXClient:
 
     # 平空仓
     def close_short(self, usd_amount, leverage):
+        _, short_pos = self.get_position()
+        if short_pos['size'] == 0:
+            log_info("🟢 无空仓位，跳过平空")
+            return
         self.place_order_with_leverage("buy", "short", usd_amount, leverage, reduce_only=True)
 
     def get_price(self, max_retry=3, sleep_sec=1):
