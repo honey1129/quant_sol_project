@@ -77,7 +77,7 @@ copy .env.example .env
 
 
 ```bash
-python train/train.py
+python -m train.train
 ```
 * 会自动拉取多周期数据，完成特征工程，模型训练与保存
 * 训练后的模型文件保存至 models/model_okx.pkl
@@ -96,7 +96,7 @@ python -m backtest.backtest
 ## 🟢 实盘执行
 
 ```bash
-python run/live_trading_monitor.py
+python -m run.live_trading_monitor
 ```
 ---
 
@@ -105,7 +105,11 @@ python run/live_trading_monitor.py
 ![img.png](img.png)
 
 ## 📊 回测结果
+![img_1.png](img_1.png)
 
+
+---
+## 部署流程
 
 ## ⚠ 注意事项
 

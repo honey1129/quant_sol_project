@@ -3,11 +3,11 @@ module.exports = {
     {
       name: "quant_okx",
       script: ".venv/bin/python",
-      args: "run/scheduler.py",
+      args: "-m run/scheduler.py",
       cwd: "/root/quant_sol_project",
       env: {
-        PYTHONPATH: "/root/quant_sol_project",   // ✅加PYTHONPATH
-        PATH: process.env.PATH,                  // ✅继承 PATH
+        PYTHONPATH: "/root/quant_sol_project",
+        PATH: process.env.PATH
       }
     }
   ]
