@@ -38,6 +38,13 @@ def balance_samples(X, y):
     balanced_df = balanced_df.sample(frac=1, random_state=42)
     return balanced_df.drop('target', axis=1), balanced_df['target']
 
+def evaluate_model(model, model_name, X_test, y_test):
+    y_pred = model.predict(X_test)
+    acc = accuracy_score(y_test, y_pred)
+    log_info(f"✅ {model_name} 准确率: {acc:.4f}")
+    log_info(f"分类报告:\n{classification_report(y_test, y_pred, digits=4)}")
+
+
 def train():
     client = OKXClient()
     data_dict = client.fetch_data()
@@ -88,10 +95,9 @@ def train():
     log_info(f"✅ RF 模型已保存至: {rf_path}")
 
     # 评估示例（以LightGBM为例）
-    y_pred = lgb_model.predict(X_test)
-    acc = accuracy_score(y_test, y_pred)
-    log_info(f"✅ 模型准确率: {acc:.4f}")
-    log_info(f"分类报告:\n{classification_report(y_test, y_pred, digits=4)}")
+    evaluate_model(lgb_model, "LightGBM", X_test, y_test)
+    evaluate_model(xgb_model, "XGBoost", X_test, y_test)
+    evaluate_model(rf_model, "RandomForest", X_test, y_test)
 
     joblib.dump(feature_cols, feature_path)
     log_info(f"✅ 特征列已保存至: {feature_path}")
