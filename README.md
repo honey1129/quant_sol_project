@@ -109,8 +109,34 @@ python -m run.live_trading_monitor
 
 
 ---
-## 部署流程
+### 部署流程
+## 1️⃣ 安装 Node.js (用于 PM2)
 
+```bash
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.4/install.sh | bash
+source ~/.bashrc
+nvm install 16
+```
+
+##  2️⃣ 安装 PM2
+```bash
+npm install -g pm2
+```
+
+##  3️⃣ 测试本地可运行性
+```bash
+# 激活虚拟环境
+source .venv/bin/activate
+
+# 先测试实盘模块能正常运行
+python -m run.live_trading_monitor.py
+```
+
+## 4️⃣ 使用 PM2 部署守护
+```bash
+pm2 start .venv/bin/python --name quant_okx -- -m run.scheduler
+```
+---
 ## ⚠ 注意事项
 
 - 本项目仅供学习与研究用途，请勿直接在实盘大资金环境下使用！
