@@ -44,6 +44,10 @@ STOP_LOSS = float(os.getenv("STOP_LOSS", 0.01))
 THRESHOLD_LONG = float(os.getenv("THRESHOLD_LONG", 0.55))
 THRESHOLD_SHORT = float(os.getenv("THRESHOLD_SHORT", 0.45))
 
+# ✅ 合约配置
+LOT_SIZE = float(os.getenv("LOT_SIZE", 0.01))
+TICK_SIZE = float(os.getenv("TICK_SIZE", 0.001))
+
 # ✅ 模型配置
 MODEL_PATH = os.getenv("MODEL_PATH", "models/model_okx.pkl")
 FEATURE_LIST_PATH = os.getenv("FEATURE_LIST_PATH", "models/feature_list.pkl")
