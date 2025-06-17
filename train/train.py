@@ -58,6 +58,9 @@ def train():
 
     X_bal, y_bal = balance_samples(X, y)
     X_train, X_test, y_train, y_test = train_test_split(X_bal, y_bal, test_size=0.2, shuffle=False)
+    # 保证依然是 dataframe
+    X_train = pd.DataFrame(X_train, columns=feature_cols)
+    X_test = pd.DataFrame(X_test, columns=feature_cols)
 
     # LightGBM
     lgb_model = lgb.LGBMClassifier(

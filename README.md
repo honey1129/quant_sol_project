@@ -100,6 +100,12 @@ python run/live_trading_monitor.py
 ```
 ---
 
+## 📊 模型训练效果
+
+![img.png](img.png)
+
+## 📊 回测结果
+
 
 ## ⚠ 注意事项
 
