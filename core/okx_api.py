@@ -148,7 +148,11 @@ class OKXClient:
                 size = round(size, 6)
 
                 if size < lot_size:
-                    raise Exception(f"⚠ 下单失败: 换算后 size = {size} 小于最小下单单位 lot_size = {lot_size}")
+                    if reduce_only:
+                        log_info(f"🟡 平仓 size={size} 小于最小下单单位 {lot_size}，自动跳过")
+                        return False
+                    else:
+                        raise Exception(f"⚠ 下单失败: 开仓 size={size} 小于最小下单单位 {lot_size}")
 
                 # ✅ 发单
                 result = self.trade_api.place_order(
