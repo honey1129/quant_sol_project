@@ -1,120 +1,103 @@
+# Quant SOL Project (V2.2 Pro Version)
 
-# Quant SOL/USDT Production System (Restructured V5)
-
-## 📌 项目简介
-
-本项目为 **机构级机器学习驱动的量化实盘系统 (SOL/USDT 专项)**，全流程使用 OKX v5 官方 API，具备：
-
-- ✅ 实盘稳定运行逻辑
-- ✅ 风控止盈止损逻辑
-- ✅ 机器学习训练与回测模块
-- ✅ 完整容错、超时重试机制
-- ✅ 完整工程化依赖管理
-
-支持 **OKX 模拟盘 & 实盘一键切换**，可长期 7x24 云端部署。
+> 🚀 **多周期、多模型、多因子融合的 OKX 永续合约量化交易系统**
 
 ---
 
-## 📂 项目结构
+## 📦 项目简介
 
-```yaml
+本项目是基于 SOL/USDT 保证金合约市场，使用机器学习（LightGBM）、多周期特征融合、资金流+波动率因子、动态仓位管理（Kelly+多因子）的完整量化交易系统。
+
+✅ 支持回测与实盘自动交易  
+✅ 支持多周期数据拉取（5m、15m、1H）  
+✅ 支持模型集成与平滑信号  
+✅ 支持 OKX API 全自动下单
+
+---
+
+## 🗂 项目目录结构
+
+```
 quant_sol_project/
 │
-├── config/
-│   └── config.py              # 全局配置文件
+├── core/                  # 核心模块
+│   ├── okx_api.py         # OKX API封装模块
+│   ├── ml_feature_engineering.py  # 多周期特征工程与衍生特征生成
+│   ├── position_manager.py  # 动态仓位管理模块 (Kelly + 波动率 + 资金流融合)
+│   ├── signal_engine.py   # 多模型融合信号引擎
 │
-├── core/
-│   ├── okx_api.py             # OKX API 封装
-│   ├── ml_feature_engineering.py  # 特征工程逻辑
-│   ├── signal_engine.py       # 多模型信号融合逻辑
-│   ├── position_manager.py    # 仓位管理逻辑
-│   └── predict.py             # 预测模块
+├── train/                 # 训练模块
+│   └── train.py           # 完整训练流程
 │
-├── models/                    # 模型文件存储目录
-│   ├── feature_list.pkl
-│   └── model_okx.pkl
+├── backtest/              # 回测模块
+│   └── backtest.py        # 完整回测流程
 │
-├── train/
-│   └── train.py               # 机器学习训练脚本
+├── utils/                 # 工具模块
+│   └── utils.py           # 日志、Telegram通知、路径配置等
 │
-├── run/
-│   ├── live_trading_monitor.py  # 实盘轮询执行逻辑
-│   └── scheduler.py           # 定时任务调度器
+├── config/                # 配置模块
+│   └── config.py          # 全局配置项，支持 .env 环境变量动态配置
 │
-├── backtest/
-│   └── backtest.py            # 策略回测模块
+├── models/                # 训练后的模型文件及特征列表
+│   ├── model_okx.pkl
+│   └── feature_list.pkl
 │
-├── tests/
-│   └── okx-api-test.py        # OKX API 测试模块
+├── logs/                  # 运行日志
 │
-├── utils/
-│   ├── safe_runner.py         # 容错安全封装
-│   └── utils.py               # 工具函数集合
-│
-├── logs/                      # 实盘日志输出目录
-│
-├── requirements.txt           # 依赖文件
-├── pyproject.toml             # 工程化依赖 (可选)
-└── README.md                  # 当前文档
+├── .env                   # 私密配置 (API KEY, 参数, 策略阈值等)
+├── .gitignore             # Git忽略文件
+└── README.md              # 项目说明文档（本文件）
 ```
 
 ---
 
-## ⚙ 环境准备
+## 🔧 运行环境配置
 
 ### 推荐使用 Python 3.9+
 
-建议使用 `pdm` 或 `poetry` 进行依赖管理。
 
-### 使用 PDM 安装（推荐）
+### 1️⃣ 安装依赖
 
 ```bash
-# 安装pdm（如未安装）
-pip install pdm
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 
-# 安装项目依赖
-pdm install
 ```
-
-### 使用 poetry 安装 (可选)
+### 2️⃣ 配置 .env 文件
 
 ```bash
-# 安装 poetry（如未安装）
-pip install poetry
-
-# 安装项目依赖
-poetry install
+copy .env.example .env
 ```
 
 ---
 
-## 🔑 配置文件说明
+## 🚀 模型训练
+直接运行：
 
-请在 `config/config.py` 填写你的 OKX API 参数和交易配置：
 
-```python
-OKX_API_KEY = '你的APIKey'
-OKX_SECRET = '你的Secret'
-OKX_PASSWORD = '你的Passphrase'
-
-USE_SERVER = "0"  # "0" 实盘, "1" 模拟盘
-
-SYMBOL = 'SOL-USDT-SWAP'
-LEVERAGE = 3
-POSITION_SIZE = 50
-
-TAKE_PROFIT = 0.02
-STOP_LOSS = 0.01
-
-THRESHOLD_LONG = 0.55
-THRESHOLD_SHORT = 0.45
-
-MODEL_PATH = 'models/model_okx.pkl'
-
-TELEGRAM_BOT_TOKEN = '你的TG Bot Token'
-TELEGRAM_CHAT_ID = '你的TG Chat ID'
+```bash
+python train/train.py
 ```
+* 会自动拉取多周期数据，完成特征工程，模型训练与保存
+* 训练后的模型文件保存至 models/model_okx.pkl
+* 同时保存特征列表 models/feature_list.pkl
+---
+## 📊 策略回测
+直接运行：
+```bash
+python backtest/backtest.py
+```
+* 支持多周期全量回测
+* 自动加载训练好的模型和特征
+* 回测结果含资金曲线、收益、回撤等指标
+* 
+---
+## 🟢 实盘执行
 
+```bash
+python run/live_trading_monitor.py
+```
 ---
 
 ## 🚀 部署流程
@@ -149,24 +132,21 @@ python backtest/backtest.py
 python run/live_trading_monitor.py
 ```
 
-建议结合 Linux crontab、supervisor、systemd、或云端守护进程持续运行。
+---
+
+## ⚠ 注意事项
+
+- 本项目仅供学习与研究用途，请勿直接在实盘大资金环境下使用！
+- 请务必做好 API 密钥与资金安全隔离！
+- 强烈建议在云服务器测试好逻辑后再投入正式运行。
 
 ---
 
-## 🧪 测试方法
+## 📌 后续优化方向
 
-- ✅ 模拟盘测试：直接将 `USE_SERVER = "1"` 即可安全跑模拟盘测试真实下单逻辑。
-- ✅ 风控测试：可在训练后，手动制造多空信号快速验证止盈止损逻辑。
-- ✅ 异常容错测试：可手动断网测试容错逻辑是否如预期超时重试。
-- ✅ Telegram通知测试：可直接手动触发 send_telegram() 发送测试消息。
-
----
-
-## 📈 未来升级方向
-
-- 多模型融合 (LightGBM、XGBoost、RandomForest)
-- 多周期特征支持（5m、15m、1h、4h 等）
-- 智能仓位动态管理
-- 风控增强与资金曲线可视化监控
-- 云端自动部署支持
+- ✅ 多模型融合 (LightGBM、XGBoost、RandomForest)（现已支持）
+- ✅ 多周期特征支持（5m、15m、1h、4h 等）(现已支持）
+- ✅ 智能仓位动态管理 (现已支持）
+- ⏳ 支持指标监控（资金流、波动率、仓位等）
+- ⏳ 可视化监控模块（资金曲线/信号走势）
 
