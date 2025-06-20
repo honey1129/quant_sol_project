@@ -44,4 +44,5 @@ class PositionManager:
         if abs(delta) < self.adjust_unit:
             return 0
         else:
-            return round(delta, 2)
+            delta_rounded = round(delta / self.adjust_unit) * self.adjust_unit
+            return round(delta_rounded, 2)
