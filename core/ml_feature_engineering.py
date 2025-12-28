@@ -1,8 +1,8 @@
+# ml_feature_engineering.py
+
 import numpy as np
 
-# ========================================
 # 单周期基础特征工程
-# ========================================
 def add_features(df):
     """
     为单周期K线数据添加一系列常用技术指标特征
@@ -57,9 +57,7 @@ def add_features(df):
 
     return df  # ❗ 注意：这里不做 dropna，留到融合时统一处理
 
-# ========================================
-# 多周期融合逻辑 (V5核心智能融合逻辑)
-# ========================================
+# 多周期融合逻辑
 def merge_multi_period_features(data_dict):
     """
     融合多周期数据为统一特征表，智能处理缺失值，最大化训练样本量
@@ -77,18 +75,16 @@ def merge_multi_period_features(data_dict):
         merged = merged.join(df, how="outer")  # ⚠ 关键点：使用 outer join 保留更多数据
         merged = merged.sort_index()
 
-    # 智能缺失值填充（先前向，再后向填充）
+    merged = merged.sort_index()
     merged.ffill(inplace=True)
-    merged.bfill(inplace=True)
+    merged.dropna(inplace=True)
 
     # 最后做温和缺失裁剪：若缺失超出10%则丢弃该行
     merged.dropna(thresh=int(merged.shape[1] * 0.9), inplace=True)
 
     return merged
 
-# ========================================
-# 多因子衍生特征工程（高阶增强特征）
-# ========================================
+# 多因子衍生特征工程
 def add_advanced_features(df):
     """
     融入资金流、波动率、微结构等衍生高阶特征
@@ -122,9 +118,8 @@ def add_advanced_features(df):
     df.bfill(inplace=True)
     return df
 
-# ========================================
+
 # 各类技术指标工具函数
-# ========================================
 def compute_rsi(series, window=14):
     delta = series.diff()
     gain = delta.where(delta > 0, 0)

@@ -4,7 +4,6 @@ import os
 import joblib
 import numpy as np
 import pandas as pd
-
 from config import config
 from core.ml_feature_engineering import merge_multi_period_features
 from core.okx_api import OKXClient
@@ -49,7 +48,7 @@ class MultiPeriodSignalPredictor:
         else:
             return 'neutral'
 
-# 示例
+
 if __name__ == '__main__':
     predictor = MultiPeriodSignalPredictor()
     signal = predictor.get_latest_signal()

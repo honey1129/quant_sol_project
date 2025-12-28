@@ -129,7 +129,7 @@ npm install -g pm2
 source .venv/bin/activate
 
 # 先测试实盘模块能正常运行
-python -m run.live_trading_monitor.py
+python -m run.live_trading_monitor.py.bak
 ```
 
 ### 4️⃣ 使用 PM2 部署守护

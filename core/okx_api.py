@@ -66,13 +66,12 @@ class OKXClient:
         OKX 历史K线完整拉取函数：支持自动分页、稳定拉取大规模历史数据
         """
         all_data = []
-        next_after = ''  # ✅ 注意：首次使用空字符串
+        next_after = ''
 
         while len(all_data) < max_limit:
             remaining = max_limit - len(all_data)
             limit = min(100, remaining)
-            batch = None  # ✅ 提前初始化
-            # 带重试逻辑
+            batch = None
             for attempt in range(max_retry):
                 try:
                     response = self.market_api.get_candlesticks(
@@ -194,7 +193,7 @@ class OKXClient:
 
 
 
-    ### 封装开仓/平仓逻辑（实盘高复用接口）
+    ### 封装开仓/平仓逻辑
     # 开多仓
     def open_long(self, usd_amount, leverage):
         self.place_order_with_leverage("buy", "long", usd_amount, leverage, reduce_only=False)
@@ -220,6 +219,89 @@ class OKXClient:
             return
         self.place_order_with_leverage("buy", "short", usd_amount, leverage, reduce_only=True)
 
+    def place_order_with_size(self, side, posSide, size, leverage, reduce_only=False, max_retry=3, sleep_sec=1):
+        """
+        按“sz=size”直接下单，避免 usd_amount->size 二次floor，确保与回测 delta_qty 精确对齐。
+        """
+        if not isinstance(size, (int, float)):
+            try:
+                size = float(size)
+            except Exception:
+                raise Exception(f"❌ size 类型异常: '{size}'")
+
+        lot_size = float(config.LOT_SIZE)
+        size = math.floor(size / lot_size) * lot_size
+        size = round(size, 6)
+
+        if size < lot_size:
+            if reduce_only:
+                log_info(f"🟡 reduceOnly 平仓 size={size} 小于最小下单单位 {lot_size}，自动跳过")
+                return False
+            else:
+                raise Exception(f"⚠ 下单失败: 开仓 size={size} 小于最小下单单位 {lot_size}")
+
+        for attempt in range(max_retry):
+            try:
+                market_price = self.get_price()
+
+                # 保证金检查：估算 required_margin = 名义价值 / leverage = size*price/leverage
+                account_info = self.get_account_balance()
+                available_usdt = float(account_info['data'][0]['availEq'])
+                required_margin = (size * market_price) / float(leverage)
+
+                if required_margin > available_usdt:
+                    log_error(f"❌ 保证金不足: 需 {required_margin:.2f} USDT，可用 {available_usdt:.2f} USDT，取消下单")
+                    return False
+
+                result = self.trade_api.place_order(
+                    instId=config.SYMBOL,
+                    tdMode="cross",
+                    side=side,
+                    posSide=posSide,
+                    ordType="market",
+                    sz=str(size),
+                    reduceOnly=reduce_only
+                )
+
+                if result['code'] == "0":
+                    order_id = result['data'][0]['ordId']
+                    log_info(
+                        f"✅ 下单成功(sz模式): {side} {posSide} {leverage}x, sz={size}, reduceOnly={reduce_only}, ordId={order_id}")
+                    return True
+                else:
+                    error_data = result.get('data', [{}])[0]
+                    error_code = error_data.get('sCode', '')
+                    error_msg = error_data.get('sMsg', '')
+                    log_error(f"❌ 下单失败(sz模式): 错误码 {error_code}, 原因: {error_msg}")
+                    time.sleep(sleep_sec)
+
+            except Exception as e:
+                log_error(f"⚠ 下单异常(sz模式)({attempt + 1}): {e}")
+                time.sleep(sleep_sec)
+
+        raise Exception("❌ 超过最大重试次数，下单失败(sz模式)")
+
+    def open_long_sz(self, sz, leverage):
+        return self.place_order_with_size("buy", "long", sz, leverage, reduce_only=False)
+
+    def close_long_sz(self, sz, leverage):
+        long_pos, _ = self.get_position()
+        if long_pos['size'] <= 0:
+            log_info("🟢 无多仓位，跳过平多")
+            return False
+        return self.place_order_with_size("sell", "long", sz, leverage, reduce_only=True)
+
+    def open_short_sz(self, sz, leverage):
+        return self.place_order_with_size("sell", "short", sz, leverage, reduce_only=False)
+
+    def close_short_sz(self, sz, leverage):
+        _, short_pos = self.get_position()
+        if short_pos['size'] <= 0:
+            log_info("🟢 无空仓位，跳过平空")
+            return False
+        return self.place_order_with_size("buy", "short", sz, leverage, reduce_only=True)
+
+    # 获取SYMBOL当前最新价格(以usdt计价)
     def get_price(self, max_retry=3, sleep_sec=1):
         for attempt in range(max_retry):
             try:
@@ -233,6 +315,34 @@ class OKXClient:
                 log_error(f"⚠ 获取价格失败，第{attempt + 1}次重试: {e}")
                 time.sleep(sleep_sec)
         raise Exception("❌ 超过最大重试次数，get_price() 彻底失败")
+
+    # 获取最近已平仓交易的真实收益率（计算reward_risk用）
+    def fetch_recent_closed_trades(self, limit=50):
+        result = self.account_api.get_positions_history(instType="SWAP",instId=config.SYMBOL,limit=str(limit))
+        trades = []
+        for item in result.get("data", []):
+            try:
+                open_px = float(item.get("openAvgPx", 0))
+                close_px = float(item.get("closeAvgPx", 0))
+                size = abs(float(item.get("closeTotalPos", 0)))
+                realized_pnl = float(item.get("realizedPnl", 0))
+                fee = float(item.get("fee", 0))
+
+                if open_px <= 0 or close_px <= 0 or size <= 0:
+                    continue
+
+                avg_px = (open_px + close_px) / 2
+                notional = size * avg_px
+                if notional <= 0:
+                    continue
+                net_pnl = realized_pnl + fee
+                trade_return = net_pnl / notional
+                trades.append(trade_return)
+
+            except Exception:
+                continue
+
+        return trades
 
 
 if __name__ == '__main__':

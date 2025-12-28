@@ -57,12 +57,22 @@ MODEL_WEIGHTS = parse_env_dict(os.getenv("MODEL_WEIGHTS", ""), float)
 # ✅ 信号平滑参数
 SMOOTH_ALPHA = float(os.getenv("SMOOTH_ALPHA", 0.3))
 
+
+TRAILING_STOP = float(os.getenv("TRAILING_STOP", 0.03))           # 移动止损 3%
+MAX_HOLD_BARS = float(os.getenv("MAX_HOLD_BARS", 96))
+
+MIN_HOLD_BARS=float(os.getenv("MIN_HOLD_BARS", 8))
+TRAILING_EXIT=float(os.getenv("TRAILING_EXIT", 0.008))
+
 # ✅ 仓位边界
 POSITION_MIN = float(os.getenv("POSITION_MIN", 0.05))
 POSITION_MAX = float(os.getenv("POSITION_MAX", 0.3))
 MAX_POSITION_RATIO = float(os.getenv("MAX_POSITION_RATIO", 0.3))
+BASE_POSITION_RATIO = float(os.getenv("BASE_POSITION_RATIO", 0.1))
 MIN_ADJUST_AMOUNT = float(os.getenv("MIN_ADJUST_AMOUNT", 50))
 ADJUST_UNIT = float(os.getenv("ADJUST_UNIT", 50))
+ADD_THRESHOLD = float(os.getenv("ADD_THRESHOLD", 0.15))
+MAX_REBALANCE_RATIO = float(os.getenv("MAX_REBALANCE_RATIO", 0.3))
 
 # ✅ Kelly 盈亏比
 KELLY_REWARD_RISK = float(os.getenv("KELLY_REWARD_RISK", 2.5))
@@ -78,3 +88,6 @@ FEE_RATE = float(os.getenv("FEE_RATE", 0.0005))
 # ✅ Telegram配置
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+
+POLL_SEC=os.getenv("POLL_SEC", 10)

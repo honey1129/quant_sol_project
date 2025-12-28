@@ -1,3 +1,5 @@
+# position_manager.py
+
 from config import config
 
 class PositionManager:
@@ -7,9 +9,11 @@ class PositionManager:
         self.adjust_unit = config.ADJUST_UNIT
 
     # Kelly公式计算
-    def kelly_fraction(self, prob, reward_risk=2.5):
+    def kelly_fraction(self, prob, reward_risk):
+        if reward_risk <= 0:
+            return 0.0
         kelly = ((prob * (reward_risk + 1)) - 1) / reward_risk
-        return max(0, min(kelly, 1))
+        return max(0, min(kelly, 0.5))
 
     # 波动率动态调整账户余额
     def volatility_adjust_balance(self, total_balance, volatility):
@@ -28,9 +32,9 @@ class PositionManager:
         return max(0, min(score, 1))
 
     # 最终目标仓位比例
-    def calculate_target_ratio(self, prob, money_flow_ratio, volatility):
+    def calculate_target_ratio(self, prob, money_flow_ratio, volatility,reward_risk=1.0):
         signal_strength = max(0, prob - 0.5) * 2
-        kelly_weight = self.kelly_fraction(prob)
+        kelly_weight = self.kelly_fraction(prob,reward_risk)
         multi_factor = self.multi_factor_score(prob, money_flow_ratio, volatility)
         blended_ratio = self.min_ratio + signal_strength * (self.max_ratio - self.min_ratio)
         final_ratio = blended_ratio * kelly_weight * multi_factor
