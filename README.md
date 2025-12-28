@@ -1,137 +1,155 @@
-# Quant OKX v5 Production
+# Quant Project (V3.2 Pro Version)
 
-## 📌 项目简介
-
-本项目为**机构级机器学习驱动的量化实盘系统**，全流程使用 OKX v5 官方 API（非 ccxt），具备：
-
-- ✅ 实盘稳定运行逻辑
-- ✅ 风控止盈止损逻辑
-- ✅ 机器学习训练与回测模块
-- ✅ 完整容错、超时重试机制
-- ✅ 完整工程化依赖管理（pyproject.toml）
-
-支持 **OKX 模拟盘 & 实盘一键切换**，可长期 7x24 云端部署。
+> 🚀 **多周期、多模型、多因子融合的 OKX 永续合约量化交易系统**
 
 ---
 
-## 📂 项目结构
+## 📦 项目简介
 
-```yaml
-quant_okx_v5_production/
-│
-├── config.py # 全局配置文件
-├── okx_api.py # OKX v5 API封装（账户、行情、下单接口）
-├── utils.py # 特征工程、数据获取、Telegram通知、K线容错拉取
-│
-├── train.py # 机器学习训练脚本
-├── sandbox.py # 回测模块
-├── live_trading_monitor.py # 实盘轮询执行逻辑
-│
-├── models/ # 模型文件存储目录
-├── logs/ # 实盘日志输出目录
-├── data/ # 历史数据缓存目录
-│
-├── pyproject.toml # 工程化依赖文件 (PDM/Poetry 管理)
-└── README.md # 当前文档
+本项目是基于 SOL/USDT 保证金合约市场，使用机器学习（LightGBM）、多周期特征融合、资金流+波动率因子、动态仓位管理（Kelly+多因子）的完整量化交易系统。
+
+✅ 支持回测与实盘自动交易  
+✅ 支持多周期数据拉取（5m、15m、1H）  
+✅ 支持模型集成与平滑信号  
+✅ 支持 OKX API 全自动下单
+
+---
+
+## 🗂 项目目录结构
 
 ```
+quant_sol_project/
+│
+├── core/                  # 核心模块
+│   ├── okx_api.py         # OKX API封装模块
+│   ├── ml_feature_engineering.py  # 多周期特征工程与衍生特征生成
+│   ├── position_manager.py  # 动态仓位管理模块 (Kelly + 波动率 + 资金流融合)
+│   ├── signal_engine.py   # 多模型融合信号引擎
+│
+├── train/                 # 训练模块
+│   └── train.py           # 完整训练流程
+│
+├── backtest/              # 回测模块
+│   └── backtest.py        # 完整回测流程
+│
+├── utils/                 # 工具模块
+│   └── utils.py           # 日志、Telegram通知、路径配置等
+│
+├── config/                # 配置模块
+│   └── config.py          # 全局配置项，支持 .env 环境变量动态配置
+│
+├── models/                # 训练后的模型文件及特征列表
+│   ├── model_okx.pkl
+│   └── feature_list.pkl
+│
+├── logs/                  # 运行日志
+│
+├── .env                   # 私密配置 (API KEY, 参数, 策略阈值等)
+├── .gitignore             # Git忽略文件
+└── README.md              # 项目说明文档（本文件）
+```
+
 ---
 
-## ⚙ 环境准备
+## 🔧 运行环境配置
 
 ### 推荐使用 Python 3.9+
 
-建议使用 `pdm` 或 `poetry` 进行依赖管理。
 
-### 使用 PDM 安装（推荐）
-
-```bash
-# 安装pdm（如未安装）
-pip install pdm
-
-# 安装项目依赖
-pdm install
-```
-
-### 使用 poetry 安装 (可选)
+### 1️⃣ 安装依赖
 
 ```bash
-# 安装 poetry（如未安装）
-pip install poetry
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 
-# 安装项目依赖
-poetry install
 ```
-
-### 🔑 配置文件说明 (config.py)
-请先在 config.py 填写你的 OKX API 参数和交易配置：
-```python
-OKX_API_KEY = '你的APIKey'
-OKX_SECRET = '你的Secret'
-OKX_PASSWORD = '你的Passphrase'
-
-USE_SERVER = "0"  # "0" 实盘, "1" 模拟盘
-
-SYMBOL = 'SOL-USDT-SWAP'
-LEVERAGE = 3
-POSITION_SIZE = 50
-
-TAKE_PROFIT = 0.02
-STOP_LOSS = 0.01
-
-THRESHOLD_LONG = 0.55
-THRESHOLD_SHORT = 0.45
-
-MODEL_PATH = 'models/model_okx.pkl'
-
-TELEGRAM_BOT_TOKEN = '你的TG Bot Token'
-TELEGRAM_CHAT_ID = '你的TG Chat ID'`
-```
-
-### 🚀 部署流程
-## 1️⃣ 训练模型
-先使用 train.py 完成机器学习训练：
-
+### 2️⃣ 配置 .env 文件
 
 ```bash
-python train.py
+copy .env.example .env
 ```
-
-训练好的模型将保存在：
-
-```bash
-models/model_okx.pkl
-```
-
-## 2️⃣ 回测验证（可选）
-使用 sandbox.py 进行策略回测与压力测试：
-
-```bash
-python sandbox.py
-```
-## 3️⃣启动实盘系统
-正式实盘轮询执行逻辑：
-
-```bash
-python live_trading_monitor.py
-```
-建议结合 Linux crontab、supervisor、systemd、或云端守护进程持续运行。
 
 ---
-### 🧪 测试方法
 
-* ✅ 模拟盘测试
+## 🚀 模型训练
+直接运行：
 
-直接将 USE_SERVER = "1" 即可安全跑模拟盘测试真实下单逻辑。
 
-* ✅ 风控测试
+```bash
+python -m train.train
+```
+* 会自动拉取多周期数据，完成特征工程，模型训练与保存
+* 训练后的模型文件保存至 models/model_okx.pkl
+* 同时保存特征列表 models/feature_list.pkl
+---
+## 📊 策略回测
+直接运行：
+```bash
+python -m backtest.backtest
+```
+* 支持多周期全量回测
+* 自动加载训练好的模型和特征
+* 回测结果含资金曲线、收益、回撤等指标
+* 
+---
+## 🟢 实盘执行
 
-可在训练后，手动制造多空信号快速验证止盈止损逻辑。
+```bash
+python -m run.live_trading_monitor
+```
+---
 
-* ✅ 异常容错测试
+## 📊 模型训练效果
 
-可手动断网测试容错逻辑是否如预期超时重试。
+![img.png](img.png)
 
-* ✅ Telegram通知测试
+## 📊 回测结果
+![img_1.png](img_1.png)
 
-可直接手动触发 send_telegram() 发送测试消息。
+
+---
+## 部署流程
+### 1️⃣ 安装 Node.js (用于 PM2)
+
+```bash
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.4/install.sh | bash
+source ~/.bashrc
+nvm install 16
+```
+
+### 2️⃣ 安装 PM2
+```bash
+npm install -g pm2
+```
+
+###  3️⃣ 测试本地可运行性
+```bash
+# 激活虚拟环境
+source .venv/bin/activate
+
+# 先测试实盘模块能正常运行
+python -m run.live_trading_monitor.py.bak
+```
+
+### 4️⃣ 使用 PM2 部署守护
+```bash
+pm2 start .venv/bin/python --name quant_okx -- -m run.scheduler
+```
+---
+## ⚠ 注意事项
+
+- 本项目仅供学习与研究用途，请勿直接在实盘大资金环境下使用！
+- 请务必做好 API 密钥与资金安全隔离！
+- 强烈建议在云服务器测试好逻辑后再投入正式运行。
+
+---
+
+## 📌 后续优化方向
+
+- ✅ 多模型融合 (LightGBM、XGBoost、RandomForest)（现已支持）
+- ✅ 多周期特征支持（5m、15m、1h、4h 等）(现已支持）
+- ✅ 智能仓位动态管理 (现已支持）
+- ⏳ 支持指标监控（资金流、波动率、仓位等）
+- ⏳ 可视化监控模块（资金曲线/信号走势）
+

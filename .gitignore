@@ -1,4 +1,4 @@
-# Python 相关缓存文件
+# Python编译缓存
 __pycache__/
 *.pyc
 *.pyo
@@ -62,3 +62,44 @@ poetry.lock
 build/
 dist/
 *.egg-info/
+*.pkl
+
+# 模型文件
+models/*.pkl
+
+# 虚拟环境
+.venv/
+env/
+venv/
+
+# 日志文件
+logs/
+*.log
+
+# 数据缓存
+*.csv
+*.h5
+*.feather
+*.parquet
+*.pid
+# 本地配置文件
+.env
+*.env
+
+# Jupyter临时文件
+.ipynb_checkpoints/
+
+# Mac系统文件
+.DS_Store
+
+# VSCode / Pycharm等IDE缓存文件
+.idea/
+.vscode/
+
+# 单元测试缓存
+.cache/
+pytest_cache/
+
+# 其他你未来可能产生的临时文件
+tmp/
+temp/
