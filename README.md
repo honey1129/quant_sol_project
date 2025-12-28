@@ -1,4 +1,4 @@
-# Quant Project (V3.2 Pro Version)
+# Quant Project (V3.1 Pro Version)
 
 > 🚀 **多周期、多模型、多因子融合的 OKX 永续合约量化交易系统**
 
@@ -6,11 +6,11 @@
 
 ## 📦 项目简介
 
-本项目是基于 SOL/USDT 保证金合约市场，使用机器学习（LightGBM）、多周期特征融合、资金流+波动率因子、动态仓位管理（Kelly+多因子）的完整量化交易系统。
+本项目是基于 okx交易所的 保证金合约市场，使用机器学习（LightGBM）、多周期特征融合、资金流+波动率因子、动态仓位管理（Kelly+多因子）的完整量化交易系统。
 
 ✅ 支持回测与实盘自动交易  
 ✅ 支持多周期数据拉取（5m、15m、1H）  
-✅ 支持模型集成与平滑信号  
+✅ 支持模型集成与~~平滑信号~~  
 ✅ 支持 OKX API 全自动下单
 
 ---
@@ -25,9 +25,11 @@ quant_sol_project/
 │   ├── ml_feature_engineering.py  # 多周期特征工程与衍生特征生成
 │   ├── position_manager.py  # 动态仓位管理模块 (Kelly + 波动率 + 资金流融合)
 │   ├── signal_engine.py   # 多模型融合信号引擎
+│   ├── reward_risk.py     # 动态计算Kelly公式里的reward_risk
+│   ├── strategy_core.py   # 策略核心代码
 │
 ├── train/                 # 训练模块
-│   └── train.py           # 完整训练流程
+│   └── train.py           # 完整训练流  程
 │
 ├── backtest/              # 回测模块
 │   └── backtest.py        # 完整回测流程
@@ -48,6 +50,12 @@ quant_sol_project/
 ├── .gitignore             # Git忽略文件
 └── README.md              # 项目说明文档（本文件）
 ```
+
+---
+
+##  🔑okx [api-key申请地址](https://www.okx.com/account/my-api)
+
+   [api 文档](https://www.okx.com/docs-v5/zh/#overview)
 
 ---
 
@@ -90,8 +98,14 @@ python -m backtest.backtest
 ```
 * 支持多周期全量回测
 * 自动加载训练好的模型和特征
-* 回测结果含资金曲线、收益、回撤等指标
-* 
+* 回测结果含收益、回撤等指标以及详细的回测交易记录
+*  回测交易记录示例：
+
+| timestamp           | action | price   | position | balance | 
+|---------------------|-----|---------|---------|--------|
+| 2025-12-23 20:40:00 | 反向平仓 | 2985.19 | 0.0491  | 1003.79 |
+| 2025-12-23 20:40:00  | 开空  | 2988.51 | -0.0472 | 1003.72|
+
 ---
 ## 🟢 实盘执行
 
