@@ -1,4 +1,4 @@
-from okx_api import OKXClient
+from core.okx_api import OKXClient
 
 client = OKXClient()
 
