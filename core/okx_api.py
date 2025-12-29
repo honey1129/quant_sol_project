@@ -15,15 +15,14 @@ class OKXClient:
         self.market_api = Market.MarketAPI(config.OKX_API_KEY, config.OKX_SECRET, config.OKX_PASSWORD, use_server_time=True, flag=config.USE_SERVER)
         self.public_api = Public.PublicAPI(config.OKX_API_KEY, config.OKX_SECRET, config.OKX_PASSWORD, use_server_time=True,flag=config.USE_SERVER)
 
+    # 获取当前账户余额等信息
     def get_account_balance(self):
         result = self.account_api.get_account_balance()
 
-        # 防御性提取 totalEq（全账户权益）
         total_eq_raw = result['data'][0].get('totalEq', '0')
         total_eq = float(total_eq_raw) if total_eq_raw not in ['', None] else 0.0
         result['data'][0]['totalEq'] = total_eq
 
-        # ✅ 重点：提取 USDT 子账户详情
         details = result['data'][0].get('details', [])
         usdt_detail = next((d for d in details if d.get('ccy') == 'USDT'), None)
 
@@ -33,10 +32,11 @@ class OKXClient:
         else:
             avail_eq = 0.0
 
-        result['data'][0]['availEq'] = avail_eq  # 重写主返回的 availEq 供后续兼容逻辑
+        result['data'][0]['availEq'] = avail_eq
 
         return result
 
+    # 获取SYMBOL当前最新仓位
     def get_position(self):
         positions = self.account_api.get_positions(instType='SWAP', instId=config.SYMBOL)['data']
 
@@ -61,10 +61,51 @@ class OKXClient:
 
         return long_position, short_position
 
+    # 获取SYMBOL当前最新价格(以usdt计价)
+    def get_price(self, max_retry=3, sleep_sec=1):
+        for attempt in range(max_retry):
+            try:
+                data = self.market_api.get_ticker(instId=config.SYMBOL)
+                price_raw = data['data'][0].get('last', '0')
+                if price_raw in ['', None]:
+                    raise Exception("❌ last价格字段为空")
+                last_price = float(price_raw)
+                return last_price
+            except Exception as e:
+                log_error(f"⚠ 获取价格失败，第{attempt + 1}次重试: {e}")
+                time.sleep(sleep_sec)
+        raise Exception("❌ 超过最大重试次数，get_price() 彻底失败")
+
+    # 获取最近已平仓交易的真实收益率（计算reward_risk用）
+    def fetch_recent_closed_trades(self, limit=50):
+        result = self.account_api.get_positions_history(instType="SWAP", instId=config.SYMBOL, limit=str(limit))
+        trades = []
+        for item in result.get("data", []):
+            try:
+                open_px = float(item.get("openAvgPx", 0))
+                close_px = float(item.get("closeAvgPx", 0))
+                size = abs(float(item.get("closeTotalPos", 0)))
+                realized_pnl = float(item.get("realizedPnl", 0))
+                fee = float(item.get("fee", 0))
+
+                if open_px <= 0 or close_px <= 0 or size <= 0:
+                    continue
+
+                avg_px = (open_px + close_px) / 2
+                notional = size * avg_px
+                if notional <= 0:
+                    continue
+                net_pnl = realized_pnl + fee
+                trade_return = net_pnl / notional
+                trades.append(trade_return)
+
+            except Exception:
+                continue
+
+        return trades
+
+    # OKX 历史K线完整拉取函数：支持自动分页、稳定拉取大规模历史数据
     def fetch_ohlcv(self,symbol=config.SYMBOL, bar="1H", max_limit=2000, max_retry=3, sleep_sec=1):
-        """
-        OKX 历史K线完整拉取函数：支持自动分页、稳定拉取大规模历史数据
-        """
         all_data = []
         next_after = ''
 
@@ -115,6 +156,7 @@ class OKXClient:
             df[col] = df[col].astype(float)
         return df
 
+    # 批量获取多个周期的k线数据
     def fetch_data(self):
         data_dict = {}
         for interval in config.INTERVALS:
@@ -124,6 +166,7 @@ class OKXClient:
             time.sleep(0.3)
         return data_dict
 
+    ### 封装开仓/平仓逻辑(按usdt开仓)
     def place_order_with_leverage(self, side, posSide, usd_amount, leverage,reduce_only=False, max_retry=3, sleep_sec=1):
         if not isinstance(usd_amount, (int, float)):
             try:
@@ -191,14 +234,11 @@ class OKXClient:
         # 超过重试次数后失败
         raise Exception("❌ 超过最大重试次数，下单失败")
 
-
-
-    ### 封装开仓/平仓逻辑
-    # 开多仓
+    # 开多仓(按usdt)
     def open_long(self, usd_amount, leverage):
         self.place_order_with_leverage("buy", "long", usd_amount, leverage, reduce_only=False)
 
-    # 平多仓
+    # 平多仓(按usdt)
     def close_long(self, usd_amount, leverage):
         long_pos, _ = self.get_position()
         if long_pos['size'] == 0:
@@ -206,12 +246,11 @@ class OKXClient:
             return
         self.place_order_with_leverage("sell", "long", usd_amount, leverage, reduce_only=True)
 
-
-    # 开空仓
+    # 开空仓(按usdt)
     def open_short(self, usd_amount, leverage):
         self.place_order_with_leverage("sell", "short", usd_amount, leverage, reduce_only=False)
 
-    # 平空仓
+    # 平空仓(按usdt)
     def close_short(self, usd_amount, leverage):
         _, short_pos = self.get_position()
         if short_pos['size'] == 0:
@@ -219,6 +258,7 @@ class OKXClient:
             return
         self.place_order_with_leverage("buy", "short", usd_amount, leverage, reduce_only=True)
 
+    ### 封装开仓/平仓逻辑(按size开仓)
     def place_order_with_size(self, side, posSide, size, leverage, reduce_only=False, max_retry=3, sleep_sec=1):
         """
         按“sz=size”直接下单，避免 usd_amount->size 二次floor，确保与回测 delta_qty 精确对齐。
@@ -301,48 +341,6 @@ class OKXClient:
             return False
         return self.place_order_with_size("buy", "short", sz, leverage, reduce_only=True)
 
-    # 获取SYMBOL当前最新价格(以usdt计价)
-    def get_price(self, max_retry=3, sleep_sec=1):
-        for attempt in range(max_retry):
-            try:
-                data = self.market_api.get_ticker(instId=config.SYMBOL)
-                price_raw = data['data'][0].get('last', '0')
-                if price_raw in ['', None]:
-                    raise Exception("❌ last价格字段为空")
-                last_price = float(price_raw)
-                return last_price
-            except Exception as e:
-                log_error(f"⚠ 获取价格失败，第{attempt + 1}次重试: {e}")
-                time.sleep(sleep_sec)
-        raise Exception("❌ 超过最大重试次数，get_price() 彻底失败")
-
-    # 获取最近已平仓交易的真实收益率（计算reward_risk用）
-    def fetch_recent_closed_trades(self, limit=50):
-        result = self.account_api.get_positions_history(instType="SWAP",instId=config.SYMBOL,limit=str(limit))
-        trades = []
-        for item in result.get("data", []):
-            try:
-                open_px = float(item.get("openAvgPx", 0))
-                close_px = float(item.get("closeAvgPx", 0))
-                size = abs(float(item.get("closeTotalPos", 0)))
-                realized_pnl = float(item.get("realizedPnl", 0))
-                fee = float(item.get("fee", 0))
-
-                if open_px <= 0 or close_px <= 0 or size <= 0:
-                    continue
-
-                avg_px = (open_px + close_px) / 2
-                notional = size * avg_px
-                if notional <= 0:
-                    continue
-                net_pnl = realized_pnl + fee
-                trade_return = net_pnl / notional
-                trades.append(trade_return)
-
-            except Exception:
-                continue
-
-        return trades
 
 
 if __name__ == '__main__':
