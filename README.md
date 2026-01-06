@@ -27,10 +27,15 @@ quant_sol_project/
 │   ├── position_manager.py  # 动态仓位管理模块 (Kelly + 波动率 + 资金流融合)
 │   ├── signal_engine.py   # 多模型融合信号引擎
 │   ├── reward_risk.py     # 动态计算Kelly公式里的reward_risk
-│   ├── strategy_core.py   # 策略核心代码
+│   └── strategy_core.py   # 策略核心代码
+│
+│
+├── run/                        # 程序运行主入口
+│   ├── live_trading_monitor.py  # 程序实盘运行主入口
+│   └── scheduler.py             # 封装的定时任务启动器
 │
 ├── train/                 # 训练模块
-│   └── train.py           # 完整训练流  程
+│   └── train.py           # 完整训练流程
 │
 ├── backtest/              # 回测模块
 │   └── backtest.py        # 完整回测流程
@@ -144,7 +149,7 @@ npm install -g pm2
 source .venv/bin/activate
 
 # 先测试实盘模块能正常运行
-python -m run.live_trading_monitor.py
+python -m run.live_trading_monitor
 ```
 
 ### 4️⃣ 使用 PM2 部署守护
