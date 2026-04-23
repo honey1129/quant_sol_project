@@ -2,7 +2,6 @@ import pandas as pd
 import numpy as np
 import joblib
 import lightgbm as lgb
-from sklearn.model_selection import train_test_split
 from sklearn.utils import resample
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, classification_report
@@ -32,6 +31,8 @@ def balance_samples(X, y):
     long_df = df[df['target'] == 1]
     short_df = df[df['target'] == 0]
     min_count = min(len(long_df), len(short_df))
+    if min_count == 0:
+        return X.copy(), y.copy()
     long_sample = resample(long_df, n_samples=min_count, replace=False, random_state=42)
     short_sample = resample(short_df, n_samples=min_count, replace=False, random_state=42)
     balanced_df = pd.concat([long_sample, short_sample])
@@ -50,15 +51,24 @@ def train():
     data_dict = client.fetch_data()
     merged_df = merge_multi_period_features(data_dict)
     merged_df = add_advanced_features(merged_df)
+    merged_df = merged_df.dropna().copy()
     merged_df = create_labels(merged_df, future_window=5, threshold=0.002)
 
     feature_cols = [col for col in merged_df.columns if col not in ['future_return', 'target']]
     X = merged_df[feature_cols].astype(float)
     y = merged_df['target']
 
-    X_bal, y_bal = balance_samples(X, y)
-    X_train, X_test, y_train, y_test = train_test_split(X_bal, y_bal, test_size=0.2, shuffle=False)
-    # 保证依然是 dataframe
+    split_idx = int(len(X) * 0.8)
+    if split_idx <= 0 or split_idx >= len(X):
+        raise ValueError("样本量不足，无法按时间顺序切分训练集和测试集")
+
+    X_train = X.iloc[:split_idx].copy()
+    X_test = X.iloc[split_idx:].copy()
+    y_train = y.iloc[:split_idx].copy()
+    y_test = y.iloc[split_idx:].copy()
+
+    # 只在训练集内部做类别平衡，避免把未来样本混回训练过程。
+    X_train, y_train = balance_samples(X_train, y_train)
     X_train = pd.DataFrame(X_train, columns=feature_cols)
     X_test = pd.DataFrame(X_test, columns=feature_cols)
 

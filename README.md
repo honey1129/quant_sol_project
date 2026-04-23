@@ -156,6 +156,26 @@ python -m run.live_trading_monitor
 ```bash
 pm2 start .venv/bin/python --name quant_okx -- -m run.scheduler
 ```
+
+### 5️⃣ 测试盘 VPS 最小部署
+推荐先不要在 VPS 上直接跑 `run.scheduler`，而是先只跑测试盘监控：
+
+```bash
+bash run/bootstrap_vps.sh
+cp .env.example .env
+# 然后把 OKX 测试盘密钥填进 .env，并确认 USE_SERVER=1
+
+PYTHONPATH=. TELEGRAM_ENABLED=0 .venv/bin/python run/check_okx_paper_ready.py
+pm2 start ecosystem.paper.config.js
+pm2 save
+```
+
+查看日志：
+
+```bash
+pm2 logs quant_okx_paper
+tail -f logs/live_trading.log
+```
 ---
 ## ⚠ 注意事项
 
@@ -172,4 +192,3 @@ pm2 start .venv/bin/python --name quant_okx -- -m run.scheduler
 - ✅ 智能仓位动态管理 (现已支持）
 - ⏳ 支持指标监控（资金流、波动率、仓位等）
 - ⏳ 可视化监控模块（资金曲线/信号走势）
-

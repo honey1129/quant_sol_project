@@ -20,10 +20,23 @@ def parse_env_list(env_str):
         return []
     return [item.strip() for item in env_str.split(",")]
 
+
+def parse_env_bool(env_str, default=False):
+    if env_str is None:
+        return default
+    return str(env_str).strip().lower() in {"1", "true", "yes", "on"}
+
+EXCHANGE = os.getenv("EXCHANGE", "OKX")
+
 # ✅ OKX API
 OKX_API_KEY = os.getenv("OKX_API_KEY")
 OKX_SECRET = os.getenv("OKX_SECRET")
 OKX_PASSWORD = os.getenv("OKX_PASSWORD")
+
+# ✅ WEEX API
+WEEX_API_KEY = os.getenv("WEEX_API_KEY")
+WEEX_SECRET = os.getenv("WEEX_SECRET")
+WEEX_PASSWORD = os.getenv("WEEX_PASSWORD")
 
 USE_SERVER = os.getenv("USE_SERVER", '1')
 
@@ -39,6 +52,15 @@ WINDOWS = parse_env_dict(os.getenv("WINDOWS", ""), int)
 # ✅ 风控参数
 TAKE_PROFIT = float(os.getenv("TAKE_PROFIT", 0.02))
 STOP_LOSS = float(os.getenv("STOP_LOSS", 0.01))
+ADAPTIVE_TP_SL_ENABLED = parse_env_bool(os.getenv("ADAPTIVE_TP_SL_ENABLED"), True)
+ATR_TAKE_PROFIT_MULTIPLIER = float(os.getenv("ATR_TAKE_PROFIT_MULTIPLIER", 5.0))
+ATR_STOP_LOSS_MULTIPLIER = float(os.getenv("ATR_STOP_LOSS_MULTIPLIER", 2.2))
+VOLATILITY_TAKE_PROFIT_MULTIPLIER = float(os.getenv("VOLATILITY_TAKE_PROFIT_MULTIPLIER", 7.0))
+VOLATILITY_STOP_LOSS_MULTIPLIER = float(os.getenv("VOLATILITY_STOP_LOSS_MULTIPLIER", 2.6))
+ADAPTIVE_TAKE_PROFIT_MIN = float(os.getenv("ADAPTIVE_TAKE_PROFIT_MIN", 0.009))
+ADAPTIVE_TAKE_PROFIT_MAX = float(os.getenv("ADAPTIVE_TAKE_PROFIT_MAX", 0.045))
+ADAPTIVE_STOP_LOSS_MIN = float(os.getenv("ADAPTIVE_STOP_LOSS_MIN", 0.0055))
+ADAPTIVE_STOP_LOSS_MAX = float(os.getenv("ADAPTIVE_STOP_LOSS_MAX", 0.025))
 
 # ✅ 策略阈值
 THRESHOLD_LONG = float(os.getenv("THRESHOLD_LONG", 0.55))
@@ -84,10 +106,23 @@ TARGET_VOL = float(os.getenv("TARGET_VOL", 0.015))
 MAX_POSITION = float(os.getenv("MAX_POSITION", 0.4))
 INITIAL_BALANCE = float(os.getenv("INITIAL_BALANCE", 1000))
 FEE_RATE = float(os.getenv("FEE_RATE", 0.0005))
+BACKTEST_SLIPPAGE_BPS = float(os.getenv("BACKTEST_SLIPPAGE_BPS", 3.0))
+BACKTEST_ENABLE_FUNDING = parse_env_bool(os.getenv("BACKTEST_ENABLE_FUNDING"), True)
+BACKTEST_FUNDING_HISTORY_LIMIT = int(os.getenv("BACKTEST_FUNDING_HISTORY_LIMIT", 400))
+BACKTEST_INTRABAR_TP_SL = parse_env_bool(os.getenv("BACKTEST_INTRABAR_TP_SL"), True)
+BACKTEST_WORST_CASE_TP_SL = parse_env_bool(os.getenv("BACKTEST_WORST_CASE_TP_SL"), True)
+
+# ✅ 实盘/模拟盘保护
+LIVE_REQUIRE_SIMULATED_TRADING = parse_env_bool(os.getenv("LIVE_REQUIRE_SIMULATED_TRADING"), True)
+LIVE_AUTO_SET_POSITION_MODE = parse_env_bool(os.getenv("LIVE_AUTO_SET_POSITION_MODE"), True)
+LIVE_AUTO_SET_LEVERAGE = parse_env_bool(os.getenv("LIVE_AUTO_SET_LEVERAGE"), True)
+LIVE_RECONCILE_PENDING_ORDERS = parse_env_bool(os.getenv("LIVE_RECONCILE_PENDING_ORDERS"), True)
+LIVE_PERSIST_LAST_BAR = parse_env_bool(os.getenv("LIVE_PERSIST_LAST_BAR"), True)
 
 # ✅ Telegram配置
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_ENABLED = parse_env_bool(os.getenv("TELEGRAM_ENABLED"), True)
 
 
 POLL_SEC=os.getenv("POLL_SEC", 10)

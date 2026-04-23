@@ -55,6 +55,7 @@ def add_features(df):
     df['return_5'] = df['close'].pct_change(5)
     df['return_10'] = df['close'].pct_change(10)
 
+    df.replace([np.inf, -np.inf], np.nan, inplace=True)
     return df  # ❗ 注意：这里不做 dropna，留到融合时统一处理
 
 # 多周期融合逻辑
@@ -114,8 +115,8 @@ def add_advanced_features(df):
     df['volume_ma'] = df['5m_volume'].rolling(10).mean()
     df['volume_ratio'] = df['5m_volume'] / (df['volume_ma'] + 1e-6)
 
-    # 补充缺失值
-    df.bfill(inplace=True)
+    # 避免用未来数据回填到过去，缺失值交给调用方统一裁剪。
+    df.replace([np.inf, -np.inf], np.nan, inplace=True)
     return df
 
 

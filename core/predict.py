@@ -5,7 +5,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from config import config
-from core.ml_feature_engineering import merge_multi_period_features
+from core.ml_feature_engineering import merge_multi_period_features, add_advanced_features
 from core.okx_api import OKXClient
 from utils.utils import BASE_DIR
 
@@ -20,10 +20,15 @@ class MultiPeriodSignalPredictor:
         # 多周期拉取数据
         data_dict = self.fetcher.fetch_data()
         merged_df = merge_multi_period_features(data_dict)
+        merged_df = add_advanced_features(merged_df)
+        merged_df = merged_df.dropna().copy()
 
-        # 获取最近一行数据
+        if len(merged_df) < 2:
+            raise ValueError("特征数据不足，暂时无法生成已收盘 bar 信号")
+
+        # 统一使用上一根已收盘 bar，和实盘监控逻辑保持一致。
         feature_cols = joblib.load(os.path.join(BASE_DIR, config.FEATURE_LIST_PATH))
-        X_live = merged_df[feature_cols].iloc[-1:].astype(float)
+        X_live = merged_df[feature_cols].iloc[-2:-1].astype(float)
         X_live = pd.DataFrame(X_live, columns=feature_cols)
 
         # 多模型融合预测

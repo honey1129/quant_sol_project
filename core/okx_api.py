@@ -1,5 +1,6 @@
 import math
 import time
+import uuid
 import pandas as pd
 from config import config
 import okx.Account as Account
@@ -8,12 +9,164 @@ import okx.MarketData as Market
 import okx.PublicData as Public
 from utils.utils import log_info, log_error
 
+
+def build_client_order_id(symbol, side, pos_side, reduce_only):
+    symbol_part = "".join(ch for ch in str(symbol).lower() if ch.isalnum())[:8]
+    side_part = str(side).lower()[:1] or "x"
+    pos_part = str(pos_side).lower()[:1] or "x"
+    reduce_part = "r" if reduce_only else "o"
+    unique_part = uuid.uuid4().hex[:16]
+    return f"qs{symbol_part}{reduce_part}{side_part}{pos_part}{unique_part}"[:32]
+
+
+def order_is_acknowledged(order):
+    if not order:
+        return False
+    state = str(order.get("state", "") or "").lower()
+    return state in {"live", "partially_filled", "filled"}
+
+
 class OKXClient:
     def __init__(self):
         self.account_api = Account.AccountAPI(config.OKX_API_KEY, config.OKX_SECRET, config.OKX_PASSWORD, use_server_time=True, flag=config.USE_SERVER)
         self.trade_api = Trade.TradeAPI(config.OKX_API_KEY, config.OKX_SECRET, config.OKX_PASSWORD, use_server_time=True, flag=config.USE_SERVER)
         self.market_api = Market.MarketAPI(config.OKX_API_KEY, config.OKX_SECRET, config.OKX_PASSWORD, use_server_time=True, flag=config.USE_SERVER)
         self.public_api = Public.PublicAPI(config.OKX_API_KEY, config.OKX_SECRET, config.OKX_PASSWORD, use_server_time=True,flag=config.USE_SERVER)
+
+    def get_account_config(self):
+        result = self.account_api.get_account_config()
+        if result.get("code") != "0":
+            raise RuntimeError(f"获取账户配置失败: {result}")
+        data = result.get("data", [])
+        if not data:
+            raise RuntimeError("账户配置为空，无法继续")
+        return data[0]
+
+    def list_pending_orders(self):
+        result = self.trade_api.get_order_list(
+            instType="SWAP",
+            instId=config.SYMBOL,
+        )
+        if result.get("code") != "0":
+            raise RuntimeError(f"获取挂单列表失败: {result}")
+        return result.get("data", [])
+
+    def get_order_by_client_id(self, cl_ord_id):
+        if not cl_ord_id:
+            return None
+        try:
+            result = self.trade_api.get_order(instId=config.SYMBOL, clOrdId=cl_ord_id)
+        except Exception as exc:
+            log_error(f"按 clOrdId 查询订单失败: {cl_ord_id} -> {exc}")
+            return None
+
+        if result.get("code") != "0":
+            return None
+        data = result.get("data", [])
+        return data[0] if data else None
+
+    def cancel_pending_orders(self):
+        pending_orders = self.list_pending_orders()
+        if not pending_orders:
+            return []
+
+        canceled = []
+        for order in pending_orders:
+            ord_id = order.get("ordId", "")
+            cl_ord_id = order.get("clOrdId", "")
+            try:
+                result = self.trade_api.cancel_order(
+                    instId=config.SYMBOL,
+                    ordId=ord_id,
+                    clOrdId=cl_ord_id,
+                )
+                if result.get("code") == "0":
+                    canceled.append({
+                        "ordId": ord_id,
+                        "clOrdId": cl_ord_id,
+                        "state": order.get("state", ""),
+                    })
+                else:
+                    log_error(f"撤销挂单失败: ordId={ord_id}, clOrdId={cl_ord_id}, result={result}")
+            except Exception as exc:
+                log_error(f"撤销挂单异常: ordId={ord_id}, clOrdId={cl_ord_id}, err={exc}")
+
+        if canceled:
+            log_info(f"已清理挂单 {len(canceled)} 笔")
+        return canceled
+
+    def _extract_leverage_by_side(self, leverage_rows):
+        leverage_map = {}
+        for row in leverage_rows:
+            pos_side = str(row.get("posSide", "") or "").lower() or "both"
+            try:
+                leverage_map[pos_side] = float(row.get("lever", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+        return leverage_map
+
+    def ensure_trading_ready(self):
+        if bool(config.LIVE_REQUIRE_SIMULATED_TRADING) and str(config.USE_SERVER) != "1":
+            raise RuntimeError("当前配置不是 OKX 模拟盘(USE_SERVER=1)，已阻止启动交易监控")
+
+        if not config.OKX_API_KEY or not config.OKX_SECRET or not config.OKX_PASSWORD:
+            raise RuntimeError("OKX API 凭证缺失，无法启动交易监控")
+
+        account_config = self.get_account_config()
+        pos_mode = str(account_config.get("posMode", "") or "").lower()
+
+        if bool(config.LIVE_RECONCILE_PENDING_ORDERS):
+            self.cancel_pending_orders()
+
+        if pos_mode != "long_short_mode":
+            if not bool(config.LIVE_AUTO_SET_POSITION_MODE):
+                raise RuntimeError(f"账户持仓模式为 {pos_mode or 'unknown'}，与策略要求的 long_short_mode 不一致")
+
+            long_pos, short_pos = self.get_position()
+            if long_pos["size"] > 0 or short_pos["size"] > 0:
+                raise RuntimeError("持仓模式不是 long_short_mode，且当前已有持仓，拒绝自动切换")
+
+            result = self.account_api.set_position_mode("long_short_mode")
+            if result.get("code") != "0":
+                raise RuntimeError(f"自动设置持仓模式失败: {result}")
+            log_info("已自动切换到账户双向持仓模式 long_short_mode")
+            time.sleep(0.5)
+            account_config = self.get_account_config()
+            pos_mode = str(account_config.get("posMode", "") or "").lower()
+            if pos_mode != "long_short_mode":
+                raise RuntimeError(f"持仓模式校验失败，当前为 {pos_mode or 'unknown'}")
+
+        leverage_rows = self.account_api.get_leverage(mgnMode="cross", instId=config.SYMBOL)
+        if leverage_rows.get("code") != "0":
+            raise RuntimeError(f"获取杠杆配置失败: {leverage_rows}")
+        leverage_map = self._extract_leverage_by_side(leverage_rows.get("data", []))
+        target_leverage = float(config.LEVERAGE)
+
+        if bool(config.LIVE_AUTO_SET_LEVERAGE):
+            for pos_side in ("long", "short"):
+                current_leverage = leverage_map.get(pos_side, leverage_map.get("both", 0.0))
+                if abs(current_leverage - target_leverage) > 1e-9:
+                    result = self.account_api.set_leverage(
+                        lever=str(config.LEVERAGE),
+                        mgnMode="cross",
+                        instId=config.SYMBOL,
+                        posSide=pos_side,
+                    )
+                    if result.get("code") != "0":
+                        raise RuntimeError(f"设置 {pos_side} 杠杆失败: {result}")
+                    log_info(f"已自动设置 {pos_side} 杠杆为 {config.LEVERAGE}x")
+        else:
+            for pos_side in ("long", "short"):
+                current_leverage = leverage_map.get(pos_side, leverage_map.get("both", 0.0))
+                if abs(current_leverage - target_leverage) > 1e-9:
+                    raise RuntimeError(
+                        f"{pos_side} 杠杆当前为 {current_leverage}x，目标为 {target_leverage}x，且已关闭自动设置"
+                    )
+
+        log_info(
+            f"交易环境校验完成: simulated={str(config.USE_SERVER) == '1'}, "
+            f"pos_mode={pos_mode}, leverage_target={config.LEVERAGE}x"
+        )
 
     # 获取当前账户余额等信息
     def get_account_balance(self):
@@ -111,11 +264,11 @@ class OKXClient:
 
         while len(all_data) < max_limit:
             remaining = max_limit - len(all_data)
-            limit = min(100, remaining)
+            limit = min(300, remaining)
             batch = None
             for attempt in range(max_retry):
                 try:
-                    response = self.market_api.get_candlesticks(
+                    response = self.market_api.get_history_candlesticks(
                         instId=symbol,
                         bar=bar,
                         limit=limit,
@@ -147,13 +300,16 @@ class OKXClient:
         if not all_data:
             raise Exception("❌ 无法拉取任何K线数据，请检查API权限/网络")
 
-        # 转换为DataFrame
-        all_data = list(reversed(all_data))  # 最终按时间升序
+        # 转换为DataFrame。分页结果可能按“最近批次在前、历史批次在后”拼接，
+        # 这里统一按时间正序排序，并去重，避免滚动特征被乱序数据污染。
         columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
         df = pd.DataFrame([row[:6] for row in all_data], columns=columns)
         df['timestamp'] = pd.to_datetime(df['timestamp'].astype(float), unit='ms')
+        df.drop_duplicates(subset=['timestamp'], keep='last', inplace=True)
+        df.sort_values('timestamp', inplace=True)
         for col in ['open', 'high', 'low', 'close', 'volume']:
             df[col] = df[col].astype(float)
+        df.reset_index(drop=True, inplace=True)
         return df
 
     # 批量获取多个周期的k线数据
@@ -166,6 +322,58 @@ class OKXClient:
             time.sleep(0.3)
         return data_dict
 
+    def fetch_funding_rate_history(self, symbol=config.SYMBOL, max_records=None, max_retry=3, sleep_sec=1):
+        if max_records is None:
+            max_records = config.BACKTEST_FUNDING_HISTORY_LIMIT
+
+        all_rows = []
+        next_after = ''
+
+        while len(all_rows) < max_records:
+            remaining = max_records - len(all_rows)
+            limit = min(100, remaining)
+            batch = None
+
+            for attempt in range(max_retry):
+                try:
+                    response = self.public_api.funding_rate_history(
+                        instId=symbol,
+                        after=next_after,
+                        limit=str(limit),
+                    )
+                    batch = response.get('data', [])
+                    break
+                except Exception as e:
+                    print(f"⚠️ 拉取 funding 历史失败，重试中 ({attempt + 1}/{max_retry}): {e}")
+                    time.sleep(sleep_sec)
+            else:
+                print("❌ 超过最大重试次数，跳过 funding 历史分页")
+                break
+
+            if not batch:
+                break
+
+            all_rows.extend(batch)
+
+            if len(batch) < limit:
+                break
+
+            oldest_time = min(int(item['fundingTime']) for item in batch)
+            next_after = str(oldest_time)
+            time.sleep(0.2)
+
+        if not all_rows:
+            return pd.DataFrame(columns=['funding_time', 'funding_rate'])
+
+        df = pd.DataFrame(all_rows)
+        df['funding_time'] = pd.to_datetime(df['fundingTime'].astype(float), unit='ms')
+        rate_col = 'realizedRate' if 'realizedRate' in df.columns else 'fundingRate'
+        df['funding_rate'] = df[rate_col].astype(float)
+        df.drop_duplicates(subset=['funding_time'], keep='last', inplace=True)
+        df.sort_values('funding_time', inplace=True)
+        df.reset_index(drop=True, inplace=True)
+        return df[['funding_time', 'funding_rate']]
+
     ### 封装开仓/平仓逻辑(按usdt开仓)
     def place_order_with_leverage(self, side, posSide, usd_amount, leverage,reduce_only=False, max_retry=3, sleep_sec=1):
         if not isinstance(usd_amount, (int, float)):
@@ -173,18 +381,20 @@ class OKXClient:
                 usd_amount = float(usd_amount)
             except Exception:
                 raise Exception(f"❌ usd_amount 类型异常: 传入了无法转换的值 '{usd_amount}'")
+        cl_ord_id = build_client_order_id(config.SYMBOL, side, posSide, reduce_only)
         for attempt in range(max_retry):
             try:
                 market_price = self.get_price()
 
                 # ✅ 资金安全校验 (账户可用保证金检查)
-                account_info = self.get_account_balance()
-                available_usdt = float(account_info['data'][0]['availEq'])
-                required_margin = usd_amount  # cross模式下，本金即为保证金需求
+                if not reduce_only:
+                    account_info = self.get_account_balance()
+                    available_usdt = float(account_info['data'][0]['availEq'])
+                    required_margin = usd_amount  # cross模式下，本金即为保证金需求
 
-                if required_margin > available_usdt:
-                    log_error(f"❌ 保证金不足: 需 {required_margin} USDT，可用 {available_usdt} USDT，取消下单")
-                    return False
+                    if required_margin > available_usdt:
+                        log_error(f"❌ 保证金不足: 需 {required_margin} USDT，可用 {available_usdt} USDT，取消下单")
+                        return False
 
                 # ✅ 直接读取写死的合约参数
                 lot_size = config.LOT_SIZE
@@ -211,15 +421,20 @@ class OKXClient:
                     posSide=posSide,
                     ordType="market",
                     sz=str(size),
-                    reduceOnly=reduce_only
+                    reduceOnly=reduce_only,
+                    clOrdId=cl_ord_id,
                 )
 
                 if result['code'] == "0":
                     order_id = result['data'][0]['ordId']
                     log_info(
-                        f"✅ 下单成功: {side} {posSide} 杠杆: {leverage}x, 本金: {usd_amount} USD, 下单数量: {size} {config.SYMBOL}, 订单ID: {order_id}")
+                        f"✅ 下单成功: {side} {posSide} 杠杆: {leverage}x, 本金: {usd_amount} USD, 下单数量: {size} {config.SYMBOL}, 订单ID: {order_id}, clOrdId: {cl_ord_id}")
                     return True
                 else:
+                    existing_order = self.get_order_by_client_id(cl_ord_id)
+                    if order_is_acknowledged(existing_order):
+                        log_info(f"✅ 下单响应异常但订单已受理: clOrdId={cl_ord_id}, state={existing_order.get('state')}")
+                        return True
                     # ✅ 保险：防止无 data 崩溃
                     error_data = result.get('data', [{}])[0]
                     error_code = error_data.get('sCode', '')
@@ -228,6 +443,10 @@ class OKXClient:
                     time.sleep(sleep_sec)
 
             except Exception as e:
+                existing_order = self.get_order_by_client_id(cl_ord_id)
+                if order_is_acknowledged(existing_order):
+                    log_info(f"✅ 下单异常但订单已受理: clOrdId={cl_ord_id}, state={existing_order.get('state')}")
+                    return True
                 log_error(f"⚠ 下单异常({attempt + 1}): {e}")
                 time.sleep(sleep_sec)
 
@@ -236,27 +455,27 @@ class OKXClient:
 
     # 开多仓(按usdt)
     def open_long(self, usd_amount, leverage):
-        self.place_order_with_leverage("buy", "long", usd_amount, leverage, reduce_only=False)
+        return self.place_order_with_leverage("buy", "long", usd_amount, leverage, reduce_only=False)
 
     # 平多仓(按usdt)
     def close_long(self, usd_amount, leverage):
         long_pos, _ = self.get_position()
         if long_pos['size'] == 0:
             log_info("🟢 无多仓位，跳过平多")
-            return
-        self.place_order_with_leverage("sell", "long", usd_amount, leverage, reduce_only=True)
+            return False
+        return self.place_order_with_leverage("sell", "long", usd_amount, leverage, reduce_only=True)
 
     # 开空仓(按usdt)
     def open_short(self, usd_amount, leverage):
-        self.place_order_with_leverage("sell", "short", usd_amount, leverage, reduce_only=False)
+        return self.place_order_with_leverage("sell", "short", usd_amount, leverage, reduce_only=False)
 
     # 平空仓(按usdt)
     def close_short(self, usd_amount, leverage):
         _, short_pos = self.get_position()
         if short_pos['size'] == 0:
             log_info("🟢 无空仓位，跳过平空")
-            return
-        self.place_order_with_leverage("buy", "short", usd_amount, leverage, reduce_only=True)
+            return False
+        return self.place_order_with_leverage("buy", "short", usd_amount, leverage, reduce_only=True)
 
     ### 封装开仓/平仓逻辑(按size开仓)
     def place_order_with_size(self, side, posSide, size, leverage, reduce_only=False, max_retry=3, sleep_sec=1):
@@ -272,6 +491,7 @@ class OKXClient:
         lot_size = float(config.LOT_SIZE)
         size = math.floor(size / lot_size) * lot_size
         size = round(size, 6)
+        cl_ord_id = build_client_order_id(config.SYMBOL, side, posSide, reduce_only)
 
         if size < lot_size:
             if reduce_only:
@@ -282,16 +502,17 @@ class OKXClient:
 
         for attempt in range(max_retry):
             try:
-                market_price = self.get_price()
+                if not reduce_only:
+                    market_price = self.get_price()
 
-                # 保证金检查：估算 required_margin = 名义价值 / leverage = size*price/leverage
-                account_info = self.get_account_balance()
-                available_usdt = float(account_info['data'][0]['availEq'])
-                required_margin = (size * market_price) / float(leverage)
+                    # 保证金检查：估算 required_margin = 名义价值 / leverage = size*price/leverage
+                    account_info = self.get_account_balance()
+                    available_usdt = float(account_info['data'][0]['availEq'])
+                    required_margin = (size * market_price) / float(leverage)
 
-                if required_margin > available_usdt:
-                    log_error(f"❌ 保证金不足: 需 {required_margin:.2f} USDT，可用 {available_usdt:.2f} USDT，取消下单")
-                    return False
+                    if required_margin > available_usdt:
+                        log_error(f"❌ 保证金不足: 需 {required_margin:.2f} USDT，可用 {available_usdt:.2f} USDT，取消下单")
+                        return False
 
                 result = self.trade_api.place_order(
                     instId=config.SYMBOL,
@@ -300,15 +521,20 @@ class OKXClient:
                     posSide=posSide,
                     ordType="market",
                     sz=str(size),
-                    reduceOnly=reduce_only
+                    reduceOnly=reduce_only,
+                    clOrdId=cl_ord_id,
                 )
 
                 if result['code'] == "0":
                     order_id = result['data'][0]['ordId']
                     log_info(
-                        f"✅ 下单成功(sz模式): {side} {posSide} {leverage}x, sz={size}, reduceOnly={reduce_only}, ordId={order_id}")
+                        f"✅ 下单成功(sz模式): {side} {posSide} {leverage}x, sz={size}, reduceOnly={reduce_only}, ordId={order_id}, clOrdId={cl_ord_id}")
                     return True
                 else:
+                    existing_order = self.get_order_by_client_id(cl_ord_id)
+                    if order_is_acknowledged(existing_order):
+                        log_info(f"✅ 下单响应异常但订单已受理(sz模式): clOrdId={cl_ord_id}, state={existing_order.get('state')}")
+                        return True
                     error_data = result.get('data', [{}])[0]
                     error_code = error_data.get('sCode', '')
                     error_msg = error_data.get('sMsg', '')
@@ -316,6 +542,10 @@ class OKXClient:
                     time.sleep(sleep_sec)
 
             except Exception as e:
+                existing_order = self.get_order_by_client_id(cl_ord_id)
+                if order_is_acknowledged(existing_order):
+                    log_info(f"✅ 下单异常但订单已受理(sz模式): clOrdId={cl_ord_id}, state={existing_order.get('state')}")
+                    return True
                 log_error(f"⚠ 下单异常(sz模式)({attempt + 1}): {e}")
                 time.sleep(sleep_sec)
 
@@ -329,7 +559,8 @@ class OKXClient:
         if long_pos['size'] <= 0:
             log_info("🟢 无多仓位，跳过平多")
             return False
-        return self.place_order_with_size("sell", "long", sz, leverage, reduce_only=True)
+        close_size = min(float(sz), float(long_pos['size']))
+        return self.place_order_with_size("sell", "long", close_size, leverage, reduce_only=True)
 
     def open_short_sz(self, sz, leverage):
         return self.place_order_with_size("sell", "short", sz, leverage, reduce_only=False)
@@ -339,7 +570,8 @@ class OKXClient:
         if short_pos['size'] <= 0:
             log_info("🟢 无空仓位，跳过平空")
             return False
-        return self.place_order_with_size("buy", "short", sz, leverage, reduce_only=True)
+        close_size = min(float(sz), float(short_pos['size']))
+        return self.place_order_with_size("buy", "short", close_size, leverage, reduce_only=True)
 
 
 

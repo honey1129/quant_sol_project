@@ -28,6 +28,8 @@ logging.basicConfig(
 logging.getLogger("okx").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 
+_telegram_disabled_for_process = False
+
 # ✅ 统一日志封装
 def log_info(msg):
     print(msg)
@@ -41,9 +43,28 @@ def log_error(msg):
 
 # ✅ Telegram 通知模块
 def send_telegram(message):
+    global _telegram_disabled_for_process
+
+    if _telegram_disabled_for_process or not getattr(config, "TELEGRAM_ENABLED", True):
+        return
+
+    bot_token = str(getattr(config, "TELEGRAM_BOT_TOKEN", "") or "").strip()
+    chat_id = str(getattr(config, "TELEGRAM_CHAT_ID", "") or "").strip()
+    placeholder_values = {
+        "",
+        "你的TG_BOT_TOKEN",
+        "你的TG_CHAT_ID",
+        "YOUR_TG_BOT_TOKEN",
+        "YOUR_TG_CHAT_ID",
+    }
+    if bot_token in placeholder_values or chat_id in placeholder_values:
+        return
+
     url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": config.TELEGRAM_CHAT_ID, "text": message}
     try:
-        requests.post(url, data=payload)
+        response = requests.post(url, data=payload, timeout=5)
+        response.raise_for_status()
     except Exception as e:
-        print(f"Telegram通知失败: {e}")
+        _telegram_disabled_for_process = True
+        print(f"Telegram通知失败，当前进程后续已静默: {e}")
