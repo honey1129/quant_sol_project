@@ -1,194 +1,299 @@
-# Quant Project (V3.1 Pro Version)
+# Quant Project
 
-> 🚀 **多周期、多模型、多因子融合的 OKX 永续合约量化交易系统**
+基于 OKX 永续合约的量化交易项目，覆盖训练、回测、测试盘联调与 VPS 常驻运行。当前代码主流程围绕 OKX，重点已经补齐以下几块：
 
----
+- 多周期特征工程：`5m / 15m / 1H`
+- 多模型集成：LightGBM、XGBoost、RandomForest
+- 更真实的回测撮合：盯市净值、手续费、滑点、资金费、bar 内 TP/SL
+- 基于 ATR / 波动率的自适应止盈止损
+- 测试盘保护：强制模拟盘、自动校验持仓模式、自动设置杠杆、启动前清挂单
+- 实盘状态保护：`clOrdId` 幂等下单、`last_bar_ts` 持久化，避免重启后重复处理同一根 K 线
 
-## 📦 项目简介
+推荐使用顺序：
 
-本项目是基于 okx交易所的 保证金合约市场，使用机器学习（LightGBM）、多周期特征融合、资金流+波动率因子、动态仓位管理（Kelly+多因子）的完整量化交易系统。
+1. 训练模型
+2. 跑回测
+3. 调参自适应 TP/SL
+4. 本地测试盘联调
+5. VPS 常驻运行测试盘
 
-✅ 支持回测与实盘自动交易  
-✅ 支持多周期数据拉取（5m、15m、1H）  
-✅ 支持模型集成与~~平滑信号~~  
-✅ 支持 OKX API 全自动下单
+## 项目结构
 
----
-
-
-## 🗂 项目目录结构
-
-```
+```text
 quant_sol_project/
-│
-├── core/                  # 核心模块
-│   ├── okx_api.py         # OKX API封装模块
-│   ├── ml_feature_engineering.py  # 多周期特征工程与衍生特征生成
-│   ├── position_manager.py  # 动态仓位管理模块 (Kelly + 波动率 + 资金流融合)
-│   ├── signal_engine.py   # 多模型融合信号引擎
-│   ├── reward_risk.py     # 动态计算Kelly公式里的reward_risk
-│   └── strategy_core.py   # 策略核心代码
-│
-│
-├── run/                        # 程序运行主入口
-│   ├── live_trading_monitor.py  # 程序实盘运行主入口
-│   └── scheduler.py             # 封装的定时任务启动器
-│
-├── train/                 # 训练模块
-│   └── train.py           # 完整训练流程
-│
-├── backtest/              # 回测模块
-│   └── backtest.py        # 完整回测流程
-│
-├── utils/                 # 工具模块
-│   └── utils.py           # 日志、Telegram通知、路径配置等
-│
-├── config/                # 配置模块
-│   └── config.py          # 全局配置项，支持 .env 环境变量动态配置
-│
-├── models/                # 训练后的模型文件及特征列表
-│   ├── model_okx.pkl
-│   └── feature_list.pkl
-│
-├── logs/                  # 运行日志
-│
-├── .env                   # 私密配置 (API KEY, 参数, 策略阈值等)
-├── .gitignore             # Git忽略文件
-└── README.md              # 项目说明文档（本文件）
+├── backtest/                  # 回测逻辑
+├── config/                    # .env 与全局配置解析
+├── core/                      # 交易所接口、策略核心、特征工程、仓位管理
+├── run/                       # 启动脚本、测试盘检查、VPS bootstrap、参数扫描
+├── tests/                     # 核心单测
+├── train/                     # 模型训练
+├── utils/                     # 日志、通知、通用工具
+├── ecosystem.paper.config.js  # PM2 测试盘配置
+├── .env.example               # 环境变量模板
+└── README.md
 ```
 
----
+## 核心能力
 
-##  🔑okx [api-key申请地址](https://www.okx.com/account/my-api)
+### 1. 训练
 
-   [api 文档](https://www.okx.com/docs-v5/zh/#overview)
+- 从 OKX 拉取多周期历史数据
+- 生成多周期特征与高级特征
+- 按时间顺序切分训练集 / 测试集，避免未来数据泄漏
+- 在训练集内部做类别平衡
+- 产出模型文件和特征列表
 
----
+默认模型输出：
 
-## 🔧 运行环境配置
+- `models/lgb_model.pkl`
+- `models/xgb_model.pkl`
+- `models/rf_model.pkl`
+- `models/feature_list.pkl`
 
-### 推荐使用 Python 3.9+
+### 2. 回测
 
+当前回测比旧版本更接近真实运行环境，主要包括：
 
-### 1️⃣ 安装依赖
+- 使用盯市净值而不是只看已实现余额
+- 计入手续费和滑点成本
+- 可选加载资金费历史
+- 支持单根 5m bar 内的 TP/SL 触发
+- 同一根 bar 同时打到 TP 和 SL 时，默认按最保守的最差情况处理
+- 自适应 TP/SL 会根据 ATR 与波动率动态调整阈值
+
+回测输出会包含：
+
+- `final_equity`
+- `return_pct`
+- `max_drawdown_pct`
+- `trade_count`
+- `take_profit_count`
+- `stop_loss_count`
+- `fees_paid`
+- `slippage_cost`
+- `funding_pnl`
+
+同时会在 `logs/` 下生成带汇总信息的回测 CSV。
+
+### 3. 测试盘 / 运行保护
+
+`run.live_trading_monitor` 启动时会先做交易环境校验：
+
+- `LIVE_REQUIRE_SIMULATED_TRADING=1` 时，要求 `USE_SERVER=1`
+- 自动检查并切到 `long_short_mode`
+- 自动检查并设置多空双边杠杆
+- 启动前可自动清理挂单
+- 每次只处理上一根已收盘 bar
+- 重启后恢复 `logs/live_trading_state.json` 中的最近处理 bar 时间戳
+
+`core.okx_api` 中还补了幂等保护：
+
+- 下单使用唯一 `clOrdId`
+- 下单响应异常时，会按 `clOrdId` 反查是否已受理，避免重复下单
+
+## 环境准备
+
+### Python
+
+推荐 `Python 3.10+`，至少保证和当前依赖兼容。
+
+### 安装依赖
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
+pip install --upgrade pip
 pip install -r requirements.txt
-
 ```
-### 2️⃣ 配置 .env 文件
+
+### 初始化配置
 
 ```bash
-copy .env.example .env
+cp .env.example .env
 ```
 
----
+至少先检查这些关键配置：
 
-## 🚀 模型训练
-直接运行：
+| 配置项 | 说明 | 建议 |
+| --- | --- | --- |
+| `OKX_API_KEY` / `OKX_SECRET` / `OKX_PASSWORD` | OKX API 凭证 | 测试盘先填模拟盘密钥 |
+| `USE_SERVER` | `1`=模拟盘，`0`=实盘 | 联调阶段固定用 `1` |
+| `SYMBOL` | 交易标的 | 默认 `SOL-USDT-SWAP` |
+| `LEVERAGE` | 杠杆倍数 | 先保守，小杠杆测试 |
+| `POSITION_SIZE` | 单次目标资金量 | 先用最小可测仓位 |
+| `MODEL_PATHS` | 集成模型路径 | 保持和训练输出一致 |
+| `MODEL_WEIGHTS` | 各模型权重 | 和 `MODEL_PATHS` 对齐 |
+| `ADAPTIVE_TP_SL_ENABLED` | 是否启用自适应 TP/SL | 建议保持 `1` |
+| `LIVE_REQUIRE_SIMULATED_TRADING` | 是否强制模拟盘保护 | 建议保持 `1` |
+| `LIVE_AUTO_SET_POSITION_MODE` | 自动切双向持仓 | 建议保持 `1` |
+| `LIVE_AUTO_SET_LEVERAGE` | 自动设置杠杆 | 建议保持 `1` |
+| `LIVE_RECONCILE_PENDING_ORDERS` | 启动/轮询前清挂单 | 建议保持 `1` |
+| `LIVE_PERSIST_LAST_BAR` | 持久化最近 bar | 建议保持 `1` |
 
+如果你是第一次做测试盘联调，建议先保留：
+
+```env
+USE_SERVER=1
+LIVE_REQUIRE_SIMULATED_TRADING=1
+TELEGRAM_ENABLED=0
+```
+
+## 常用命令
+
+### 1. 训练模型
 
 ```bash
 python -m train.train
 ```
-* 会自动拉取多周期数据，完成特征工程，模型训练与保存
-* 训练后的模型文件保存至 models/model_okx.pkl
-* 同时保存特征列表 models/feature_list.pkl
----
-## 📊 策略回测
-直接运行：
+
+### 2. 跑回测
+
 ```bash
 python -m backtest.backtest
 ```
-* 支持多周期全量回测
-* 自动加载训练好的模型和特征
-* 回测结果含收益、回撤等指标以及详细的回测交易记录
-*  回测交易记录示例：
 
-| timestamp           | action | price   | position | balance | 
-|---------------------|-----|---------|---------|--------|
-| 2025-12-23 20:40:00 | 反向平仓 | 2985.19 | 0.0491  | 1003.79 |
-| 2025-12-23 20:40:00  | 开空  | 2988.51 | -0.0472 | 1003.72|
-
----
-## 🟢 实盘执行
+### 3. 扫描自适应 TP/SL 参数
 
 ```bash
-python -m run.live_trading_monitor
+python -m run.tune_adaptive_tp_sl
 ```
----
 
-## 📊 模型训练效果
+脚本会输出多组候选参数的回测对比，并给出 `recommended_overrides`。
 
-![img.png](img.png)
-
-## 📊 回测结果
-![img_1.png](img_1.png)
-
-
----
-## 部署流程
-### 1️⃣ 安装 Node.js (用于 PM2)
+### 4. 测试盘启动前预检
 
 ```bash
-curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.4/install.sh | bash
-source ~/.bashrc
-nvm install 16
+PYTHONPATH=. TELEGRAM_ENABLED=0 python run/check_okx_paper_ready.py
 ```
 
-### 2️⃣ 安装 PM2
+如果环境无误，会输出类似：
+
+```text
+paper_ready_ok
+symbol=SOL-USDT-SWAP
+use_server=1
+leverage=3
+...
+```
+
+### 5. 启动本地测试盘监控
+
+```bash
+PYTHONPATH=. TELEGRAM_ENABLED=0 python -m run.live_trading_monitor
+```
+
+### 6. 启动守护调度器
+
+```bash
+python -m run.scheduler
+```
+
+调度器逻辑：
+
+- 每天凌晨 2 点自动训练和回测
+- 其他时间确保 `run.live_trading_monitor` 常驻
+
+## 测试盘联调建议
+
+推荐按这个顺序执行：
+
+1. 先确认 `.env` 使用的是模拟盘密钥，且 `USE_SERVER=1`
+2. 先跑 `run/check_okx_paper_ready.py`
+3. 手动确认没有遗留仓位和挂单
+4. 用最小仓位启动 `run.live_trading_monitor`
+5. 观察开仓、加减仓、平仓、重启恢复是否都正常
+6. 确认 `logs/live_trading.log` 和 `logs/live_trading_state.json` 正常更新
+
+## VPS 部署
+
+### 1. 一键初始化 Python 环境
+
+```bash
+bash run/bootstrap_vps.sh
+```
+
+这个脚本会：
+
+- 创建 `.venv`
+- 安装依赖
+- 给出后续测试盘启动命令
+
+### 2. 安装 PM2
+
 ```bash
 npm install -g pm2
 ```
 
-###  3️⃣ 测试本地可运行性
-```bash
-# 激活虚拟环境
-source .venv/bin/activate
-
-# 先测试实盘模块能正常运行
-python -m run.live_trading_monitor
-```
-
-### 4️⃣ 使用 PM2 部署守护
-```bash
-pm2 start .venv/bin/python --name quant_okx -- -m run.scheduler
-```
-
-### 5️⃣ 测试盘 VPS 最小部署
-推荐先不要在 VPS 上直接跑 `run.scheduler`，而是先只跑测试盘监控：
+### 3. 先做测试盘预检
 
 ```bash
-bash run/bootstrap_vps.sh
-cp .env.example .env
-# 然后把 OKX 测试盘密钥填进 .env，并确认 USE_SERVER=1
-
 PYTHONPATH=. TELEGRAM_ENABLED=0 .venv/bin/python run/check_okx_paper_ready.py
+```
+
+### 4. 用 PM2 常驻测试盘
+
+```bash
 pm2 start ecosystem.paper.config.js
 pm2 save
 ```
 
-查看日志：
+PM2 里默认跑的是：
+
+```bash
+.venv/bin/python -m run.live_trading_monitor
+```
+
+### 5. 查看日志
 
 ```bash
 pm2 logs quant_okx_paper
 tail -f logs/live_trading.log
+tail -f logs/scheduler.log
 ```
----
-## ⚠ 注意事项
 
-- 本项目仅供学习与研究用途，请勿直接在实盘大资金环境下使用！
-- 请务必做好 API 密钥与资金安全隔离！
-- 强烈建议在云服务器测试好逻辑后再投入正式运行。
+## 日志与状态文件
 
----
+- `logs/live_trading.log`: 交易监控主日志
+- `logs/scheduler.log`: 调度器日志
+- `logs/live_trading_state.json`: 最近处理 bar 的持久化状态
+- `logs/backtest_*.csv`: 回测交易记录与汇总
 
-## 📌 后续优化方向
+## 单元测试
 
-- ✅ 多模型融合 (LightGBM、XGBoost、RandomForest)（现已支持）
-- ✅ 多周期特征支持（5m、15m、1h、4h 等）(现已支持）
-- ✅ 智能仓位动态管理 (现已支持）
-- ⏳ 支持指标监控（资金流、波动率、仓位等）
-- ⏳ 可视化监控模块（资金曲线/信号走势）
+建议至少跑这几组核心测试：
+
+```bash
+python -m unittest \
+  tests.test_backtest_equity \
+  tests.test_backtest_intrabar \
+  tests.test_strategy_core \
+  tests.test_live_runtime_state
+```
+
+这些测试主要覆盖：
+
+- 盯市净值计算
+- 同 bar 内 TP/SL 处理
+- 自适应止盈止损阈值
+- `clOrdId` 辅助逻辑
+- `last_bar_ts` 持久化与恢复
+
+## 风险说明
+
+- 当前代码更适合先跑测试盘，不建议直接切到实盘大资金。
+- `LIVE_REQUIRE_SIMULATED_TRADING=1` 是默认保护，不建议轻易关闭。
+- 切到真实资金前，至少先完成一轮本地测试盘和一轮 VPS 测试盘观察。
+- 即使策略能稳定下单，也仍然要关注交易所接口波动、网络延迟、滑点扩大和资金费变化。
+
+## 历史截图
+
+下面两张图仅作项目历史效果示意，具体结果请以你当前本地训练与回测输出为准。
+
+![训练示意](/Users/honey/PycharmProjects/quant_sol_project/img.png)
+
+![回测示意](/Users/honey/PycharmProjects/quant_sol_project/img_1.png)
+
+## 参考链接
+
+- [OKX API Key 管理](https://www.okx.com/account/my-api)
+- [OKX API 文档](https://www.okx.com/docs-v5/zh/#overview)
