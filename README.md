@@ -283,6 +283,20 @@ tail -f logs/live_trading.log
 tail -f logs/scheduler.log
 ```
 
+### 7. 只看最近策略状态摘要
+
+默认查看最近 60 条关键状态：
+
+```bash
+bash run/strategy_status_summary.sh
+```
+
+实时追踪关键状态：
+
+```bash
+bash run/strategy_status_summary.sh --follow
+```
+
 ## 日志与状态文件
 
 - `logs/live_trading.log`: 交易监控主日志
