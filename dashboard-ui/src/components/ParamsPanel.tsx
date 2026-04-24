@@ -1,3 +1,4 @@
+import { formatClock } from "../lib/format";
 import type { StrategyParams } from "../types";
 
 interface ParamsPanelProps {
@@ -30,7 +31,7 @@ export function ParamsPanel({
         </div>
         <div className="text-right text-xs text-slate-500">
           <p>Live snapshot with local edit buffer</p>
-          <p>{savedAt ? `Last saved ${savedAt.toLocaleTimeString()}` : "Not saved yet"}</p>
+          <p>{savedAt ? `Last saved ${formatClock(savedAt)} UTC+8` : "Not saved yet"}</p>
         </div>
       </div>
 

@@ -62,11 +62,11 @@ export function TopNav({
 
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
           <div className="rounded-2xl border border-white/10 bg-slate-950/[0.03] px-4 py-2 text-right dark:bg-white/5">
-            <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500 dark:text-slate-400">Current Time</p>
+            <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500 dark:text-slate-400">Current Time (UTC+8)</p>
             <p className="mt-1 font-mono text-sm font-medium text-slate-900 dark:text-slate-100">{formatClock(now)}</p>
           </div>
           <div className="rounded-2xl border border-white/10 bg-slate-950/[0.03] px-4 py-2 text-right dark:bg-white/5">
-            <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500 dark:text-slate-400">Last Update</p>
+            <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500 dark:text-slate-400">Last Update (UTC+8)</p>
             <p className="mt-1 font-mono text-sm font-medium text-slate-900 dark:text-slate-100">{formatDateTime(updatedAt)}</p>
           </div>
           <button

@@ -1,3 +1,5 @@
+export const DISPLAY_TIME_ZONE = "Asia/Shanghai";
+
 export const currencyFormatter = new Intl.NumberFormat("en-US", {
   style: "currency",
   currency: "USD",
@@ -40,6 +42,7 @@ export function formatDateTime(value: string): string {
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
+    timeZone: DISPLAY_TIME_ZONE,
   }).format(new Date(value));
 }
 
@@ -48,13 +51,14 @@ export function formatClock(value: Date): string {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
+    timeZone: DISPLAY_TIME_ZONE,
   }).format(value);
 }
 
 export function formatAxisTime(value: string, compact = false): string {
   return new Intl.DateTimeFormat("en-US", compact
-    ? { month: "short", day: "2-digit" }
-    : { hour: "2-digit", minute: "2-digit" }
+    ? { month: "short", day: "2-digit", timeZone: DISPLAY_TIME_ZONE }
+    : { hour: "2-digit", minute: "2-digit", timeZone: DISPLAY_TIME_ZONE }
   ).format(new Date(value));
 }
 
