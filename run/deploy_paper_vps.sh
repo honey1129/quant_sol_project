@@ -3,9 +3,11 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="${APP_NAME:-quant_okx_paper}"
+DASHBOARD_APP_NAME="${DASHBOARD_APP_NAME:-quant_okx_dashboard}"
 ENV_FILE="${ENV_FILE:-$PROJECT_ROOT/.env}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 TELEGRAM_FLAG="${TELEGRAM_ENABLED:-0}"
+DASHBOARD_PORT="${DASHBOARD_PORT:-8787}"
 PACKAGE_MANAGER=""
 PACKAGE_INDEX_REFRESHED=0
 
@@ -35,9 +37,11 @@ Options:
 
 Environment overrides:
   APP_NAME           PM2 app name, default: quant_okx_paper
+  DASHBOARD_APP_NAME Dashboard PM2 app name, default: quant_okx_dashboard
   ENV_FILE           .env path, default: <project>/.env
   PYTHON_BIN         Python interpreter used to create venv, default: python3
   TELEGRAM_ENABLED   Exported into precheck/runtime, default: 0
+  DASHBOARD_PORT     Dashboard HTTP port, default: 8787
 
 Behavior:
   - Automatically installs missing system packages such as python3-venv,
@@ -226,8 +230,12 @@ ensure_python_venv_support() {
   esac
 }
 
-ensure_node_and_pm2() {
-  if [[ "$SKIP_START" -eq 1 ]]; then
+dashboard_ui_present() {
+  [[ -f "$PROJECT_ROOT/dashboard-ui/package.json" ]]
+}
+
+ensure_node() {
+  if ! dashboard_ui_present; then
     return
   fi
 
@@ -247,9 +255,20 @@ ensure_node_and_pm2() {
       apk)
         install_or_fail "Node.js and npm" nodejs npm
         ;;
-    esac
+      esac
+  fi
+}
+
+ensure_pm2() {
+  if [[ "$SKIP_START" -eq 1 ]]; then
+    return
   fi
 
+  if command -v pm2 >/dev/null 2>&1; then
+    return
+  fi
+
+  ensure_node
   if ! command -v pm2 >/dev/null 2>&1; then
     log "Installing pm2 via npm"
     run_privileged npm install -g pm2 || fail "Failed to install pm2 globally"
@@ -260,7 +279,8 @@ ensure_node_and_pm2() {
 ensure_system_dependencies() {
   ensure_base_system_packages
   ensure_python_venv_support
-  ensure_node_and_pm2
+  ensure_node
+  ensure_pm2
 }
 
 read_env_value() {
@@ -383,6 +403,27 @@ setup_venv() {
   "$PROJECT_ROOT/.venv/bin/python" -m pip install -r "$PROJECT_ROOT/requirements.txt"
 }
 
+build_dashboard_ui() {
+  if ! dashboard_ui_present; then
+    log "Dashboard UI source not found, skipping frontend build"
+    return
+  fi
+
+  require_command node
+  require_command npm
+
+  log "Installing dashboard UI dependencies and building static assets"
+  (
+    cd "$PROJECT_ROOT/dashboard-ui"
+    if [[ -f package-lock.json ]]; then
+      npm ci
+    else
+      npm install
+    fi
+    npm run build
+  )
+}
+
 run_precheck() {
   if [[ "$SKIP_CHECK" -eq 1 ]]; then
     log "Skipping paper readiness check"
@@ -410,6 +451,11 @@ load_nvm_if_needed() {
 }
 
 start_or_reload_pm2() {
+  local apps=("$APP_NAME")
+  if dashboard_ui_present; then
+    apps+=("$DASHBOARD_APP_NAME")
+  fi
+
   if [[ "$SKIP_START" -eq 1 ]]; then
     log "Skipping PM2 start/reload"
     return
@@ -418,18 +464,21 @@ start_or_reload_pm2() {
   load_nvm_if_needed
   require_command pm2
 
-  log "Starting or reloading PM2 app: $APP_NAME"
+  log "Starting or reloading PM2 apps: ${apps[*]}"
   (
     cd "$PROJECT_ROOT"
-    if pm2 describe "$APP_NAME" >/dev/null 2>&1; then
-      PYTHONPATH="$PROJECT_ROOT" TELEGRAM_ENABLED="$TELEGRAM_FLAG" \
-        pm2 reload ecosystem.paper.config.js --only "$APP_NAME" --update-env
-    else
-      PYTHONPATH="$PROJECT_ROOT" TELEGRAM_ENABLED="$TELEGRAM_FLAG" \
-        pm2 start ecosystem.paper.config.js --only "$APP_NAME" --update-env
-    fi
+    local app_name
+    for app_name in "${apps[@]}"; do
+      if pm2 describe "$app_name" >/dev/null 2>&1; then
+        PYTHONPATH="$PROJECT_ROOT" TELEGRAM_ENABLED="$TELEGRAM_FLAG" DASHBOARD_PORT="$DASHBOARD_PORT" \
+          pm2 reload ecosystem.paper.config.js --only "$app_name" --update-env
+      else
+        PYTHONPATH="$PROJECT_ROOT" TELEGRAM_ENABLED="$TELEGRAM_FLAG" DASHBOARD_PORT="$DASHBOARD_PORT" \
+          pm2 start ecosystem.paper.config.js --only "$app_name" --update-env
+      fi
+    done
     pm2 save
-    pm2 status "$APP_NAME"
+    pm2 status
   )
 }
 
@@ -440,12 +489,16 @@ print_summary() {
 [deploy] Project root: $PROJECT_ROOT
 [deploy] Env file:     $ENV_FILE
 [deploy] App name:     $APP_NAME
+[deploy] Dashboard app: $DASHBOARD_APP_NAME
+[deploy] Dashboard URL: http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo 127.0.0.1):$DASHBOARD_PORT
 
 [deploy] Useful commands:
   pm2 logs $APP_NAME
+  pm2 logs $DASHBOARD_APP_NAME
   tail -f $PROJECT_ROOT/logs/live_trading.log
   tail -f $PROJECT_ROOT/logs/scheduler.log
   cat $PROJECT_ROOT/logs/live_trading_state.json
+  curl http://127.0.0.1:$DASHBOARD_PORT/api/health
 EOF
 }
 
@@ -457,6 +510,7 @@ main() {
   validate_paper_env
   validate_model_artifacts
   setup_venv
+  build_dashboard_ui
   mkdir -p "$PROJECT_ROOT/logs"
   run_precheck
   start_or_reload_pm2

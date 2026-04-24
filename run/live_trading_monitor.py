@@ -10,6 +10,7 @@ from core import ml_feature_engineering, signal_engine
 from core.reward_risk import RewardRiskEstimator
 from core.strategy_core import StrategyCore
 from utils.utils import log_info, log_error, BASE_DIR
+from utils.runtime_dashboard import write_runtime_dashboard_snapshot
 from config import config
 from core.okx_api import OKXClient
 from core.position_manager import PositionManager
@@ -50,6 +51,15 @@ def persist_last_bar_ts(state_path, bar_ts):
     os.replace(tmp_path, state_path)
 
 
+def normalize_ts(value):
+    if value is None:
+        return None
+    try:
+        return pd.Timestamp(value).isoformat()
+    except Exception:
+        return str(value)
+
+
 class LiveTrader:
     def __init__(self, client):
         self.client = client
@@ -68,6 +78,10 @@ class LiveTrader:
         self.same_bar_skip_count = 0
         self.last_heartbeat_logged_at = None
         self.heartbeat_log_interval_sec = HEARTBEAT_LOG_INTERVAL_SEC
+        self.last_dashboard_account = {}
+        self.last_signal_snapshot = {}
+        self.last_bar_snapshot = {}
+        self.last_execution = {}
 
         # ===== 模型/特征=====
         feature_path = os.path.join(BASE_DIR, config.FEATURE_LIST_PATH) if "BASE_DIR" in globals() else config.FEATURE_LIST_PATH
@@ -169,12 +183,101 @@ class LiveTrader:
         return bar_ts, price, long_prob, short_prob, money_flow_ratio, volatility, atr_ratio
 
     def _get_equity(self) -> float:
-        account_balance = self.client.get_account_balance()
-        balance = account_balance["data"][0]
-        total_eq = float(balance.get("totalEq", 0) or 0)
+        account = self._get_account_snapshot()
+        total_eq = float(account.get("total_eq", 0) or 0)
         if total_eq > 0:
             return total_eq
-        return float(balance["availEq"])
+        return float(account.get("avail_eq", 0) or 0)
+
+    def _get_account_snapshot(self):
+        account_balance = self.client.get_account_balance()
+        balance = account_balance["data"][0]
+        snapshot = {
+            "total_eq": float(balance.get("totalEq", 0) or 0),
+            "avail_eq": float(balance.get("availEq", 0) or 0),
+            "currency": "USDT",
+        }
+        self.last_dashboard_account = snapshot
+        return snapshot
+
+    def _build_position_snapshot(self, pos_qty, entry_price, current_price=None, pending_orders=None):
+        direction = "flat"
+        if pos_qty > 0:
+            direction = "long"
+        elif pos_qty < 0:
+            direction = "short"
+
+        notional = None
+        if current_price is not None:
+            notional = abs(float(pos_qty)) * float(current_price)
+
+        return {
+            "direction": direction,
+            "net_qty": float(pos_qty),
+            "entry_price": float(entry_price),
+            "hold_bars": int(self.hold_bars),
+            "notional": notional,
+            "pending_orders": pending_orders,
+        }
+
+    def _write_dashboard_snapshot(
+        self,
+        *,
+        runtime_status,
+        latest_closed_bar_ts=None,
+        current_price=None,
+        signal_snapshot=None,
+        account_snapshot=None,
+        position_snapshot=None,
+        decision=None,
+        error_message=None,
+    ):
+        if signal_snapshot is not None:
+            self.last_signal_snapshot = signal_snapshot
+        if latest_closed_bar_ts is not None:
+            self.last_bar_snapshot = {
+                "last_processed_bar_ts": normalize_ts(self.last_bar_ts),
+                "latest_closed_bar_ts": normalize_ts(latest_closed_bar_ts),
+            }
+        if account_snapshot is not None:
+            self.last_dashboard_account = account_snapshot
+
+        payload = {
+            "runtime": {
+                "last_status": runtime_status,
+                "loop_count": int(self.loop_count),
+                "same_bar_skip_count": int(self.same_bar_skip_count),
+                "poll_sec": int(config.POLL_SEC),
+                "heartbeat_interval_sec": float(self.heartbeat_log_interval_sec),
+                "last_error": error_message,
+            },
+            "market": {
+                "exchange": getattr(config, "EXCHANGE", "OKX"),
+                "symbol": config.SYMBOL,
+                "last_price": current_price,
+                "leverage": float(config.LEVERAGE),
+                "simulated": str(config.USE_SERVER) == "1",
+            },
+            "bar": self.last_bar_snapshot,
+            "signal": signal_snapshot if signal_snapshot is not None else self.last_signal_snapshot,
+            "account": account_snapshot if account_snapshot is not None else self.last_dashboard_account,
+            "position": position_snapshot or {},
+            "decision": decision or {},
+            "last_execution": self.last_execution,
+        }
+
+        history_point = None
+        account_for_history = payload.get("account") or {}
+        if account_for_history:
+            history_point = {
+                "bar_ts": normalize_ts(latest_closed_bar_ts or self.last_bar_ts),
+                "total_eq": account_for_history.get("total_eq"),
+                "avail_eq": account_for_history.get("avail_eq"),
+                "price": current_price,
+                "position_qty": (position_snapshot or {}).get("net_qty"),
+            }
+
+        write_runtime_dashboard_snapshot(payload, history_point=history_point)
 
     def _sync_after_trade(self):
         pos_qty2, entry_price2 = self._get_net_position()
@@ -240,10 +343,27 @@ class LiveTrader:
     def run_once_on_new_bar(self):
         self.loop_count += 1
         bar_ts, price, long_prob, short_prob, money_flow_ratio, volatility, atr_ratio = self._get_latest_features()
+        signal_snapshot = {
+            "long_prob": float(long_prob),
+            "short_prob": float(short_prob),
+            "money_flow_ratio": float(money_flow_ratio),
+            "volatility": float(volatility),
+            "atr_ratio": None if atr_ratio is None else float(atr_ratio),
+        }
 
         if self.last_bar_ts is not None and bar_ts == self.last_bar_ts:
             self.same_bar_skip_count += 1
             self._maybe_log_same_bar_heartbeat(bar_ts)
+            self._write_dashboard_snapshot(
+                runtime_status="waiting_next_bar",
+                latest_closed_bar_ts=bar_ts,
+                current_price=price,
+                signal_snapshot=signal_snapshot,
+                decision={
+                    "action": "WAIT_SAME_BAR",
+                    "reason": "SameClosedBarSkip",
+                },
+            )
             return
 
         self.same_bar_skip_count = 0
@@ -260,8 +380,8 @@ class LiveTrader:
         )
 
         pos_qty, entry_price = self._get_net_position()
-
-        equity = self._get_equity()
+        account_snapshot = self._get_account_snapshot()
+        equity = float(account_snapshot.get("total_eq", 0) or account_snapshot.get("avail_eq", 0) or 0)
 
         if pos_qty == 0:
             self.hold_bars = 0
@@ -279,6 +399,13 @@ class LiveTrader:
 
         action = out["action"]
         delta = float(out["delta_qty"])
+        decision = {
+            "action": action,
+            "reason": out.get("reason"),
+            "target_ratio": float(out.get("target_ratio", 0.0) or 0.0),
+            "target_position": float(out.get("target_position", 0.0) or 0.0),
+            "delta_qty": delta,
+        }
 
         if action == "CLOSE":
             success = False
@@ -287,6 +414,23 @@ class LiveTrader:
             elif pos_qty < 0:
                 success = self.client.close_short_sz(abs(pos_qty), config.LEVERAGE)
             self._sync_after_trade()
+            account_snapshot = self._get_account_snapshot()
+            pos_qty, entry_price = self._get_net_position()
+            self.last_execution = {
+                "action": "CLOSE",
+                "reason": out["reason"],
+                "success": bool(success),
+                "timestamp": normalize_ts(bar_ts),
+            }
+            self._write_dashboard_snapshot(
+                runtime_status="running",
+                latest_closed_bar_ts=bar_ts,
+                current_price=price,
+                signal_snapshot=signal_snapshot,
+                account_snapshot=account_snapshot,
+                position_snapshot=self._build_position_snapshot(pos_qty, entry_price, current_price=price, pending_orders=0),
+                decision=decision,
+            )
             if success:
                 log_info(f"执行平仓: reason={out['reason']}")
             else:
@@ -296,6 +440,23 @@ class LiveTrader:
         elif action == "OPEN":
             success = self._execute_delta(pos_qty, delta)
             self._sync_after_trade()
+            account_snapshot = self._get_account_snapshot()
+            pos_qty, entry_price = self._get_net_position()
+            self.last_execution = {
+                "action": "OPEN",
+                "reason": out["reason"],
+                "success": bool(success),
+                "timestamp": normalize_ts(bar_ts),
+            }
+            self._write_dashboard_snapshot(
+                runtime_status="running",
+                latest_closed_bar_ts=bar_ts,
+                current_price=price,
+                signal_snapshot=signal_snapshot,
+                account_snapshot=account_snapshot,
+                position_snapshot=self._build_position_snapshot(pos_qty, entry_price, current_price=price, pending_orders=0),
+                decision=decision,
+            )
             if success:
                 log_info(f"执行开仓: target_ratio={out['target_ratio']:.3f}, qty={abs(delta):.6f}")
             else:
@@ -305,6 +466,23 @@ class LiveTrader:
         elif action == "REBALANCE":
             success = self._execute_delta(pos_qty, delta)
             self._sync_after_trade()
+            account_snapshot = self._get_account_snapshot()
+            pos_qty, entry_price = self._get_net_position()
+            self.last_execution = {
+                "action": "REBALANCE",
+                "reason": out["reason"],
+                "success": bool(success),
+                "timestamp": normalize_ts(bar_ts),
+            }
+            self._write_dashboard_snapshot(
+                runtime_status="running",
+                latest_closed_bar_ts=bar_ts,
+                current_price=price,
+                signal_snapshot=signal_snapshot,
+                account_snapshot=account_snapshot,
+                position_snapshot=self._build_position_snapshot(pos_qty, entry_price, current_price=price, pending_orders=0),
+                decision=decision,
+            )
             if success:
                 log_info(f"执行调仓: delta_qty={delta:.6f}, reason={out['reason']}")
             else:
@@ -313,6 +491,15 @@ class LiveTrader:
 
         elif action == "HOLD":
             _, _, self.hold_bars = self.core.get_state()
+            self._write_dashboard_snapshot(
+                runtime_status="running",
+                latest_closed_bar_ts=bar_ts,
+                current_price=price,
+                signal_snapshot=signal_snapshot,
+                account_snapshot=account_snapshot,
+                position_snapshot=self._build_position_snapshot(pos_qty, entry_price, current_price=price, pending_orders=0),
+                decision=decision,
+            )
             log_info("无明显信号或目标为0：保持仓位不变")
             return
 
@@ -323,11 +510,51 @@ def run():
     trader = LiveTrader(client)
     trader.ensure_runtime_ready()
 
+    startup_account = {}
+    startup_position = {}
+    startup_price = None
+    try:
+        startup_account = trader._get_account_snapshot()
+        startup_pos_qty, startup_entry_price = trader._get_net_position()
+        try:
+            startup_price = float(client.get_price())
+        except Exception:
+            startup_price = None
+        startup_position = trader._build_position_snapshot(
+            startup_pos_qty,
+            startup_entry_price,
+            current_price=startup_price,
+            pending_orders=0,
+        )
+    except Exception as exc:
+        log_error(f"启动快照初始化失败，将继续进入主循环: {exc}")
+
+    trader._write_dashboard_snapshot(
+        runtime_status="starting",
+        latest_closed_bar_ts=trader.last_bar_ts,
+        current_price=startup_price,
+        account_snapshot=startup_account,
+        position_snapshot=startup_position,
+        decision={
+            "action": "START",
+            "reason": "MonitorBoot",
+        },
+    )
+
     log_info(f"🟢 Live trading monitor started (daemon loop, poll_sec={POLL_SEC})")
     while True:
         try:
             trader.run_once_on_new_bar()
         except Exception as e:
+            trader._write_dashboard_snapshot(
+                runtime_status="error",
+                latest_closed_bar_ts=trader.last_bar_ts,
+                decision={
+                    "action": "ERROR",
+                    "reason": "LoopException",
+                },
+                error_message=str(e),
+            )
             log_error(f"实盘循环异常: {e}")
             log_error(traceback.format_exc())
 

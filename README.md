@@ -24,6 +24,7 @@ quant_sol_project/
 ├── backtest/                  # 回测逻辑
 ├── config/                    # .env 与全局配置解析
 ├── core/                      # 交易所接口、策略核心、特征工程、仓位管理
+├── dashboard-ui/              # React + Vite 运行状态面板
 ├── run/                       # 启动脚本、测试盘检查、VPS bootstrap、参数扫描
 ├── tests/                     # 核心单测
 ├── train/                     # 模型训练
@@ -90,6 +91,25 @@ quant_sol_project/
 
 - 下单使用唯一 `clOrdId`
 - 下单响应异常时，会按 `clOrdId` 反查是否已受理，避免重复下单
+
+### 4. Dashboard 可视化
+
+项目现在带了一个轻量监控面板，数据来源不是另起一套数据库，而是直接读取实盘循环写下来的运行快照：
+
+- 前端：React + Vite，目录 `dashboard-ui/`
+- 后端：`python -m run.dashboard_server`
+- 快照来源：
+  - `logs/runtime_dashboard_status.json`
+  - `logs/runtime_dashboard_history.json`
+  - `logs/runtime_dashboard_baseline.json`
+
+页面包含的主要内容：
+
+- 当前运行状态：是否运行中、最近处理 bar、最近执行、轮询状态
+- 账户收益状态：总权益、净收益、收益率、回撤、可用保证金率
+- 仓位状态：方向、仓位规模、名义敞口、估算浮盈
+- 图表：净收益曲线、账户权益曲线、价格曲线、仓位曲线
+- 最近策略事件流：新 bar、心跳、开平仓、调仓、异常
 
 ## 环境准备
 
@@ -193,6 +213,40 @@ python -m run.scheduler
 - 每天凌晨 2 点自动训练和回测
 - 其他时间确保 `run.live_trading_monitor` 常驻
 
+### 7. 本地启动 Dashboard
+
+先启动 Python 数据接口：
+
+```bash
+PYTHONPATH=. .venv/bin/python -m run.dashboard_server
+```
+
+如果你想本地开发 React 页面：
+
+```bash
+cd dashboard-ui
+npm install
+npm run dev
+```
+
+默认会把 `/api` 代理到 `http://127.0.0.1:8787`。
+
+如果你只想构建静态页面并交给 Python server 托管：
+
+```bash
+cd dashboard-ui
+npm install
+npm run build
+cd ..
+PYTHONPATH=. .venv/bin/python -m run.dashboard_server
+```
+
+访问：
+
+- Dashboard 页面：`http://127.0.0.1:8787`
+- 健康检查：`http://127.0.0.1:8787/api/health`
+- 原始数据：`http://127.0.0.1:8787/api/dashboard`
+
 ## 测试盘联调建议
 
 推荐按这个顺序执行：
@@ -227,8 +281,11 @@ bash run/deploy_paper_vps.sh --git-pull
 - 检查模型文件是否齐全
 - 自动修复损坏的 `.venv`
 - 安装依赖
+- 构建 `dashboard-ui/dist`
 - 执行 `run/check_okx_paper_ready.py`
-- 用 PM2 启动或重载 `quant_okx_paper`
+- 用 PM2 启动或重载：
+  - `quant_okx_paper`
+  - `quant_okx_dashboard`
 
 说明：
 
@@ -269,21 +326,38 @@ pm2 start ecosystem.paper.config.js
 pm2 save
 ```
 
-PM2 里默认跑的是：
+PM2 里默认会一起跑：
 
 ```bash
 .venv/bin/python -m run.live_trading_monitor
+.venv/bin/python -m run.dashboard_server
 ```
 
 ### 6. 查看日志
 
 ```bash
 pm2 logs quant_okx_paper
+pm2 logs quant_okx_dashboard
 tail -f logs/live_trading.log
 tail -f logs/scheduler.log
 ```
 
-### 7. 只看最近策略状态摘要
+### 7. VPS 查看 Dashboard
+
+如果 `deploy_paper_vps.sh` 已经跑完，并且 PM2 里 `quant_okx_dashboard` 是 `online`，那么默认可以直接访问：
+
+```text
+http://你的VPSIP:8787
+```
+
+你也可以先在服务器本机确认：
+
+```bash
+curl http://127.0.0.1:8787/api/health
+curl http://127.0.0.1:8787/api/dashboard
+```
+
+### 8. 只看最近策略状态摘要
 
 默认查看最近 60 条关键状态：
 
@@ -302,6 +376,9 @@ bash run/strategy_status_summary.sh --follow
 - `logs/live_trading.log`: 交易监控主日志
 - `logs/scheduler.log`: 调度器日志
 - `logs/live_trading_state.json`: 最近处理 bar 的持久化状态
+- `logs/runtime_dashboard_status.json`: 当前 dashboard 状态快照
+- `logs/runtime_dashboard_history.json`: dashboard 曲线历史
+- `logs/runtime_dashboard_baseline.json`: Dashboard 收益基线
 - `logs/backtest_*.csv`: 回测交易记录与汇总
 
 ## 单元测试
@@ -313,7 +390,8 @@ python -m unittest \
   tests.test_backtest_equity \
   tests.test_backtest_intrabar \
   tests.test_strategy_core \
-  tests.test_live_runtime_state
+  tests.test_live_runtime_state \
+  tests.test_runtime_dashboard
 ```
 
 这些测试主要覆盖：

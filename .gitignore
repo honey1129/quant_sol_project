@@ -40,6 +40,11 @@ checkpoints/
 tmp/
 temp/
 
+# Dashboard UI
+node_modules/
+!dashboard-ui/package.json
+!dashboard-ui/package-lock.json
+
 # API 密钥文件（如果你后续把密钥独立放入 config_secret.py 可防止泄露）
 config_secret.py
 

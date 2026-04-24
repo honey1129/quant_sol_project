@@ -1,0 +1,551 @@
+:root {
+  font-family: "Space Grotesk", "IBM Plex Sans", "Segoe UI", sans-serif;
+  color: #102133;
+  background:
+    radial-gradient(circle at top left, rgba(28, 166, 178, 0.14), transparent 24%),
+    radial-gradient(circle at top right, rgba(245, 109, 75, 0.16), transparent 20%),
+    linear-gradient(180deg, #f7f1e5 0%, #eef4f1 54%, #f8faf7 100%);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  min-height: 100vh;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+.dashboard-shell {
+  position: relative;
+  min-height: 100vh;
+  padding: 32px;
+  overflow-x: hidden;
+}
+
+.dashboard-backdrop {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(16, 33, 51, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(16, 33, 51, 0.03) 1px, transparent 1px);
+  background-size: 24px 24px;
+  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.85), transparent 90%);
+  pointer-events: none;
+}
+
+.hero,
+.metrics-grid,
+.main-grid,
+.error-banner,
+.loading-fog {
+  position: relative;
+  z-index: 1;
+}
+
+.hero-copy,
+.hero-status-card,
+.panel,
+.metric-card,
+.error-banner,
+.loading-fog {
+  border: 1px solid rgba(16, 33, 51, 0.08);
+  border-radius: 28px;
+  background: rgba(255, 255, 255, 0.74);
+  box-shadow:
+    0 18px 60px rgba(16, 33, 51, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(14px);
+}
+
+.hero {
+  display: grid;
+  grid-template-columns: 1.25fr 1fr;
+  gap: 24px;
+  align-items: stretch;
+  margin-bottom: 24px;
+}
+
+.hero-copy {
+  padding: 28px 30px;
+}
+
+.hero-kicker,
+.panel-eyebrow,
+.metric-eyebrow {
+  margin: 0 0 10px;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(16, 33, 51, 0.52);
+}
+
+.hero h1 {
+  margin: 0;
+  font-size: clamp(34px, 5vw, 62px);
+  line-height: 0.96;
+  letter-spacing: -0.05em;
+}
+
+.hero-text {
+  margin: 18px 0 0;
+  max-width: 62ch;
+  font-size: 15px;
+  line-height: 1.7;
+  color: rgba(16, 33, 51, 0.78);
+}
+
+.hero-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 22px;
+}
+
+.hero-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 10px 14px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  background: rgba(16, 33, 51, 0.07);
+  color: rgba(16, 33, 51, 0.76);
+}
+
+.hero-status-card {
+  padding: 26px;
+  display: grid;
+  gap: 20px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(234, 244, 240, 0.88)),
+    rgba(255, 255, 255, 0.75);
+}
+
+.hero-status-row,
+.panel-head,
+.signal-row-head,
+.chart-footer,
+.chart-range,
+.progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.panel-head-wrap,
+.chart-range {
+  flex-wrap: wrap;
+}
+
+.hero-update {
+  font-size: 12px;
+  color: rgba(16, 33, 51, 0.58);
+}
+
+.hero-status-grid,
+.metrics-grid,
+.runtime-grid,
+.signal-metrics,
+.account-grid,
+.progress-stack {
+  display: grid;
+  gap: 14px;
+}
+
+.hero-status-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.hero-status-grid-wide {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.hero-status-grid div,
+.signal-metric,
+.runtime-card,
+.progress-meter {
+  padding: 16px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.66);
+  border: 1px solid rgba(16, 33, 51, 0.06);
+}
+
+.hero-status-grid span,
+.signal-metric span,
+.runtime-card span,
+.progress-meter span {
+  display: block;
+  font-size: 12px;
+  color: rgba(16, 33, 51, 0.55);
+}
+
+.hero-status-grid strong,
+.signal-metric strong,
+.runtime-card strong,
+.signal-mini-chip strong,
+.progress-meter strong {
+  display: block;
+  margin-top: 8px;
+  font-family: "Azeret Mono", "IBM Plex Mono", monospace;
+  font-size: 16px;
+}
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 10px 14px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.status-good {
+  color: #026d62;
+  background: rgba(16, 185, 129, 0.14);
+}
+
+.status-watch {
+  color: #845500;
+  background: rgba(245, 158, 11, 0.18);
+}
+
+.status-bad {
+  color: #ab2f27;
+  background: rgba(239, 68, 68, 0.16);
+}
+
+.status-neutral {
+  color: #42556d;
+  background: rgba(71, 85, 105, 0.12);
+}
+
+.metrics-grid {
+  margin-bottom: 24px;
+}
+
+.metrics-grid-six {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.metric-card {
+  min-height: 172px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.metric-card.tone-teal {
+  background: linear-gradient(180deg, rgba(224, 247, 245, 0.96), rgba(255, 255, 255, 0.78));
+}
+
+.metric-card.tone-good {
+  background: linear-gradient(180deg, rgba(235, 249, 237, 0.95), rgba(255, 255, 255, 0.78));
+}
+
+.metric-card.tone-bad {
+  background: linear-gradient(180deg, rgba(255, 235, 230, 0.95), rgba(255, 255, 255, 0.78));
+}
+
+.metric-card.tone-ink {
+  background: linear-gradient(180deg, rgba(229, 237, 246, 0.96), rgba(255, 255, 255, 0.78));
+}
+
+.metric-card.tone-neutral {
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.metric-value {
+  margin: 0;
+  font-family: "Azeret Mono", "IBM Plex Mono", monospace;
+  font-size: clamp(24px, 2.6vw, 34px);
+  line-height: 1.08;
+  letter-spacing: -0.03em;
+}
+
+.metric-delta,
+.metric-note,
+.runtime-card p,
+.runtime-ok p,
+.runtime-error p,
+.progress-meter p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: rgba(16, 33, 51, 0.72);
+}
+
+.main-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  margin-bottom: 24px;
+}
+
+.charts-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.side-stack {
+  display: grid;
+  gap: 24px;
+  align-content: start;
+}
+
+.panel {
+  padding: 22px;
+}
+
+.panel h3 {
+  margin: 0;
+  font-size: 24px;
+  letter-spacing: -0.03em;
+}
+
+.chart-range,
+.chart-footer,
+.signal-mini-chip,
+.runtime-ok span,
+.runtime-error span {
+  font-size: 12px;
+  color: rgba(16, 33, 51, 0.56);
+}
+
+.chart-range {
+  justify-content: flex-start;
+}
+
+.chart-shell {
+  margin-top: 18px;
+}
+
+.curve-chart {
+  width: 100%;
+  display: block;
+}
+
+.curve-line {
+  fill: none;
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.curve-teal {
+  stroke: #159e9c;
+}
+
+.curve-warm {
+  stroke: #f56d4b;
+}
+
+.curve-ink {
+  stroke: #3e79c1;
+}
+
+.empty-chart,
+.empty-feed {
+  padding: 18px 0;
+  color: rgba(16, 33, 51, 0.56);
+}
+
+.signal-row + .signal-row {
+  margin-top: 16px;
+}
+
+.signal-track,
+.progress-track {
+  height: 12px;
+  border-radius: 999px;
+  background: rgba(16, 33, 51, 0.08);
+  overflow: hidden;
+}
+
+.signal-fill,
+.progress-fill {
+  height: 100%;
+  border-radius: inherit;
+}
+
+.signal-teal,
+.progress-teal {
+  background: linear-gradient(90deg, #12b3af, #33c7a5);
+}
+
+.signal-warm,
+.progress-warm {
+  background: linear-gradient(90deg, #f56d4b, #f3b448);
+}
+
+.progress-stack {
+  margin-top: 18px;
+}
+
+.progress-meter p {
+  margin-top: 10px;
+}
+
+.signal-metrics {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 18px;
+}
+
+.signal-mini-chip {
+  padding: 10px 14px;
+  border-radius: 18px;
+  background: rgba(16, 33, 51, 0.06);
+}
+
+.runtime-grid {
+  margin-top: 18px;
+}
+
+.runtime-grid-three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.account-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 18px;
+}
+
+.runtime-ok,
+.runtime-error {
+  margin-top: 18px;
+  padding: 16px 18px;
+  border-radius: 20px;
+}
+
+.runtime-ok {
+  background: rgba(16, 185, 129, 0.1);
+}
+
+.runtime-error {
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.event-list {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.event-card {
+  display: grid;
+  grid-template-columns: 14px 1fr;
+  gap: 12px;
+  align-items: start;
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.66);
+  border: 1px solid rgba(16, 33, 51, 0.06);
+}
+
+.event-card p {
+  margin: 0;
+  font-family: "Azeret Mono", "IBM Plex Mono", monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  color: rgba(16, 33, 51, 0.78);
+}
+
+.event-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  margin-top: 5px;
+  background: linear-gradient(180deg, #12b3af, #f56d4b);
+}
+
+.error-banner,
+.loading-fog {
+  padding: 16px 18px;
+  margin-bottom: 24px;
+}
+
+.error-banner {
+  color: #8e2218;
+  background: rgba(255, 235, 230, 0.92);
+}
+
+.loading-fog {
+  color: rgba(16, 33, 51, 0.66);
+}
+
+@media (max-width: 1380px) {
+  .metrics-grid-six {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .runtime-grid-three {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1180px) {
+  .hero,
+  .main-grid,
+  .charts-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .hero-status-grid-wide {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 900px) {
+  .metrics-grid-six,
+  .runtime-grid-three,
+  .account-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  .dashboard-shell {
+    padding: 18px;
+  }
+
+  .hero-status-grid,
+  .hero-status-grid-wide,
+  .signal-metrics,
+  .metrics-grid-six,
+  .runtime-grid-three,
+  .account-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .hero-copy,
+  .hero-status-card,
+  .panel,
+  .metric-card {
+    border-radius: 22px;
+  }
+
+  .hero h1 {
+    line-height: 1.02;
+  }
+}
