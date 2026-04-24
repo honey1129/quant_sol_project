@@ -1,0 +1,65 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    @apply antialiased;
+  }
+
+  body {
+    @apply min-h-screen bg-slate-100 text-slate-900 transition-colors duration-300 dark:bg-slate-950 dark:text-slate-100;
+    background-image:
+      radial-gradient(circle at top left, rgba(56, 189, 248, 0.12), transparent 26%),
+      radial-gradient(circle at top right, rgba(34, 197, 94, 0.08), transparent 24%);
+  }
+
+  body::before {
+    content: "";
+    @apply pointer-events-none fixed inset-0 -z-10 bg-grid-light bg-[size:32px_32px] opacity-70 dark:bg-grid-dark;
+    mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.9), transparent 94%);
+  }
+
+  #root {
+    @apply min-h-screen;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(148, 163, 184, 0.3) transparent;
+  }
+}
+
+@layer components {
+  .terminal-panel {
+    @apply rounded-3xl border border-white/10 bg-white/70 p-5 shadow-terminal backdrop-blur-xl transition dark:bg-slate-900/70;
+  }
+
+  .terminal-kicker {
+    @apply text-[11px] uppercase tracking-[0.28em] text-sky-500 dark:text-sky-400;
+  }
+
+  .terminal-title {
+    @apply mt-2 text-2xl font-semibold text-slate-950 dark:text-white;
+  }
+
+  .terminal-subtitle {
+    @apply mt-2 text-sm text-slate-500 dark:text-slate-400;
+  }
+
+  .terminal-label {
+    @apply text-[11px] uppercase tracking-[0.22em] text-slate-500 dark:text-slate-400;
+  }
+
+  .terminal-input {
+    @apply w-full rounded-2xl border border-white/10 bg-white/90 px-4 py-3 font-mono text-sm text-slate-900 outline-none transition focus:border-sky-400/40 focus:ring-2 focus:ring-sky-400/20 dark:bg-slate-950/80 dark:text-white;
+  }
+
+  .terminal-button-primary {
+    @apply rounded-2xl bg-sky-500 px-4 py-3 text-sm font-semibold text-white transition hover:bg-sky-400;
+  }
+
+  .terminal-button-secondary {
+    @apply rounded-2xl border border-white/10 bg-slate-950/[0.03] px-4 py-3 text-sm font-semibold text-slate-700 transition hover:border-sky-400/30 hover:text-sky-500 dark:bg-white/5 dark:text-slate-200 dark:hover:text-sky-300;
+  }
+}

@@ -299,6 +299,38 @@ bash run/deploy_paper_vps.sh --git-pull
 - `--skip-check`: 跳过测试盘预检
 - `--skip-start`: 只安装和校验，不启动 PM2
 
+### 1.1 从本机一条命令同步并远程部署到 VPS
+
+如果你的本机可以直接 `ssh/rsync` 到 VPS，可以直接用：
+
+```bash
+bash run/deploy_remote_vps.sh --host 185.214.135.24
+```
+
+如果这次还需要把本地 `.env` 和 `models/` 一起传上去：
+
+```bash
+bash run/deploy_remote_vps.sh --host 185.214.135.24 --sync-env --sync-models
+```
+
+说明：
+
+- 这个脚本会先用 `rsync` 同步代码到 VPS
+- 默认不会覆盖 VPS 上已有的 `.env` 和 `models/`
+- 同步后会自动在远端执行 `bash run/deploy_paper_vps.sh`
+- 如果是密码登录，`ssh/rsync` 会正常提示你输入密码
+
+常用参数：
+
+- `--user root`: 指定远端用户
+- `--port 22`: 指定 SSH 端口
+- `--remote-dir /root/quant_sol_project`: 指定远端项目目录
+- `--sync-env`: 同步本地 `.env`
+- `--sync-models`: 同步本地 `models/`
+- `--skip-check`: 远端跳过测试盘预检
+- `--skip-start`: 远端安装完但不启动 PM2
+- `--skip-deploy`: 只同步文件，不执行远端部署脚本
+
 ### 2. 旧版基础引导脚本
 
 如果你只想先建 Python 环境，不立即启动服务，也可以继续用：

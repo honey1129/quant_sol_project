@@ -48,6 +48,8 @@ POSITION_SIZE = float(os.getenv("POSITION_SIZE", 50))
 # ✅ 多周期
 INTERVALS = parse_env_list(os.getenv("INTERVALS", "5m,15m,1H"))
 WINDOWS = parse_env_dict(os.getenv("WINDOWS", ""), int)
+MA_PERIOD = int(os.getenv("MA_PERIOD", 34))
+RSI_PERIOD = int(os.getenv("RSI_PERIOD", 14))
 
 # ✅ 风控参数
 TAKE_PROFIT = float(os.getenv("TAKE_PROFIT", 0.02))
