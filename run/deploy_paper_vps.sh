@@ -6,6 +6,8 @@ APP_NAME="${APP_NAME:-quant_okx_paper}"
 ENV_FILE="${ENV_FILE:-$PROJECT_ROOT/.env}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 TELEGRAM_FLAG="${TELEGRAM_ENABLED:-0}"
+PACKAGE_MANAGER=""
+PACKAGE_INDEX_REFRESHED=0
 
 DO_GIT_PULL=0
 SKIP_CHECK=0
@@ -36,6 +38,12 @@ Environment overrides:
   ENV_FILE           .env path, default: <project>/.env
   PYTHON_BIN         Python interpreter used to create venv, default: python3
   TELEGRAM_ENABLED   Exported into precheck/runtime, default: 0
+
+Behavior:
+  - Automatically installs missing system packages such as python3-venv,
+    python3-pip, nodejs, npm, pm2, git, curl, and build tools when possible.
+  - Supports apt-get, dnf, yum, and apk package managers.
+  - Requires root or sudo privileges for system package installation.
 EOF
 }
 
@@ -66,6 +74,193 @@ done
 require_command() {
   local cmd="$1"
   command -v "$cmd" >/dev/null 2>&1 || fail "Missing required command: $cmd"
+}
+
+has_root_or_sudo() {
+  [[ "${EUID:-$(id -u)}" -eq 0 ]] || command -v sudo >/dev/null 2>&1
+}
+
+run_privileged() {
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    "$@"
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo "$@"
+  else
+    fail "Need root or sudo privileges to install missing system packages"
+  fi
+}
+
+detect_package_manager() {
+  if [[ -n "$PACKAGE_MANAGER" ]]; then
+    return
+  fi
+
+  if command -v apt-get >/dev/null 2>&1; then
+    PACKAGE_MANAGER="apt-get"
+  elif command -v dnf >/dev/null 2>&1; then
+    PACKAGE_MANAGER="dnf"
+  elif command -v yum >/dev/null 2>&1; then
+    PACKAGE_MANAGER="yum"
+  elif command -v apk >/dev/null 2>&1; then
+    PACKAGE_MANAGER="apk"
+  else
+    fail "Unsupported package manager. Install python3, python3-venv, pip, nodejs, npm, and pm2 manually."
+  fi
+}
+
+refresh_package_index() {
+  detect_package_manager
+
+  if [[ "$PACKAGE_INDEX_REFRESHED" -eq 1 ]]; then
+    return
+  fi
+
+  log "Refreshing package index via $PACKAGE_MANAGER"
+  case "$PACKAGE_MANAGER" in
+    apt-get)
+      run_privileged apt-get update
+      ;;
+    dnf)
+      run_privileged dnf makecache -y
+      ;;
+    yum)
+      run_privileged yum makecache -y
+      ;;
+    apk)
+      run_privileged apk update
+      ;;
+  esac
+
+  PACKAGE_INDEX_REFRESHED=1
+}
+
+try_install_packages() {
+  local packages=("$@")
+  [[ ${#packages[@]} -gt 0 ]] || return 0
+
+  detect_package_manager
+  refresh_package_index
+
+  case "$PACKAGE_MANAGER" in
+    apt-get)
+      DEBIAN_FRONTEND=noninteractive run_privileged apt-get install -y --no-install-recommends "${packages[@]}"
+      ;;
+    dnf)
+      run_privileged dnf install -y "${packages[@]}"
+      ;;
+    yum)
+      run_privileged yum install -y "${packages[@]}"
+      ;;
+    apk)
+      run_privileged apk add --no-cache "${packages[@]}"
+      ;;
+  esac
+}
+
+install_or_fail() {
+  local description="$1"
+  shift
+  log "Installing $description"
+  try_install_packages "$@" || fail "Failed to install $description using $PACKAGE_MANAGER"
+  hash -r
+}
+
+python_version_mm() {
+  "$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")'
+}
+
+ensure_base_system_packages() {
+  detect_package_manager
+  has_root_or_sudo || fail "Need root or sudo privileges to install missing system packages"
+
+  case "$PACKAGE_MANAGER" in
+    apt-get)
+      install_or_fail "base system packages" ca-certificates curl git build-essential pkg-config python3 python3-pip
+      ;;
+    dnf)
+      install_or_fail "base system packages" ca-certificates curl git gcc gcc-c++ make pkgconf-pkg-config python3 python3-pip
+      ;;
+    yum)
+      install_or_fail "base system packages" ca-certificates curl git gcc gcc-c++ make pkgconfig python3 python3-pip
+      ;;
+    apk)
+      install_or_fail "base system packages" ca-certificates curl git build-base pkgconf python3 py3-pip
+      ;;
+  esac
+}
+
+ensure_python_venv_support() {
+  local py_ver
+
+  require_command "$PYTHON_BIN"
+  py_ver="$(python_version_mm)"
+  detect_package_manager
+
+  case "$PACKAGE_MANAGER" in
+    apt-get)
+      if ! "$PYTHON_BIN" -m venv /tmp/codex_venv_probe.$$ >/dev/null 2>&1; then
+        rm -rf /tmp/codex_venv_probe.$$
+        if ! try_install_packages python3-venv; then
+          install_or_fail "Python venv support" "python${py_ver}-venv"
+        fi
+      else
+        rm -rf /tmp/codex_venv_probe.$$
+      fi
+      ;;
+    dnf|yum)
+      if ! "$PYTHON_BIN" -m venv /tmp/codex_venv_probe.$$ >/dev/null 2>&1; then
+        rm -rf /tmp/codex_venv_probe.$$
+        install_or_fail "Python venv support" python3-devel
+      else
+        rm -rf /tmp/codex_venv_probe.$$
+      fi
+      ;;
+    apk)
+      if ! "$PYTHON_BIN" -m venv /tmp/codex_venv_probe.$$ >/dev/null 2>&1; then
+        rm -rf /tmp/codex_venv_probe.$$
+        install_or_fail "Python venv support" py3-virtualenv
+      else
+        rm -rf /tmp/codex_venv_probe.$$
+      fi
+      ;;
+  esac
+}
+
+ensure_node_and_pm2() {
+  if [[ "$SKIP_START" -eq 1 ]]; then
+    return
+  fi
+
+  detect_package_manager
+
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    case "$PACKAGE_MANAGER" in
+      apt-get)
+        install_or_fail "Node.js and npm" nodejs npm
+        ;;
+      dnf)
+        install_or_fail "Node.js and npm" nodejs npm
+        ;;
+      yum)
+        install_or_fail "Node.js and npm" nodejs npm
+        ;;
+      apk)
+        install_or_fail "Node.js and npm" nodejs npm
+        ;;
+    esac
+  fi
+
+  if ! command -v pm2 >/dev/null 2>&1; then
+    log "Installing pm2 via npm"
+    run_privileged npm install -g pm2 || fail "Failed to install pm2 globally"
+    hash -r
+  fi
+}
+
+ensure_system_dependencies() {
+  ensure_base_system_packages
+  ensure_python_venv_support
+  ensure_node_and_pm2
 }
 
 read_env_value() {
@@ -170,9 +365,17 @@ maybe_git_pull() {
 setup_venv() {
   require_command "$PYTHON_BIN"
 
+  if [[ -x "$PROJECT_ROOT/.venv/bin/python" ]] && ! "$PROJECT_ROOT/.venv/bin/python" -m pip --version >/dev/null 2>&1; then
+    log "Detected broken virtual environment without pip, recreating .venv"
+    rm -rf "$PROJECT_ROOT/.venv"
+  fi
+
   if [[ ! -x "$PROJECT_ROOT/.venv/bin/python" ]]; then
     log "Creating virtual environment"
-    "$PYTHON_BIN" -m venv "$PROJECT_ROOT/.venv"
+    "$PYTHON_BIN" -m venv "$PROJECT_ROOT/.venv" || {
+      rm -rf "$PROJECT_ROOT/.venv"
+      fail "Failed to create virtual environment. Ensure python3-venv is installed and rerun."
+    }
   fi
 
   log "Installing Python dependencies"
@@ -249,6 +452,7 @@ EOF
 main() {
   cd "$PROJECT_ROOT"
   ensure_env_file
+  ensure_system_dependencies
   maybe_git_pull
   validate_paper_env
   validate_model_artifacts

@@ -221,12 +221,20 @@ bash run/deploy_paper_vps.sh --git-pull
 这个脚本会：
 
 - 可选执行 `git pull --ff-only`
+- 自动安装缺失的系统依赖
+- 自动补齐 `python3-venv` / `python3-pip` / `nodejs` / `npm` / `pm2`
 - 校验 `.env` 是否存在且为 OKX 测试盘配置
 - 检查模型文件是否齐全
-- 创建 `.venv`
+- 自动修复损坏的 `.venv`
 - 安装依赖
 - 执行 `run/check_okx_paper_ready.py`
 - 用 PM2 启动或重载 `quant_okx_paper`
+
+说明：
+
+- 脚本默认会尝试通过系统包管理器安装缺失组件
+- 当前支持 `apt-get`、`dnf`、`yum`、`apk`
+- 需要 `root` 或 `sudo` 权限
 
 常用参数：
 
@@ -242,7 +250,7 @@ bash run/deploy_paper_vps.sh --git-pull
 bash run/bootstrap_vps.sh
 ```
 
-### 3. 安装 PM2
+### 3. 手动安装 PM2（仅当你不想让脚本自动处理时）
 
 ```bash
 npm install -g pm2
