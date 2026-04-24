@@ -19,7 +19,7 @@ const toneMap: Record<Tone, string> = {
 export function StatusBadge({ label, tone = "slate" }: StatusBadgeProps) {
   return (
     <span
-      className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.22em] ${toneMap[tone]}`}
+      className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold tracking-[0.08em] ${toneMap[tone]}`}
     >
       <span className="h-1.5 w-1.5 rounded-full bg-current" />
       {label}

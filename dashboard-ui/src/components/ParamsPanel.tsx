@@ -26,18 +26,18 @@ export function ParamsPanel({
     <section className="terminal-panel">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <p className="terminal-kicker">Config Surface</p>
-          <h2 className="terminal-title">Strategy Parameters</h2>
+          <p className="terminal-kicker">参数面板</p>
+          <h2 className="terminal-title">策略参数</h2>
         </div>
         <div className="text-right text-xs text-slate-500">
-          <p>Live snapshot with local edit buffer</p>
-          <p>{savedAt ? `Last saved ${formatClock(savedAt)} UTC+8` : "Not saved yet"}</p>
+          <p>实时快照，可在本地编辑后保存</p>
+          <p>{savedAt ? `上次保存 ${formatClock(savedAt)} UTC+8` : "尚未保存"}</p>
         </div>
       </div>
 
       <div className="mt-6 grid gap-4 md:grid-cols-2">
         <label className="space-y-2">
-          <span className="terminal-label">Timeframe</span>
+          <span className="terminal-label">周期</span>
           <select
             value={params.timeframe}
             onChange={(event) => onChange("timeframe", event.target.value)}
@@ -50,7 +50,7 @@ export function ParamsPanel({
         </label>
 
         <label className="space-y-2">
-          <span className="terminal-label">MA Period</span>
+          <span className="terminal-label">均线周期</span>
           <input
             className="terminal-input"
             type="number"
@@ -60,7 +60,7 @@ export function ParamsPanel({
         </label>
 
         <label className="space-y-2">
-          <span className="terminal-label">RSI Period</span>
+          <span className="terminal-label">RSI 周期</span>
           <input
             className="terminal-input"
             type="number"
@@ -70,7 +70,7 @@ export function ParamsPanel({
         </label>
 
         <label className="space-y-2">
-          <span className="terminal-label">ATR Stop Multiplier</span>
+          <span className="terminal-label">ATR 止损倍数</span>
           <input
             className="terminal-input"
             type="number"
@@ -81,7 +81,7 @@ export function ParamsPanel({
         </label>
 
         <label className="space-y-2">
-          <span className="terminal-label">Stop Loss %</span>
+          <span className="terminal-label">止损比例 %</span>
           <input
             className="terminal-input"
             type="number"
@@ -92,7 +92,7 @@ export function ParamsPanel({
         </label>
 
         <label className="space-y-2">
-          <span className="terminal-label">Take Profit %</span>
+          <span className="terminal-label">止盈比例 %</span>
           <input
             className="terminal-input"
             type="number"
@@ -103,7 +103,7 @@ export function ParamsPanel({
         </label>
 
         <label className="space-y-2">
-          <span className="terminal-label">Position Size (Target Capital)</span>
+          <span className="terminal-label">仓位比例（目标资金）</span>
           <input
             className="terminal-input"
             type="number"
@@ -114,7 +114,7 @@ export function ParamsPanel({
         </label>
 
         <label className="space-y-2">
-          <span className="terminal-label">Max Leverage</span>
+          <span className="terminal-label">最大杠杆</span>
           <input
             className="terminal-input"
             type="number"
@@ -127,7 +127,7 @@ export function ParamsPanel({
 
       <div className="mt-6 flex flex-wrap gap-3">
         <button type="button" onClick={onSave} disabled={saving} className="terminal-button-primary disabled:cursor-not-allowed disabled:opacity-60">
-          {saving ? "Saving..." : "Save Parameters"}
+          {saving ? "保存中..." : "保存参数"}
         </button>
         <button
           type="button"
@@ -135,15 +135,15 @@ export function ParamsPanel({
           disabled={saving || restarting}
           className="rounded-2xl border border-amber-400/20 bg-amber-500/10 px-4 py-3 text-sm font-semibold text-amber-300 transition hover:border-amber-300/40 hover:bg-amber-500/15 disabled:cursor-not-allowed disabled:opacity-60"
         >
-          {restarting ? "Restarting..." : "Restart Strategy"}
+          {restarting ? "重启中..." : "重启策略"}
         </button>
         <button type="button" onClick={onReset} disabled={saving} className="terminal-button-secondary disabled:cursor-not-allowed disabled:opacity-60">
-          Reset
+          重置
         </button>
       </div>
 
       <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
-        Saving writes the latest values into <span className="font-mono">.env</span>. Restart the strategy daemon to apply them to the live trading process.
+        保存会把最新参数写入 <span className="font-mono">.env</span>。要让实盘进程生效，还需要重启策略守护进程。
       </p>
     </section>
   );

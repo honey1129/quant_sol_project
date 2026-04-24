@@ -1,4 +1,5 @@
 import { formatClock, formatDateTime } from "../lib/format";
+import { getDataSourceLabel, getStrategyStatusLabel, getThemeLabel } from "../lib/uiText";
 import { StatusBadge } from "./StatusBadge";
 import type { DataSource, ExchangeName, StrategyStatus, ThemeMode } from "../types";
 
@@ -55,18 +56,18 @@ export function TopNav({
           </div>
           <div className="flex flex-wrap gap-2">
             <StatusBadge label={exchange} tone="sky" />
-            <StatusBadge label={status} tone={getStatusTone(status)} />
-            <StatusBadge label={dataSource === "live" ? "Live API" : dataSource === "hybrid" ? "Hybrid Data" : "Mock Fallback"} tone={getDataSourceTone(dataSource)} />
+            <StatusBadge label={getStrategyStatusLabel(status)} tone={getStatusTone(status)} />
+            <StatusBadge label={getDataSourceLabel(dataSource)} tone={getDataSourceTone(dataSource)} />
           </div>
         </div>
 
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
           <div className="rounded-2xl border border-white/10 bg-slate-950/[0.03] px-4 py-2 text-right dark:bg-white/5">
-            <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500 dark:text-slate-400">Current Time (UTC+8)</p>
+            <p className="text-[11px] tracking-[0.14em] text-slate-500 dark:text-slate-400">当前时间（东八区）</p>
             <p className="mt-1 font-mono text-sm font-medium text-slate-900 dark:text-slate-100">{formatClock(now)}</p>
           </div>
           <div className="rounded-2xl border border-white/10 bg-slate-950/[0.03] px-4 py-2 text-right dark:bg-white/5">
-            <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500 dark:text-slate-400">Last Update (UTC+8)</p>
+            <p className="text-[11px] tracking-[0.14em] text-slate-500 dark:text-slate-400">最近更新（东八区）</p>
             <p className="mt-1 font-mono text-sm font-medium text-slate-900 dark:text-slate-100">{formatDateTime(updatedAt)}</p>
           </div>
           <button
@@ -74,7 +75,7 @@ export function TopNav({
             onClick={onThemeToggle}
             className="rounded-2xl border border-white/10 bg-slate-950/[0.03] px-4 py-3 text-sm font-semibold text-slate-900 transition hover:border-sky-400/40 hover:text-sky-500 dark:bg-white/5 dark:text-white dark:hover:text-sky-300"
           >
-            Theme: {theme === "dark" ? "Dark" : "Light"}
+            主题：{getThemeLabel(theme)}
           </button>
         </div>
       </div>

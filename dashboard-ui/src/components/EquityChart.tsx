@@ -26,9 +26,9 @@ export function EquityChart({ data, range, onRangeChange }: EquityChartProps) {
     <section className="terminal-panel">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
         <div>
-          <p className="terminal-kicker">Performance</p>
-          <h2 className="terminal-title">Equity Curve vs Benchmark</h2>
-          <p className="terminal-subtitle">Account equity is plotted against a normalized crypto benchmark to spot alpha drift fast.</p>
+          <p className="terminal-kicker">收益表现</p>
+          <h2 className="terminal-title">资金曲线与基准对比</h2>
+          <p className="terminal-subtitle">将账户净值与标准化加密基准放在一起，便于快速识别 Alpha 漂移。</p>
         </div>
         <RangeTabs value={range} onChange={onRangeChange} />
       </div>
@@ -58,7 +58,7 @@ export function EquityChart({ data, range, onRangeChange }: EquityChartProps) {
                 color: "#e2e8f0",
               }}
               labelFormatter={(value) => formatDateTime(String(value))}
-              formatter={(value: number, name: string) => [formatCurrency(Number(value)), name === "equity" ? "Equity" : "Benchmark"]}
+              formatter={(value: number, name: string) => [formatCurrency(Number(value)), name]}
             />
             <Legend />
             <Area
@@ -67,7 +67,7 @@ export function EquityChart({ data, range, onRangeChange }: EquityChartProps) {
               stroke="#22c55e"
               strokeWidth={2.4}
               fill="url(#equityGradient)"
-              name="equity"
+              name="账户净值"
             />
             <Line
               type="monotone"
@@ -76,7 +76,7 @@ export function EquityChart({ data, range, onRangeChange }: EquityChartProps) {
               strokeWidth={2}
               dot={false}
               strokeDasharray="5 5"
-              name="benchmark"
+              name="基准收益"
             />
           </AreaChart>
         </ResponsiveContainer>

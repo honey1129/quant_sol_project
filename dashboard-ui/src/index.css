@@ -36,7 +36,7 @@
   }
 
   .terminal-kicker {
-    @apply text-[11px] uppercase tracking-[0.28em] text-sky-500 dark:text-sky-400;
+    @apply text-[11px] tracking-[0.14em] text-sky-500 dark:text-sky-400;
   }
 
   .terminal-title {
@@ -48,7 +48,7 @@
   }
 
   .terminal-label {
-    @apply text-[11px] uppercase tracking-[0.22em] text-slate-500 dark:text-slate-400;
+    @apply text-[11px] tracking-[0.14em] text-slate-500 dark:text-slate-400;
   }
 
   .terminal-input {

@@ -1,4 +1,5 @@
 import type { TimeRange } from "../types";
+import { getTimeRangeLabel } from "../lib/uiText";
 
 interface RangeTabsProps {
   value: TimeRange;
@@ -23,7 +24,7 @@ export function RangeTabs({ value, onChange }: RangeTabsProps) {
                 : "text-slate-500 hover:text-slate-950 dark:text-slate-400 dark:hover:text-white"
             }`}
           >
-            {range}
+            {getTimeRangeLabel(range)}
           </button>
         );
       })}

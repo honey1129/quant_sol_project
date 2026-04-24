@@ -12,6 +12,7 @@ import { TopNav } from "./components/TopNav";
 import { TradesTable } from "./components/TradesTable";
 import { buildDashboardSnapshotFromApi } from "./lib/dashboardAdapter";
 import { formatCurrency, formatNumber, formatPercent } from "./lib/format";
+import { getRiskLevelLabel } from "./lib/uiText";
 import type {
   ApiDashboardBundle,
   ApiStrategyParamsSaveResponse,
@@ -98,7 +99,7 @@ export default function App() {
           signal: controller.signal,
         });
         if (!response.ok) {
-          throw new Error(`Dashboard API returned ${response.status}`);
+          throw new Error(`Dashboard 接口返回异常状态码：${response.status}`);
         }
 
         const payload = (await response.json()) as ApiDashboardBundle;
@@ -118,7 +119,7 @@ export default function App() {
         if (!active || (fetchError instanceof DOMException && fetchError.name === "AbortError")) {
           return;
         }
-        const message = fetchError instanceof Error ? fetchError.message : "Failed to fetch /api/dashboard";
+        const message = fetchError instanceof Error ? fetchError.message : "拉取 /api/dashboard 失败";
         startTransition(() => {
           setError(message);
           setSnapshot((current) => current);
@@ -149,63 +150,63 @@ export default function App() {
     tone: "neutral" | "positive" | "negative" | "highlight";
   }> = [
     {
-      label: "Equity",
+      label: "总资产",
       value: formatCurrency(snapshot.metrics.equity),
       change: formatCurrency(snapshot.metrics.dailyPnl),
-      helper: "Current account equity",
+      helper: "当前账户权益",
       tone: "highlight" as const,
     },
     {
-      label: "Daily PnL",
+      label: "今日收益",
       value: formatCurrency(snapshot.metrics.dailyPnl),
-      change: snapshot.metrics.dailyPnl >= 0 ? "Live session profitable" : "Session below target",
-      helper: "PnL over the last 24h",
+      change: snapshot.metrics.dailyPnl >= 0 ? "当前交易时段盈利中" : "当前交易时段低于目标",
+      helper: "近 24 小时盈亏",
       tone: snapshot.metrics.dailyPnl >= 0 ? "positive" : "negative",
     },
     {
-      label: "Total Return",
+      label: "累计收益",
       value: formatPercent(snapshot.metrics.totalReturnPct),
-      change: snapshot.dataSource === "mock" ? "Mock baseline" : "Derived from live equity history",
-      helper: "Compounded total return",
+      change: snapshot.dataSource === "mock" ? "模拟基线数据" : "来源于实时净值历史",
+      helper: "复合累计收益率",
       tone: "positive" as const,
     },
     {
-      label: "Max Drawdown",
+      label: "最大回撤",
       value: formatPercent(snapshot.metrics.maxDrawdownPct, 2, false),
-      change: "Worst observed capital dip",
-      helper: "Historical trough from peak",
+      change: "历史最大资金回撤",
+      helper: "从峰值到谷值的跌幅",
       tone: "negative" as const,
     },
     {
-      label: "Sharpe Ratio",
+      label: "夏普比率",
       value: formatNumber(snapshot.metrics.sharpeRatio, 2),
       change: snapshot.dataSource === "live"
-        ? "Derived from latest backtest research snapshot"
-        : "Risk-adjusted performance",
-      helper: "Annualized estimate",
+        ? "来源于最新回测研究快照"
+        : "风险调整后收益",
+      helper: "年化估算值",
       tone: "neutral" as const,
     },
     {
-      label: "Win Rate",
+      label: "胜率",
       value: formatPercent(snapshot.metrics.winRatePct, 1, false),
       change: snapshot.dataSource === "live"
-        ? "Derived from latest backtest closed trades"
-        : "Filled trades only",
-      helper: "Execution quality",
+        ? "来源于最新回测平仓交易"
+        : "仅统计已成交交易",
+      helper: "执行质量表现",
       tone: "positive" as const,
     },
     {
-      label: "Open Positions",
+      label: "当前持仓",
       value: String(snapshot.metrics.openPositions),
-      change: "Active derivatives exposure",
-      helper: "Across strategy book",
+      change: "当前衍生品风险敞口",
+      helper: "策略组合中的活跃仓位",
       tone: "neutral" as const,
     },
     {
-      label: "Risk Level",
-      value: snapshot.metrics.riskLevel,
-      change: "Based on leverage and margin usage",
-      helper: "Current session classification",
+      label: "风险等级",
+      value: getRiskLevelLabel(snapshot.metrics.riskLevel),
+      change: "基于杠杆与保证金占用",
+      helper: "当前交易时段风险分级",
       tone: snapshot.metrics.riskLevel === "High" ? "negative" : "highlight",
     },
   ];
@@ -234,7 +235,7 @@ export default function App() {
       });
       const result = (await response.json()) as ApiStrategyParamsSaveResponse;
       if (!response.ok || !result.ok) {
-        throw new Error(result.error || `Strategy params API returned ${response.status}`);
+        throw new Error(result.error || `策略参数接口返回异常状态码：${response.status}`);
       }
 
       const nextSnapshot = result.bundle ? buildDashboardSnapshotFromApi(result.bundle) : snapshot;
@@ -251,11 +252,11 @@ export default function App() {
         id: `save-${Date.now()}`,
         time: new Date().toISOString(),
         level: result.restart_required ? "WARN" : "SUCCESS",
-        message: result.message || "Strategy parameters saved successfully.",
+        message: result.message || "策略参数已保存。",
       };
       setLocalLogs((current) => prependLogEntry(current, entry));
     } catch (saveError) {
-      const message = saveError instanceof Error ? saveError.message : "Failed to save strategy params";
+      const message = saveError instanceof Error ? saveError.message : "保存策略参数失败";
       const entry: LogEntry = {
         id: `save-error-${Date.now()}`,
         time: new Date().toISOString(),
@@ -280,7 +281,7 @@ export default function App() {
       });
       const result = (await response.json()) as ApiStrategyRestartResponse;
       if (!response.ok || !result.ok) {
-        throw new Error(result.error || `Restart API returned ${response.status}`);
+        throw new Error(result.error || `策略重启接口返回异常状态码：${response.status}`);
       }
 
       if (result.bundle) {
@@ -297,11 +298,11 @@ export default function App() {
         id: `restart-${Date.now()}`,
         time: result.restarted_at || new Date().toISOString(),
         level: "WARN",
-        message: result.output ? `${result.message} ${result.output}` : (result.message || "Strategy restart requested."),
+        message: result.output ? `${result.message} ${result.output}` : (result.message || "已发起策略重启。"),
       };
       setLocalLogs((current) => prependLogEntry(current, entry));
     } catch (restartError) {
-      const message = restartError instanceof Error ? restartError.message : "Failed to restart strategy";
+      const message = restartError instanceof Error ? restartError.message : "重启策略失败";
       const entry: LogEntry = {
         id: `restart-error-${Date.now()}`,
         time: new Date().toISOString(),
@@ -322,8 +323,8 @@ export default function App() {
         time: new Date().toISOString(),
         level: "INFO",
         message: snapshot.dataSource === "live"
-          ? "Strategy parameters reset to the latest values exposed by /api/dashboard."
-          : "Strategy parameters reset to baseline mock profile.",
+          ? "策略参数已重置为 /api/dashboard 当前返回的最新值。"
+          : "策略参数已重置为模拟基线配置。",
       };
     setLocalLogs((current) => prependLogEntry(current, entry));
   }
@@ -344,7 +345,7 @@ export default function App() {
 
       {error ? (
         <div className="mb-6 rounded-2xl border border-amber-400/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
-          Live API fetch warning: {error}. The dashboard is keeping the last known state on screen.
+          实时接口拉取告警：{error}。当前页面继续保留最近一次成功获取的状态。
         </div>
       ) : null}
 

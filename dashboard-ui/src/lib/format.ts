@@ -6,7 +6,7 @@ export const currencyFormatter = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 2,
 });
 
-export const compactFormatter = new Intl.NumberFormat("en-US", {
+export const compactFormatter = new Intl.NumberFormat("zh-CN", {
   notation: "compact",
   maximumFractionDigits: 2,
 });
@@ -37,28 +37,30 @@ export function formatOptionalNumber(value: number | null | undefined, digits = 
 }
 
 export function formatDateTime(value: string): string {
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
+    hour12: false,
     timeZone: DISPLAY_TIME_ZONE,
   }).format(new Date(value));
 }
 
 export function formatClock(value: Date): string {
-  return new Intl.DateTimeFormat("en-US", {
+  return new Intl.DateTimeFormat("zh-CN", {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
+    hour12: false,
     timeZone: DISPLAY_TIME_ZONE,
   }).format(value);
 }
 
 export function formatAxisTime(value: string, compact = false): string {
-  return new Intl.DateTimeFormat("en-US", compact
-    ? { month: "short", day: "2-digit", timeZone: DISPLAY_TIME_ZONE }
-    : { hour: "2-digit", minute: "2-digit", timeZone: DISPLAY_TIME_ZONE }
+  return new Intl.DateTimeFormat("zh-CN", compact
+    ? { month: "2-digit", day: "2-digit", timeZone: DISPLAY_TIME_ZONE }
+    : { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: DISPLAY_TIME_ZONE }
   ).format(new Date(value));
 }
 

@@ -28,9 +28,9 @@ export function DrawdownChart({ data, range }: DrawdownChartProps) {
   return (
     <section className="terminal-panel">
       <div>
-        <p className="terminal-kicker">Risk Profile</p>
-        <h2 className="terminal-title">Historical Drawdown</h2>
-        <p className="terminal-subtitle">Drawdown depth is highlighted so capital stress is visible before it becomes a problem.</p>
+        <p className="terminal-kicker">风险画像</p>
+        <h2 className="terminal-title">历史回撤</h2>
+        <p className="terminal-subtitle">重点标出回撤深度，让资金压力在恶化前就能被看到。</p>
       </div>
 
       <div className="mt-6 h-[300px]">
@@ -58,7 +58,7 @@ export function DrawdownChart({ data, range }: DrawdownChartProps) {
                 color: "#e2e8f0",
               }}
               labelFormatter={(value) => formatDateTime(String(value))}
-              formatter={(value: number) => [formatPercent(Number(value), 2, false), "Drawdown"]}
+              formatter={(value: number) => [formatPercent(Number(value), 2, false), "回撤"]}
             />
             <ReferenceLine y={0} stroke="rgba(148,163,184,0.35)" />
             <Area type="monotone" dataKey="drawdown" stroke="#fb7185" fill="url(#drawdownGradient)" strokeWidth={2.2} />
@@ -70,7 +70,7 @@ export function DrawdownChart({ data, range }: DrawdownChartProps) {
                 fill="#ffe4e6"
                 stroke="#fb7185"
                 label={{
-                  value: `Max DD ${formatPercent(maxDrawdownPoint.drawdown, 2, false)}`,
+                  value: `最大回撤 ${formatPercent(maxDrawdownPoint.drawdown, 2, false)}`,
                   position: "top",
                   fill: "#fecdd3",
                   fontSize: 12,

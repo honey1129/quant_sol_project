@@ -94,7 +94,7 @@ function detectLogLevel(message: string): LogLevel {
 
 function extractBaseAsset(symbol: string): string {
   if (!symbol) {
-    return "Asset";
+    return "资产";
   }
   return symbol.split("-")[0]?.split("USDT")[0] || symbol;
 }
@@ -117,18 +117,18 @@ function timeframeToMinutes(timeframe: string): number {
 
 function humanizeMinutes(totalMinutes: number): string {
   if (!Number.isFinite(totalMinutes) || totalMinutes <= 0) {
-    return "0m";
+    return "0分钟";
   }
   const days = Math.floor(totalMinutes / (24 * 60));
   const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
   const minutes = Math.floor(totalMinutes % 60);
   if (days > 0) {
-    return `${days}d ${hours}h`;
+    return `${days}天 ${hours}小时`;
   }
   if (hours > 0) {
-    return `${hours}h ${minutes}m`;
+    return `${hours}小时 ${minutes}分钟`;
   }
-  return `${minutes}m`;
+  return `${minutes}分钟`;
 }
 
 function computeUnrealizedPnl(direction: string, qty: number | null, entryPrice: number | null, currentPrice: number | null): number | null {
@@ -346,7 +346,7 @@ function buildTradeRows(bundle: ApiDashboardBundle): TradeRow[] {
       pnl: toNumber(trade.pnl),
       fee: toNumber(trade.fee),
       slippage: toNumber(trade.slippage),
-      reason: trade.reason || "Recent execution",
+      reason: trade.reason || "最近一次执行",
       status: trade.status || "Filled",
     }));
   }
@@ -393,7 +393,7 @@ function buildTradeRows(bundle: ApiDashboardBundle): TradeRow[] {
         pnl: null,
         fee: null,
         slippage: null,
-        reason: lastExecution.reason || bundle.status?.decision?.reason || "Last execution",
+        reason: lastExecution.reason || bundle.status?.decision?.reason || "最后一次执行",
         status: lastExecution.success === false ? "Canceled" : "Filled",
       },
     ];
@@ -485,8 +485,8 @@ export function buildDashboardSnapshotFromApi(bundle: ApiDashboardBundle | null 
   const dailyPnl = toNumber(liveMetrics?.daily_pnl) ?? deriveDailyPnlFromCurve(equityCurve);
 
   return {
-    productName: strategyMeta?.product_name || "Quant Alpha Dashboard",
-    strategyName: strategyMeta?.strategy_name || (market.symbol ? `${market.symbol} Live Strategy Console` : mockSnapshot.strategyName),
+    productName: strategyMeta?.product_name || "Quant Alpha 控制台",
+    strategyName: strategyMeta?.strategy_name || (market.symbol ? `${market.symbol} 实盘策略控制台` : mockSnapshot.strategyName),
     exchange: strategyMeta?.exchange || market.exchange || mockSnapshot.exchange,
     status: runtimeStatus,
     updatedAt,

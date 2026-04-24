@@ -75,7 +75,7 @@ const positions: PositionRow[] = [
     unrealizedPnl: 102.12,
     stopLoss: 162.3,
     takeProfit: 178.6,
-    holdingTime: "6h 14m",
+    holdingTime: "6小时 14分钟",
   },
   {
     symbol: "BTCUSDT.P",
@@ -87,7 +87,7 @@ const positions: PositionRow[] = [
     unrealizedPnl: 588.96,
     stopLoss: 69_880,
     takeProfit: 66_900,
-    holdingTime: "1d 3h",
+    holdingTime: "1天 3小时",
   },
   {
     symbol: "ETHUSDT.P",
@@ -99,7 +99,7 @@ const positions: PositionRow[] = [
     unrealizedPnl: -352.0,
     stopLoss: 3_318,
     takeProfit: 3_565,
-    holdingTime: "9h 48m",
+    holdingTime: "9小时 48分钟",
   },
 ];
 
@@ -113,7 +113,7 @@ const trades: TradeRow[] = [
     pnl: 214.5,
     fee: 9.8,
     slippage: 4.3,
-    reason: "ML breakout + RSI trend confirmation",
+    reason: "ML 突破信号 + RSI 趋势确认",
     status: "Take Profit",
   },
   {
@@ -125,7 +125,7 @@ const trades: TradeRow[] = [
     pnl: 281.2,
     fee: 15.6,
     slippage: 8.2,
-    reason: "MACD reversal momentum",
+    reason: "MACD 反转动量",
     status: "Filled",
   },
   {
@@ -137,7 +137,7 @@ const trades: TradeRow[] = [
     pnl: -401.3,
     fee: 13.1,
     slippage: 6.4,
-    reason: "ATR stop loss execution",
+    reason: "ATR 止损触发执行",
     status: "Stopped",
   },
   {
@@ -149,7 +149,7 @@ const trades: TradeRow[] = [
     pnl: 146.4,
     fee: 5.1,
     slippage: 2.1,
-    reason: "KDJ overextension fade",
+    reason: "KDJ 超涨回落",
     status: "Filled",
   },
   {
@@ -161,7 +161,7 @@ const trades: TradeRow[] = [
     pnl: 402.8,
     fee: 16.2,
     slippage: 7.7,
-    reason: "Trend continuation with volume regime shift",
+    reason: "趋势延续 + 成交量结构切换",
     status: "Take Profit",
   },
   {
@@ -173,7 +173,7 @@ const trades: TradeRow[] = [
     pnl: -58.1,
     fee: 8.4,
     slippage: 3.4,
-    reason: "Counter-trend scalp invalidated",
+    reason: "逆势短线失效",
     status: "Canceled",
   },
 ];
@@ -209,31 +209,31 @@ const signal: StrategySignal = {
 };
 
 const logs: LogEntry[] = [
-  { id: "log-1", time: minutesAgo(1), level: "SUCCESS", message: "Order filled on SOLUSDT.P, execution latency 184ms." },
-  { id: "log-2", time: minutesAgo(2), level: "INFO", message: "Signal engine recalculated factors for 15m / 1h regime filters." },
-  { id: "log-3", time: minutesAgo(4), level: "INFO", message: "Market data snapshot received from OKX WebSocket stream." },
-  { id: "log-4", time: minutesAgo(9), level: "WARN", message: "ETH mean-reversion signal weakened below score threshold, holding unchanged." },
-  { id: "log-5", time: minutesAgo(13), level: "SUCCESS", message: "Take-profit level updated for BTC short after volatility contraction." },
-  { id: "log-6", time: minutesAgo(17), level: "INFO", message: "Risk engine heartbeat healthy, all capital guardrails within threshold." },
-  { id: "log-7", time: minutesAgo(22), level: "ERROR", message: "Transient REST retry on positions endpoint resolved after 1 attempt." },
+  { id: "log-1", time: minutesAgo(1), level: "SUCCESS", message: "SOLUSDT.P 订单已成交，执行延迟 184ms。" },
+  { id: "log-2", time: minutesAgo(2), level: "INFO", message: "信号引擎已重新计算 15m / 1H 周期过滤因子。" },
+  { id: "log-3", time: minutesAgo(4), level: "INFO", message: "已收到来自 OKX WebSocket 的市场快照。" },
+  { id: "log-4", time: minutesAgo(9), level: "WARN", message: "ETH 均值回归信号跌破阈值，保持原仓位不变。" },
+  { id: "log-5", time: minutesAgo(13), level: "SUCCESS", message: "波动收缩后，BTC 空单止盈位已更新。" },
+  { id: "log-6", time: minutesAgo(17), level: "INFO", message: "风控心跳正常，全部资金护栏均在阈值内。" },
+  { id: "log-7", time: minutesAgo(22), level: "ERROR", message: "持仓接口发生短暂 REST 重试，1 次后恢复成功。" },
 ];
 
 const equityCurve = generateEquityCurve();
 const metrics = buildMetrics(equityCurve, positions, "Medium");
 
 export const rollingLogMessages = [
-  "Strategy heartbeat confirmed, awaiting next bar close.",
-  "Received fresh order book imbalance update from derivatives feed.",
-  "ML ensemble score refreshed with volatility regime overlay.",
-  "Trailing stop recalibrated for active SOL long position.",
-  "Funding-rate monitor completed, no hedge rebalance needed.",
-  "Execution gateway latency stable below 220ms.",
-  "Risk control review passed, session remains fully tradable.",
+  "策略心跳正常，等待下一根 K 线收盘。",
+  "已收到衍生品盘口失衡的最新更新。",
+  "ML 组合评分已叠加波动率状态重新刷新。",
+  "当前 SOL 多单的移动止损已重新校准。",
+  "资金费率监控完成，无需对冲再平衡。",
+  "执行网关延迟稳定低于 220ms。",
+  "风控检查通过，当前会话可继续交易。",
 ];
 
 export const dashboardSnapshot: DashboardSnapshot = {
-  productName: "Quant Alpha Dashboard",
-  strategyName: "Crypto Multi-Factor Alpha v2.7",
+  productName: "Quant Alpha 控制台",
+  strategyName: "加密多因子 Alpha v2.7",
   exchange: "OKX",
   status: "Running",
   updatedAt: new Date().toISOString(),

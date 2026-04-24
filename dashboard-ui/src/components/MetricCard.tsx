@@ -24,7 +24,7 @@ export function MetricCard({
     <article
       className={`rounded-2xl border border-white/10 bg-gradient-to-br p-4 shadow-terminal transition-transform duration-300 hover:-translate-y-0.5 ${toneMap[tone]}`}
     >
-      <p className="text-[11px] uppercase tracking-[0.24em] text-slate-400">{label}</p>
+      <p className="text-[11px] tracking-[0.12em] text-slate-400">{label}</p>
       <h3 className="mt-3 font-mono text-2xl font-semibold text-slate-950 dark:text-white">{value}</h3>
       <p className="mt-2 text-sm font-medium text-slate-600 dark:text-slate-300">{change}</p>
       <p className="mt-4 text-xs text-slate-500 dark:text-slate-400">{helper}</p>
