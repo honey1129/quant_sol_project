@@ -47,7 +47,7 @@ export function TopNav({
   onThemeToggle,
 }: TopNavProps) {
   return (
-    <header className="sticky top-4 z-30 mb-6 rounded-3xl border border-white/10 bg-white/75 px-5 py-4 shadow-terminal backdrop-blur-xl dark:bg-slate-950/80">
+    <header className="top-nav-shell sticky top-4 z-30 mb-6 rounded-3xl border border-white/10 bg-white/75 px-5 py-4 shadow-terminal backdrop-blur-xl dark:bg-slate-950/80">
       <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-5">
           <div>
@@ -55,9 +55,9 @@ export function TopNav({
             <h1 className="mt-1 text-2xl font-semibold text-slate-950 dark:text-white">{strategyName}</h1>
           </div>
           <div className="flex flex-wrap gap-2">
-            <StatusBadge label={exchange} tone="sky" />
-            <StatusBadge label={getStrategyStatusLabel(status)} tone={getStatusTone(status)} />
-            <StatusBadge label={getDataSourceLabel(dataSource)} tone={getDataSourceTone(dataSource)} />
+            <StatusBadge label={exchange} tone="sky" pulse />
+            <StatusBadge label={getStrategyStatusLabel(status)} tone={getStatusTone(status)} pulse />
+            <StatusBadge label={getDataSourceLabel(dataSource)} tone={getDataSourceTone(dataSource)} pulse />
           </div>
         </div>
 

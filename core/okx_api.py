@@ -302,13 +302,25 @@ class OKXClient:
 
         # 转换为DataFrame。分页结果可能按“最近批次在前、历史批次在后”拼接，
         # 这里统一按时间正序排序，并去重，避免滚动特征被乱序数据污染。
-        columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
-        df = pd.DataFrame([row[:6] for row in all_data], columns=columns)
+        normalized_rows = []
+        for row in all_data:
+            normalized_rows.append({
+                "timestamp": row[0],
+                "open": row[1],
+                "high": row[2],
+                "low": row[3],
+                "close": row[4],
+                "volume": row[5],
+                "confirm": row[8] if len(row) > 8 else "1",
+            })
+
+        df = pd.DataFrame(normalized_rows)
         df['timestamp'] = pd.to_datetime(df['timestamp'].astype(float), unit='ms')
         df.drop_duplicates(subset=['timestamp'], keep='last', inplace=True)
         df.sort_values('timestamp', inplace=True)
         for col in ['open', 'high', 'low', 'close', 'volume']:
             df[col] = df[col].astype(float)
+        df['confirm'] = df['confirm'].astype(str)
         df.reset_index(drop=True, inplace=True)
         return df
 

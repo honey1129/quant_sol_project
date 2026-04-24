@@ -26,17 +26,10 @@ def parse_env_bool(env_str, default=False):
         return default
     return str(env_str).strip().lower() in {"1", "true", "yes", "on"}
 
-EXCHANGE = os.getenv("EXCHANGE", "OKX")
-
 # ✅ OKX API
 OKX_API_KEY = os.getenv("OKX_API_KEY")
 OKX_SECRET = os.getenv("OKX_SECRET")
 OKX_PASSWORD = os.getenv("OKX_PASSWORD")
-
-# ✅ WEEX API
-WEEX_API_KEY = os.getenv("WEEX_API_KEY")
-WEEX_SECRET = os.getenv("WEEX_SECRET")
-WEEX_PASSWORD = os.getenv("WEEX_PASSWORD")
 
 USE_SERVER = os.getenv("USE_SERVER", '1')
 
@@ -115,7 +108,7 @@ FEE_RATE = float(os.getenv("FEE_RATE", 0.0005))
 BACKTEST_SLIPPAGE_BPS = float(os.getenv("BACKTEST_SLIPPAGE_BPS", 3.0))
 BACKTEST_ENABLE_FUNDING = parse_env_bool(os.getenv("BACKTEST_ENABLE_FUNDING"), True)
 BACKTEST_FUNDING_HISTORY_LIMIT = int(os.getenv("BACKTEST_FUNDING_HISTORY_LIMIT", 400))
-BACKTEST_INTRABAR_TP_SL = parse_env_bool(os.getenv("BACKTEST_INTRABAR_TP_SL"), True)
+BACKTEST_INTRABAR_TP_SL = parse_env_bool(os.getenv("BACKTEST_INTRABAR_TP_SL"), False)
 BACKTEST_WORST_CASE_TP_SL = parse_env_bool(os.getenv("BACKTEST_WORST_CASE_TP_SL"), True)
 
 # ✅ 实盘/模拟盘保护

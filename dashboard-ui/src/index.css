@@ -12,16 +12,33 @@
     background-image:
       radial-gradient(circle at top left, rgba(56, 189, 248, 0.12), transparent 26%),
       radial-gradient(circle at top right, rgba(34, 197, 94, 0.08), transparent 24%);
+    overflow-x: hidden;
   }
 
   body::before {
     content: "";
     @apply pointer-events-none fixed inset-0 -z-10 bg-grid-light bg-[size:32px_32px] opacity-70 dark:bg-grid-dark;
     mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.9), transparent 94%);
+    animation: gridDrift 24s linear infinite;
+  }
+
+  body::after {
+    content: "";
+    position: fixed;
+    inset: -18%;
+    z-index: -20;
+    pointer-events: none;
+    background:
+      radial-gradient(circle at 22% 24%, rgba(56, 189, 248, 0.22), transparent 22%),
+      radial-gradient(circle at 78% 18%, rgba(16, 185, 129, 0.2), transparent 20%),
+      radial-gradient(circle at 55% 78%, rgba(14, 165, 233, 0.16), transparent 24%);
+    filter: blur(28px);
+    animation: auroraFloat 18s ease-in-out infinite alternate;
   }
 
   #root {
     @apply min-h-screen;
+    position: relative;
   }
 
   * {
@@ -30,9 +47,141 @@
   }
 }
 
+@keyframes auroraFloat {
+  0% {
+    transform: translate3d(-2%, -1%, 0) scale(1);
+  }
+
+  100% {
+    transform: translate3d(2%, 2%, 0) scale(1.08);
+  }
+}
+
+@keyframes gridDrift {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+
+  100% {
+    transform: translate3d(32px, 16px, 0);
+  }
+}
+
+@keyframes panelRise {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 18px, 0);
+  }
+
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes heroSweep {
+  0% {
+    transform: translateX(-130%);
+  }
+
+  100% {
+    transform: translateX(130%);
+  }
+}
+
+@keyframes streamRun {
+  0% {
+    transform: translateX(0);
+  }
+
+  100% {
+    transform: translateX(-50%);
+  }
+}
+
+@keyframes floatCard {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0);
+  }
+
+  50% {
+    transform: translate3d(0, -6px, 0);
+  }
+}
+
+@keyframes softPulse {
+  0%,
+  100% {
+    opacity: 0.45;
+    transform: scale(1);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1.6);
+  }
+}
+
+@keyframes shimmerFlow {
+  0% {
+    transform: translateX(-130%);
+  }
+
+  100% {
+    transform: translateX(130%);
+  }
+}
+
+@keyframes meterBreath {
+  0%,
+  100% {
+    filter: saturate(1);
+  }
+
+  50% {
+    filter: saturate(1.22);
+  }
+}
+
+@keyframes chartScan {
+  0% {
+    transform: translateY(-120%);
+  }
+
+  100% {
+    transform: translateY(320%);
+  }
+}
+
 @layer components {
   .terminal-panel {
     @apply rounded-3xl border border-white/10 bg-white/70 p-5 shadow-terminal backdrop-blur-xl transition dark:bg-slate-900/70;
+    position: relative;
+    overflow: hidden;
+    isolation: isolate;
+  }
+
+  .terminal-panel::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: linear-gradient(120deg, transparent 20%, rgba(255, 255, 255, 0.12) 50%, transparent 80%);
+    opacity: 0;
+    transform: translateX(-120%);
+    transition: opacity 220ms ease;
+    pointer-events: none;
+  }
+
+  .terminal-panel:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 32px 72px rgba(2, 6, 23, 0.28);
+  }
+
+  .terminal-panel:hover::before {
+    opacity: 1;
+    animation: shimmerFlow 1.8s ease;
   }
 
   .terminal-kicker {
@@ -61,5 +210,216 @@
 
   .terminal-button-secondary {
     @apply rounded-2xl border border-white/10 bg-slate-950/[0.03] px-4 py-3 text-sm font-semibold text-slate-700 transition hover:border-sky-400/30 hover:text-sky-500 dark:bg-white/5 dark:text-slate-200 dark:hover:text-sky-300;
+  }
+
+  .dashboard-shell {
+    position: relative;
+    isolation: isolate;
+  }
+
+  .dashboard-shell::before,
+  .dashboard-shell::after {
+    content: "";
+    position: fixed;
+    inset: auto;
+    z-index: -5;
+    pointer-events: none;
+    border-radius: 9999px;
+    filter: blur(18px);
+    opacity: 0.42;
+  }
+
+  .dashboard-shell::before {
+    top: 9rem;
+    left: -4rem;
+    width: 13rem;
+    height: 13rem;
+    background: rgba(14, 165, 233, 0.22);
+    animation: auroraFloat 14s ease-in-out infinite alternate;
+  }
+
+  .dashboard-shell::after {
+    right: -3rem;
+    bottom: 5rem;
+    width: 14rem;
+    height: 14rem;
+    background: rgba(16, 185, 129, 0.18);
+    animation: auroraFloat 17s ease-in-out infinite alternate-reverse;
+  }
+
+  .top-nav-shell {
+    position: relative;
+    overflow: hidden;
+  }
+
+  .top-nav-shell::after {
+    content: "";
+    position: absolute;
+    inset: auto -20% 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(56, 189, 248, 0.9), transparent);
+    animation: streamRun 8s linear infinite;
+  }
+
+  .dashboard-hero {
+    @apply mb-6 grid gap-5 rounded-[28px] border border-white/10 bg-white/65 px-5 py-5 shadow-terminal backdrop-blur-xl dark:bg-slate-950/75;
+    position: relative;
+    overflow: hidden;
+    isolation: isolate;
+  }
+
+  .dashboard-hero::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(circle at 15% 25%, rgba(56, 189, 248, 0.2), transparent 24%),
+      radial-gradient(circle at 80% 20%, rgba(16, 185, 129, 0.16), transparent 22%);
+    pointer-events: none;
+  }
+
+  .dashboard-hero::after {
+    content: "";
+    position: absolute;
+    inset: -20%;
+    background: linear-gradient(110deg, transparent 38%, rgba(255, 255, 255, 0.2) 50%, transparent 62%);
+    animation: heroSweep 10s linear infinite;
+    pointer-events: none;
+  }
+
+  .dashboard-hero-copy {
+    position: relative;
+    z-index: 1;
+    max-width: 54rem;
+  }
+
+  .dashboard-stream {
+    position: relative;
+    z-index: 1;
+    overflow: hidden;
+    border-radius: 9999px;
+    border: 1px solid rgba(148, 163, 184, 0.16);
+    background: rgba(15, 23, 42, 0.08);
+    padding: 0.75rem 0;
+  }
+
+  .dashboard-stream-track {
+    display: flex;
+    width: max-content;
+    min-width: 100%;
+    animation: streamRun 22s linear infinite;
+  }
+
+  .dashboard-stream-item {
+    flex: none;
+    padding: 0 1.15rem;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.24em;
+    text-transform: uppercase;
+    color: rgb(125 211 252);
+    white-space: nowrap;
+  }
+
+  .panel-enter {
+    animation: panelRise 650ms ease both;
+    animation-delay: var(--panel-delay, 0s);
+  }
+
+  .metric-card {
+    position: relative;
+    overflow: hidden;
+    animation: floatCard 8s ease-in-out infinite;
+    animation-delay: var(--card-delay, 0s);
+  }
+
+  .metric-card::before {
+    content: "";
+    position: absolute;
+    inset: auto auto -32% -10%;
+    width: 7rem;
+    height: 7rem;
+    border-radius: 9999px;
+    background: rgba(125, 211, 252, 0.12);
+    filter: blur(10px);
+    pointer-events: none;
+  }
+
+  .metric-card::after {
+    content: "";
+    position: absolute;
+    inset: -25% auto -25% -10%;
+    width: 45%;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.18), transparent);
+    transform: translateX(-180%) skewX(-18deg);
+    animation: shimmerFlow 8s linear infinite;
+    animation-delay: var(--card-delay, 0s);
+    pointer-events: none;
+  }
+
+  .status-badge-dot {
+    animation: softPulse 1.8s ease-in-out infinite;
+    transform-origin: center;
+  }
+
+  .panel-scan::after {
+    content: "";
+    position: absolute;
+    inset: -40% 0 auto;
+    height: 38%;
+    background: linear-gradient(180deg, transparent, rgba(56, 189, 248, 0.08), transparent);
+    animation: chartScan 8s linear infinite;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .chart-stage {
+    position: relative;
+    overflow: hidden;
+    border-radius: 1.5rem;
+  }
+
+  .chart-stage::after {
+    content: "";
+    position: absolute;
+    inset: -40% 0 auto;
+    height: 34%;
+    background: linear-gradient(180deg, transparent, rgba(255, 255, 255, 0.06), transparent);
+    animation: chartScan 10s linear infinite;
+    pointer-events: none;
+  }
+
+  .signal-meter {
+    position: relative;
+    overflow: hidden;
+  }
+
+  .signal-score {
+    text-shadow: 0 0 24px rgba(56, 189, 248, 0.24);
+  }
+
+  .signal-meter-bar {
+    position: relative;
+    animation: meterBreath 2.8s ease-in-out infinite;
+    transform-origin: left center;
+  }
+
+  .signal-meter-bar::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.32), transparent);
+    animation: shimmerFlow 2.8s linear infinite;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

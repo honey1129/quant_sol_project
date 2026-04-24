@@ -26,14 +26,14 @@ export function DrawdownChart({ data, range }: DrawdownChartProps) {
   }, null as EquityPoint | null);
 
   return (
-    <section className="terminal-panel">
+    <section className="terminal-panel panel-scan">
       <div>
         <p className="terminal-kicker">风险画像</p>
         <h2 className="terminal-title">历史回撤</h2>
         <p className="terminal-subtitle">重点标出回撤深度，让资金压力在恶化前就能被看到。</p>
       </div>
 
-      <div className="mt-6 h-[300px]">
+      <div className="chart-stage mt-6 h-[300px]">
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={data}>
             <defs>

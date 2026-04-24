@@ -135,6 +135,20 @@ class StrategyCore:
     def get_state(self):
         return self.position, self.entry_price, self.hold_bars
 
+    def _build_close_action(self, *, pos, reason, target_ratio=0.0, target_position=0.0):
+        delta_qty = -float(pos)
+        self.position = 0.0
+        self.entry_price = 0.0
+        self.hold_bars = 0
+        self.reset_risk_thresholds()
+        return {
+            "action": "CLOSE",
+            "delta_qty": delta_qty,
+            "target_ratio": float(target_ratio),
+            "target_position": float(target_position),
+            "reason": reason,
+        }
+
     def _resolve_directional_target_ratio(
         self,
         *,
@@ -204,18 +218,7 @@ class StrategyCore:
         if pos != 0:
             pnl_pct = (price - self.entry_price) / self.entry_price if pos > 0 else (self.entry_price - price) / self.entry_price
             if pnl_pct >= take_profit or pnl_pct <= -stop_loss:
-                delta_qty = -pos
-                self.position = 0.0
-                self.entry_price = 0.0
-                self.hold_bars = 0
-                self.reset_risk_thresholds()
-                return {
-                    "action": "CLOSE",
-                    "delta_qty": delta_qty,
-                    "target_ratio": 0.0,
-                    "target_position": 0.0,
-                    "reason": "TP/SL",
-                }
+                return self._build_close_action(pos=pos, reason="TP/SL")
 
         # ======================
         # 2) 计算目标仓位档位
@@ -227,6 +230,14 @@ class StrategyCore:
             volatility=volatility,
         )
         target_position = target_ratio * equity / price
+        same_direction = (pos > 0 and target_position > 0) or (pos < 0 and target_position < 0)
+        reverse_signal_is_strong = (
+            pos != 0 and
+            not same_direction and
+            abs(target_position) > 0 and
+            signal_prob_gap >= self.reverse_signal_min_prob_diff and
+            abs(target_ratio) >= self.reverse_min_target_ratio
+        )
 
         # ======================
         # 3) 空仓 -> 只允许开仓
@@ -252,7 +263,18 @@ class StrategyCore:
             }
 
         # ======================
-        # 4) 持仓 -> 最小持有期
+        # 4) 反向强信号 -> 强制先平仓
+        # ======================
+        if reverse_signal_is_strong:
+            return self._build_close_action(
+                pos=pos,
+                reason="ReverseClose",
+                target_ratio=target_ratio,
+                target_position=target_position,
+            )
+
+        # ======================
+        # 5) 持仓 -> 最小持有期
         # ======================
         self.hold_bars += 1
         if self.hold_bars < self.min_hold_bars:
@@ -265,10 +287,8 @@ class StrategyCore:
             }
 
         # ======================
-        # 5) 同方向 -> 分段加 / 减仓
+        # 6) 同方向 -> 分段加 / 减仓
         # ======================
-        same_direction = (pos > 0 and target_position > 0) or (pos < 0 and target_position < 0)
-
         if same_direction:
             raw_delta = target_position - pos
             diff_ratio = raw_delta / max(abs(pos), 1e-9)
@@ -313,27 +333,9 @@ class StrategyCore:
             }
 
         # ======================
-        # 6) 反向信号 -> 必须先清仓
+        # 7) 反向弱信号 -> 持仓等待
         # ======================
         if abs(target_position) > 0:
-            reverse_signal_is_strong = (
-                signal_prob_gap >= self.reverse_signal_min_prob_diff and
-                abs(target_ratio) >= self.reverse_min_target_ratio
-            )
-            if reverse_signal_is_strong:
-                delta_qty = -pos
-                self.position = 0.0
-                self.entry_price = 0.0
-                self.hold_bars = 0
-                self.reset_risk_thresholds()
-                return {
-                    "action": "CLOSE",
-                    "delta_qty": delta_qty,
-                    "target_ratio": target_ratio,
-                    "target_position": target_position,
-                    "reason": "ReverseClose",
-                }
-
             return {
                 "action": "HOLD",
                 "delta_qty": 0.0,

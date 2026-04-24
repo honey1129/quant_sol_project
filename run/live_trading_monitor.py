@@ -159,12 +159,12 @@ class LiveTrader:
         merged_df = ml_feature_engineering.add_advanced_features(merged_df)
         merged_df = merged_df.dropna().copy()
 
-        if len(merged_df) < 2:
+        if merged_df.empty:
             raise RuntimeError("特征数据不足，暂时无法生成已收盘 bar 信号")
 
-        # 最后一根通常是尚未收盘的 bar，实盘统一使用上一根已收盘 bar。
-        row = merged_df.iloc[-2]
-        bar_ts = merged_df.index[-2]
+        # merge_multi_period_features 已经只保留确认收盘bar，并对高周期特征做了滞后一根对齐。
+        row = merged_df.iloc[-1]
+        bar_ts = merged_df.index[-1]
         price = float(row["5m_close"])
         money_flow_ratio = float(row["money_flow_ratio"])
 
@@ -172,7 +172,7 @@ class LiveTrader:
             volatility = float(row["volatility_15"])
         else:
             merged_df["log_return"] = np.log(merged_df["5m_close"] / merged_df["5m_close"].shift(1))
-            volatility = float(merged_df["log_return"].rolling(96).std().iloc[-2])
+            volatility = float(merged_df["log_return"].rolling(96).std().iloc[-1])
 
         long_prob, short_prob = self._predict_latest_probs(row)
         atr_value = row.get("5m_atr")
@@ -220,6 +220,24 @@ class LiveTrader:
             "pending_orders": pending_orders,
         }
 
+    def _build_mixed_position_snapshot(self, long_pos, short_pos, current_price=None, pending_orders=None):
+        long_size = float(long_pos.get("size", 0) or 0)
+        short_size = float(short_pos.get("size", 0) or 0)
+        notional = None
+        if current_price is not None:
+            notional = (long_size + short_size) * float(current_price)
+
+        return {
+            "direction": "mixed",
+            "net_qty": long_size - short_size,
+            "entry_price": None,
+            "hold_bars": int(self.hold_bars),
+            "notional": notional,
+            "pending_orders": pending_orders,
+            "long_qty": long_size,
+            "short_qty": short_size,
+        }
+
     def _write_dashboard_snapshot(
         self,
         *,
@@ -252,7 +270,7 @@ class LiveTrader:
                 "last_error": error_message,
             },
             "market": {
-                "exchange": getattr(config, "EXCHANGE", "OKX"),
+                "exchange": "OKX",
                 "symbol": config.SYMBOL,
                 "last_price": current_price,
                 "leverage": float(config.LEVERAGE),
@@ -281,19 +299,59 @@ class LiveTrader:
 
     def _sync_after_trade(self):
         pos_qty2, entry_price2 = self._get_net_position()
+        if pos_qty2 is None:
+            return
         if pos_qty2 == 0:
             self.hold_bars = 0
         self.core.set_state(pos_qty2, entry_price2, self.hold_bars)
         _, _, self.hold_bars = self.core.get_state()
 
-    def _get_net_position(self):
-        long_pos, short_pos = self.client.get_position()
+    def _get_position_sides(self):
+        return self.client.get_position()
 
+    def _reconcile_dual_side_position(self, *, bar_ts, price, signal_snapshot):
+        long_pos, short_pos = self._get_position_sides()
+        long_size = float(long_pos.get("size", 0) or 0)
+        short_size = float(short_pos.get("size", 0) or 0)
+        if long_size <= 0 or short_size <= 0:
+            return False
+
+        log_error("检测到同时多空持仓，进入恢复流程，只做清仓对账，不执行新信号。")
+        close_long_ok = self.client.close_long_sz(long_size, config.LEVERAGE)
+        close_short_ok = self.client.close_short_sz(short_size, config.LEVERAGE)
+
+        self.last_execution = {
+            "action": "RECONCILE_POSITIONS",
+            "reason": "DualSidePosition",
+            "success": bool(close_long_ok and close_short_ok),
+            "timestamp": normalize_ts(bar_ts),
+        }
+
+        account_snapshot = self._get_account_snapshot()
+        latest_long_pos, latest_short_pos = self._get_position_sides()
+        self._write_dashboard_snapshot(
+            runtime_status="running",
+            latest_closed_bar_ts=bar_ts,
+            current_price=price,
+            signal_snapshot=signal_snapshot,
+            account_snapshot=account_snapshot,
+            position_snapshot=self._build_mixed_position_snapshot(
+                latest_long_pos,
+                latest_short_pos,
+                current_price=price,
+                pending_orders=0,
+            ),
+            decision={
+                "action": "RECONCILE_POSITIONS",
+                "reason": "DualSidePosition",
+            },
+        )
+        return True
+
+    def _get_net_position(self):
+        long_pos, short_pos = self._get_position_sides()
         if long_pos["size"] > 0 and short_pos["size"] > 0:
-            log_error("检测到同时多空持仓（与回测不一致），尝试双边平仓清理。")
-            self.client.close_long_sz(long_pos["size"], config.LEVERAGE)
-            self.client.close_short_sz(short_pos["size"], config.LEVERAGE)
-            return 0.0, 0.0
+            return None, None
 
         if long_pos["size"] > 0:
             return float(long_pos["size"]), float(long_pos["entry_price"])
@@ -351,6 +409,13 @@ class LiveTrader:
             "atr_ratio": None if atr_ratio is None else float(atr_ratio),
         }
 
+        if self._reconcile_dual_side_position(
+            bar_ts=bar_ts,
+            price=price,
+            signal_snapshot=signal_snapshot,
+        ):
+            return
+
         if self.last_bar_ts is not None and bar_ts == self.last_bar_ts:
             self.same_bar_skip_count += 1
             self._maybe_log_same_bar_heartbeat(bar_ts)
@@ -380,6 +445,9 @@ class LiveTrader:
         )
 
         pos_qty, entry_price = self._get_net_position()
+        if pos_qty is None:
+            log_error("双边持仓仍未清理完成，本轮跳过信号执行。")
+            return
         account_snapshot = self._get_account_snapshot()
         equity = float(account_snapshot.get("total_eq", 0) or account_snapshot.get("avail_eq", 0) or 0)
 
@@ -520,12 +588,21 @@ def run():
             startup_price = float(client.get_price())
         except Exception:
             startup_price = None
-        startup_position = trader._build_position_snapshot(
-            startup_pos_qty,
-            startup_entry_price,
-            current_price=startup_price,
-            pending_orders=0,
-        )
+        if startup_pos_qty is None:
+            long_pos, short_pos = trader._get_position_sides()
+            startup_position = trader._build_mixed_position_snapshot(
+                long_pos,
+                short_pos,
+                current_price=startup_price,
+                pending_orders=0,
+            )
+        else:
+            startup_position = trader._build_position_snapshot(
+                startup_pos_qty,
+                startup_entry_price,
+                current_price=startup_price,
+                pending_orders=0,
+            )
     except Exception as exc:
         log_error(f"启动快照初始化失败，将继续进入主循环: {exc}")
 

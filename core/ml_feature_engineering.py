@@ -1,6 +1,9 @@
 # ml_feature_engineering.py
 
+from datetime import timezone
+
 import numpy as np
+import pandas as pd
 
 # 单周期基础特征工程
 def add_features(df):
@@ -10,20 +13,28 @@ def add_features(df):
     df = df.copy()
 
     # 各类EMA均线
-    df['ema_10'] = df['close'].ewm(span=10).mean()
-    df['ema_20'] = df['close'].ewm(span=20).mean()
-    df['ema_30'] = df['close'].ewm(span=30).mean()
-    df['ema_60'] = df['close'].ewm(span=60).mean()
+    df['ema_10'] = df['close'].ewm(span=10, adjust=False).mean()
+    df['ema_20'] = df['close'].ewm(span=20, adjust=False).mean()
+    df['ema_30'] = df['close'].ewm(span=30, adjust=False).mean()
+    df['ema_60'] = df['close'].ewm(span=60, adjust=False).mean()
 
     # MACD指标
-    ema_fast = df['close'].ewm(span=12).mean()
-    ema_slow = df['close'].ewm(span=26).mean()
+    ema_fast = df['close'].ewm(span=12, adjust=False).mean()
+    ema_slow = df['close'].ewm(span=26, adjust=False).mean()
     df['macd'] = ema_fast - ema_slow
-    df['macd_signal'] = df['macd'].ewm(span=9).mean()
+    df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+    df['macd_hist'] = df['macd'] - df['macd_signal']
 
-    # ATR指标
-    df['atr_14'] = df[['high', 'low', 'close']].apply(lambda x: x['high'] - x['low'], axis=1)
-    df['atr'] = df['atr_14'].rolling(window=14).mean()
+    # ATR指标（标准True Range + Wilder平滑）
+    prev_close = df['close'].shift(1)
+    tr_components = pd.concat([
+        df['high'] - df['low'],
+        (df['high'] - prev_close).abs(),
+        (df['low'] - prev_close).abs(),
+    ], axis=1)
+    df['tr'] = tr_components.max(axis=1)
+    df['atr_14'] = df['tr']
+    df['atr'] = df['tr'].ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
 
     # 波动率与布林带
     df['volatility_20'] = df['close'].rolling(window=20).std()
@@ -42,7 +53,10 @@ def add_features(df):
 
     # 威廉指标、随机指标
     df['williams_r'] = compute_williams_r(df, window=14)
-    df['stoch_k'] = compute_stochastic(df, window=14)
+    stoch_k, stoch_d, stoch_j = compute_stochastic(df, window=14)
+    df['stoch_k'] = stoch_k
+    df['stoch_d'] = stoch_d
+    df['stoch_j'] = stoch_j
 
     # OBV指标
     df['obv'] = (np.sign(df['close'].diff()) * df['volume']).fillna(0).cumsum()
@@ -58,30 +72,129 @@ def add_features(df):
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     return df  # ❗ 注意：这里不做 dropna，留到融合时统一处理
 
+
+def interval_to_timedelta(interval):
+    normalized = str(interval).strip()
+    if not normalized:
+        raise ValueError("interval 不能为空")
+
+    unit = normalized[-1].lower()
+    try:
+        value = int(normalized[:-1])
+    except ValueError as exc:
+        raise ValueError(f"无法解析周期: {interval}") from exc
+
+    unit_map = {
+        "m": "minutes",
+        "h": "hours",
+        "d": "days",
+    }
+    if unit not in unit_map:
+        raise ValueError(f"暂不支持的周期单位: {interval}")
+    return pd.Timedelta(**{unit_map[unit]: value})
+
+
+def keep_confirmed_bars(df, interval, now_ts=None):
+    """
+    只保留已确认收盘的K线。
+
+    - 若交易所返回 confirm 字段，则优先使用；
+    - 否则按 timestamp + interval <= now 推断。
+    """
+    if df is None or df.empty:
+        return df.copy() if df is not None else pd.DataFrame()
+
+    frame = df.copy()
+    frame = frame.sort_index()
+    interval_delta = interval_to_timedelta(interval)
+
+    if now_ts is None:
+        now_ts = pd.Timestamp.now(tz=timezone.utc)
+    now_ts = pd.Timestamp(now_ts)
+    if now_ts.tzinfo is None:
+        now_ts = now_ts.tz_localize("UTC")
+    else:
+        now_ts = now_ts.tz_convert("UTC")
+
+    index_ts = pd.DatetimeIndex(frame.index)
+    if index_ts.tz is None:
+        index_ts_utc = index_ts.tz_localize("UTC")
+    else:
+        index_ts_utc = index_ts.tz_convert("UTC")
+
+    inferred_confirmed = pd.Series(
+        (index_ts_utc + interval_delta) <= now_ts,
+        index=frame.index,
+        dtype=bool,
+    )
+
+    confirm_col = None
+    for candidate in ("confirm", "confirmed", "is_confirmed"):
+        if candidate in frame.columns:
+            confirm_col = candidate
+            break
+
+    if confirm_col is not None:
+        raw_confirm = frame[confirm_col]
+        normalized_confirm = (
+            raw_confirm.astype(str)
+            .str.strip()
+            .str.lower()
+            .map({"1": True, "0": False, "true": True, "false": False})
+        )
+        frame["is_confirmed"] = normalized_confirm.fillna(False)
+    else:
+        frame["is_confirmed"] = inferred_confirmed
+
+    frame["is_confirmed"] = frame["is_confirmed"] & inferred_confirmed
+    frame = frame[frame["is_confirmed"]].copy()
+    return frame
+
 # 多周期融合逻辑
-def merge_multi_period_features(data_dict):
+def merge_multi_period_features(data_dict, base_interval=None):
     """
-    融合多周期数据为统一特征表，智能处理缺失值，最大化训练样本量
+    融合多周期数据为统一特征表，默认以最细周期为基准。
+
+    高周期特征会先整体滞后一根再映射到低周期，避免在高周期K线尚未收盘时
+    把该周期特征前向填充到更细粒度bar中。
     """
-    feature_list = []
+    if not data_dict:
+        return pd.DataFrame()
 
-    for interval, df in data_dict.items():
-        df_features = add_features(df)
-        df_features = df_features.add_prefix(f"{interval}_")
-        feature_list.append(df_features)
+    ordered_intervals = list(data_dict.keys())
+    if base_interval is None:
+        base_interval = min(ordered_intervals, key=lambda item: interval_to_timedelta(item))
+    if base_interval not in data_dict:
+        raise KeyError(f"基础周期 {base_interval} 不存在于 data_dict 中")
 
-    # 逐步进行多周期join
-    merged = feature_list[0]
-    for df in feature_list[1:]:
-        merged = merged.join(df, how="outer")  # ⚠ 关键点：使用 outer join 保留更多数据
-        merged = merged.sort_index()
+    prepared = {}
+    for interval in ordered_intervals:
+        confirmed_df = keep_confirmed_bars(data_dict[interval], interval)
+        if confirmed_df.empty:
+            continue
+        df_features = add_features(confirmed_df)
+        if interval != base_interval:
+            df_features = df_features.shift(1)
+        prepared[interval] = df_features.add_prefix(f"{interval}_")
+
+    if base_interval not in prepared:
+        return pd.DataFrame()
+
+    merged = prepared[base_interval].copy()
+    for interval in ordered_intervals:
+        if interval == base_interval or interval not in prepared:
+            continue
+        merged = merged.join(prepared[interval], how="left")
 
     merged = merged.sort_index()
     merged.ffill(inplace=True)
-    merged.dropna(inplace=True)
+
+    # 高周期长窗口特征在样本不足时可能整列为空，不能因此把整个结果表清空。
+    merged.dropna(axis=1, how="all", inplace=True)
 
     # 最后做温和缺失裁剪：若缺失超出10%则丢弃该行
-    merged.dropna(thresh=int(merged.shape[1] * 0.9), inplace=True)
+    min_non_na = max(1, int(np.ceil(merged.shape[1] * 0.9)))
+    merged.dropna(thresh=min_non_na, inplace=True)
 
     return merged
 
@@ -104,8 +217,8 @@ def add_advanced_features(df):
     df['hl_spread'] = (df['5m_high'] - df['5m_low']) / df['5m_close']
 
     # === 均线乖离率特征 ===
-    df['ema_12'] = df['5m_close'].ewm(span=12).mean()
-    df['ema_26'] = df['5m_close'].ewm(span=26).mean()
+    df['ema_12'] = df['5m_close'].ewm(span=12, adjust=False).mean()
+    df['ema_26'] = df['5m_close'].ewm(span=26, adjust=False).mean()
     df['ema_diff'] = (df['5m_close'] - df['ema_12']) / df['ema_12']
 
     # === 动量特征 ===
@@ -125,8 +238,8 @@ def compute_rsi(series, window=14):
     delta = series.diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window).mean()
-    avg_loss = loss.rolling(window).mean()
+    avg_gain = gain.ewm(alpha=1 / window, adjust=False, min_periods=window).mean()
+    avg_loss = loss.ewm(alpha=1 / window, adjust=False, min_periods=window).mean()
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
@@ -138,7 +251,11 @@ def compute_williams_r(df, window=14):
 def compute_stochastic(df, window=14):
     low_min = df['low'].rolling(window).min()
     high_max = df['high'].rolling(window).max()
-    return 100 * (df['close'] - low_min) / (high_max - low_min)
+    denominator = (high_max - low_min).replace(0, np.nan)
+    k = 100 * (df['close'] - low_min) / denominator
+    d = k.rolling(3).mean()
+    j = 3 * k - 2 * d
+    return k, d, j
 
 def compute_vwap(df):
     return (df['close'] * df['volume']).cumsum() / df['volume'].cumsum()

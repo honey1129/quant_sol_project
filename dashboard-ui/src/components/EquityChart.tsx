@@ -23,7 +23,7 @@ export function EquityChart({ data, range, onRangeChange }: EquityChartProps) {
   const compactAxis = range !== "1D";
 
   return (
-    <section className="terminal-panel">
+    <section className="terminal-panel panel-scan">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
         <div>
           <p className="terminal-kicker">收益表现</p>
@@ -33,7 +33,7 @@ export function EquityChart({ data, range, onRangeChange }: EquityChartProps) {
         <RangeTabs value={range} onChange={onRangeChange} />
       </div>
 
-      <div className="mt-6 h-[340px]">
+      <div className="chart-stage mt-6 h-[340px]">
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={data}>
             <defs>

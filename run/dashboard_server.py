@@ -278,7 +278,7 @@ def enrich_status_with_fallbacks(status, log_lines, recent_events):
         if runtime.get("same_bar_skip_count") is None and progress.get("same_bar_skip_count") is not None:
             runtime["same_bar_skip_count"] = progress.get("same_bar_skip_count")
 
-    market.setdefault("exchange", getattr(config, "EXCHANGE", "OKX"))
+    market.setdefault("exchange", "OKX")
     market.setdefault("symbol", getattr(config, "SYMBOL", "SOL-USDT-SWAP"))
     market.setdefault("leverage", safe_float(getattr(config, "LEVERAGE", 0)))
     market.setdefault("simulated", str(getattr(config, "USE_SERVER", "1")) == "1")
@@ -551,7 +551,7 @@ def build_strategy_meta(status):
     return {
         "product_name": "Quant Alpha Dashboard",
         "strategy_name": f"{symbol} {interval_label} {mode} Strategy",
-        "exchange": market.get("exchange") or getattr(config, "EXCHANGE", "OKX"),
+        "exchange": market.get("exchange") or "OKX",
         "symbol": symbol,
         "mode": mode.lower(),
         "simulated": bool(market.get("simulated", str(getattr(config, "USE_SERVER", "1")) == "1")),

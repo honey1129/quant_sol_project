@@ -1,4 +1,4 @@
-import { startTransition, useEffect, useRef, useState } from "react";
+import { startTransition, useEffect, useRef, useState, type CSSProperties } from "react";
 import { dashboardSnapshot as mockSnapshot } from "./data/mockData";
 import { DrawdownChart } from "./components/DrawdownChart";
 import { EquityChart } from "./components/EquityChart";
@@ -12,7 +12,7 @@ import { TopNav } from "./components/TopNav";
 import { TradesTable } from "./components/TradesTable";
 import { buildDashboardSnapshotFromApi } from "./lib/dashboardAdapter";
 import { formatCurrency, formatNumber, formatPercent } from "./lib/format";
-import { getRiskLevelLabel } from "./lib/uiText";
+import { getRiskLevelLabel, getSignalDirectionLabel, getStrategyStatusLabel } from "./lib/uiText";
 import type {
   ApiDashboardBundle,
   ApiStrategyParamsSaveResponse,
@@ -211,6 +211,16 @@ export default function App() {
     },
   ];
 
+  const streamItems = [
+    `状态 ${getStrategyStatusLabel(snapshot.status)}`,
+    `信号 ${getSignalDirectionLabel(snapshot.signal.direction)}`,
+    `风险 ${getRiskLevelLabel(snapshot.metrics.riskLevel)}`,
+    `持仓 ${snapshot.metrics.openPositions}`,
+    `净值 ${formatCurrency(snapshot.metrics.equity)}`,
+    `今日 ${formatCurrency(snapshot.metrics.dailyPnl)}`,
+    `轮询 ${POLL_MS / 1000}s`,
+  ];
+
   function handleParamChange<K extends keyof StrategyParams>(key: K, value: StrategyParams[K]) {
     setParamsDirty(true);
     setParams((current) => ({
@@ -330,7 +340,7 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen px-4 py-4 sm:px-6 xl:px-8">
+    <div className="dashboard-shell min-h-screen px-4 py-4 sm:px-6 xl:px-8">
       <TopNav
         productName={snapshot.productName}
         strategyName={snapshot.strategyName}
@@ -343,14 +353,39 @@ export default function App() {
         onThemeToggle={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
       />
 
+      <section
+        className="dashboard-hero panel-enter"
+        style={{ "--panel-delay": "0.04s" } as CSSProperties}
+      >
+        <div className="dashboard-hero-copy">
+          <p className="terminal-kicker">Runtime Pulse</p>
+          <h2 className="terminal-title">让页面状态跟着策略节奏一起呼吸</h2>
+          <p className="terminal-subtitle">
+            保留量化监控的密度，同时把关键状态做成持续动态反馈，方便快速扫一眼就知道系统是否在正常工作。
+          </p>
+        </div>
+        <div className="dashboard-stream" aria-hidden="true">
+          <div className="dashboard-stream-track">
+            {[...streamItems, ...streamItems].map((item, index) => (
+              <span key={`${item}-${index}`} className="dashboard-stream-item">
+                {item}
+              </span>
+            ))}
+          </div>
+        </div>
+      </section>
+
       {error ? (
         <div className="mb-6 rounded-2xl border border-amber-400/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
           实时接口拉取告警：{error}。当前页面继续保留最近一次成功获取的状态。
         </div>
       ) : null}
 
-      <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-8">
-        {metricCards.map((metric) => (
+      <section
+        className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-8"
+        style={{ "--panel-delay": "0.08s" } as CSSProperties}
+      >
+        {metricCards.map((metric, index) => (
           <MetricCard
             key={metric.label}
             label={metric.label}
@@ -358,17 +393,21 @@ export default function App() {
             change={metric.change}
             helper={metric.helper}
             tone={metric.tone}
+            index={index}
           />
         ))}
       </section>
 
-      <section className="mt-6 grid gap-6 xl:grid-cols-[1.55fr_0.95fr]">
-        <div className="space-y-6">
+      <section
+        className="mt-6 grid gap-6 xl:grid-cols-[1.55fr_0.95fr]"
+        style={{ "--panel-delay": "0.12s" } as CSSProperties}
+      >
+        <div className="space-y-6 panel-enter">
           <EquityChart data={filteredCurve} range={range} onRangeChange={setRange} />
           <DrawdownChart data={filteredCurve} range={range} />
         </div>
 
-        <div className="space-y-6">
+        <div className="space-y-6 panel-enter" style={{ "--panel-delay": "0.18s" } as CSSProperties}>
           <SignalPanel signal={snapshot.signal} now={now} />
           <RiskPanel risk={snapshot.risk} />
           <ParamsPanel
@@ -384,12 +423,19 @@ export default function App() {
         </div>
       </section>
 
-      <section className="mt-6 grid gap-6 xl:grid-cols-[1.15fr_1fr]">
-        <PositionsTable positions={snapshot.positions} />
-        <TradesTable trades={snapshot.trades} />
+      <section
+        className="mt-6 grid gap-6 xl:grid-cols-[1.15fr_1fr]"
+        style={{ "--panel-delay": "0.22s" } as CSSProperties}
+      >
+        <div className="panel-enter">
+          <PositionsTable positions={snapshot.positions} />
+        </div>
+        <div className="panel-enter" style={{ "--panel-delay": "0.26s" } as CSSProperties}>
+          <TradesTable trades={snapshot.trades} />
+        </div>
       </section>
 
-      <section className="mt-6">
+      <section className="mt-6 panel-enter" style={{ "--panel-delay": "0.3s" } as CSSProperties}>
         <LogPanel logs={visibleLogs} />
       </section>
     </div>

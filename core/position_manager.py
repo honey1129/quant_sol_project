@@ -1,5 +1,7 @@
 # position_manager.py
 
+import math
+
 from config import config
 
 class PositionManager:
@@ -24,10 +26,31 @@ class PositionManager:
 
     # 多因子评分 (可扩展因子体系)
     def multi_factor_score(self, prob, money_flow_ratio, volatility):
+        try:
+            money_flow_ratio = float(money_flow_ratio)
+        except (TypeError, ValueError):
+            money_flow_ratio = 1.0
+        try:
+            volatility = float(volatility)
+        except (TypeError, ValueError):
+            volatility = config.TARGET_VOL
+
+        if not math.isfinite(money_flow_ratio):
+            money_flow_ratio = 1.0
+        if not math.isfinite(volatility) or volatility <= 0:
+            volatility = config.TARGET_VOL
+
+        # 把资金流限制在稳健区间，避免极端缩量/放量把仓位评分顶满。
+        money_flow_clamped = min(1.5, max(0.5, money_flow_ratio))
+        money_flow_score = (money_flow_clamped - 0.5) / 1.0
+
+        # 低波动不再无限放大仓位，最高只给满分 1.0。
+        volatility_score = min(1.0, config.TARGET_VOL / max(volatility, 1e-6))
+
         score = (
             0.5 * prob +
-            0.3 * (money_flow_ratio / 5) +  # money_flow_ratio 通常在 0-5之间
-            0.2 * (0.02 / (volatility + 1e-6))
+            0.25 * money_flow_score +
+            0.25 * volatility_score
         )
         return max(0, min(score, 1))
 

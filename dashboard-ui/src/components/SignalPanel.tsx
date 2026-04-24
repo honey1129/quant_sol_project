@@ -20,27 +20,27 @@ function getSignalTone(direction: StrategySignal["direction"]) {
 
 export function SignalPanel({ signal, now }: SignalPanelProps) {
   return (
-    <section className="terminal-panel">
+    <section className="terminal-panel panel-scan">
       <div className="flex items-start justify-between gap-4">
         <div>
           <p className="terminal-kicker">信号面板</p>
           <h2 className="terminal-title">策略信号概览</h2>
         </div>
-        <StatusBadge label={getSignalDirectionLabel(signal.direction)} tone={getSignalTone(signal.direction)} />
+        <StatusBadge label={getSignalDirectionLabel(signal.direction)} tone={getSignalTone(signal.direction)} pulse />
       </div>
 
-      <div className="mt-6 rounded-2xl border border-white/10 bg-slate-950/[0.03] p-5 dark:bg-white/[0.03]">
+      <div className="signal-meter mt-6 rounded-2xl border border-white/10 bg-slate-950/[0.03] p-5 dark:bg-white/[0.03]">
         <div className="flex items-end justify-between gap-4">
           <div>
             <p className="text-sm text-slate-400">信号强度</p>
-            <p className="mt-2 font-mono text-4xl font-semibold text-slate-950 dark:text-white">{signal.score}</p>
+            <p className="signal-score mt-2 font-mono text-4xl font-semibold text-slate-950 dark:text-white">{signal.score}</p>
           </div>
           <p className="text-xs tracking-[0.14em] text-slate-500">评分 / 100</p>
         </div>
 
         <div className="mt-4 h-3 overflow-hidden rounded-full bg-slate-300 dark:bg-slate-800/90">
           <div
-            className="h-full rounded-full bg-gradient-to-r from-sky-500 via-cyan-400 to-emerald-400"
+            className="signal-meter-bar h-full rounded-full bg-gradient-to-r from-sky-500 via-cyan-400 to-emerald-400"
             style={{ width: `${signal.score}%` }}
           />
         </div>

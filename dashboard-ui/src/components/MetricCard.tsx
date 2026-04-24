@@ -1,9 +1,12 @@
+import type { CSSProperties } from "react";
+
 interface MetricCardProps {
   label: string;
   value: string;
   change: string;
   helper: string;
   tone?: "neutral" | "positive" | "negative" | "highlight";
+  index?: number;
 }
 
 const toneMap: Record<NonNullable<MetricCardProps["tone"]>, string> = {
@@ -19,10 +22,12 @@ export function MetricCard({
   change,
   helper,
   tone = "neutral",
+  index = 0,
 }: MetricCardProps) {
   return (
     <article
-      className={`rounded-2xl border border-white/10 bg-gradient-to-br p-4 shadow-terminal transition-transform duration-300 hover:-translate-y-0.5 ${toneMap[tone]}`}
+      className={`metric-card rounded-2xl border border-white/10 bg-gradient-to-br p-4 shadow-terminal transition-transform duration-300 hover:-translate-y-1 ${toneMap[tone]}`}
+      style={{ "--card-delay": `${index * 0.12}s` } as CSSProperties}
     >
       <p className="text-[11px] tracking-[0.12em] text-slate-400">{label}</p>
       <h3 className="mt-3 font-mono text-2xl font-semibold text-slate-950 dark:text-white">{value}</h3>

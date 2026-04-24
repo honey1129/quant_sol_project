@@ -5,6 +5,7 @@ type Tone = "emerald" | "amber" | "rose" | "sky" | "violet" | "slate";
 interface StatusBadgeProps {
   label: ReactNode;
   tone?: Tone;
+  pulse?: boolean;
 }
 
 const toneMap: Record<Tone, string> = {
@@ -16,12 +17,12 @@ const toneMap: Record<Tone, string> = {
   slate: "border-slate-400/20 bg-slate-500/10 text-slate-300",
 };
 
-export function StatusBadge({ label, tone = "slate" }: StatusBadgeProps) {
+export function StatusBadge({ label, tone = "slate", pulse = false }: StatusBadgeProps) {
   return (
     <span
       className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold tracking-[0.08em] ${toneMap[tone]}`}
     >
-      <span className="h-1.5 w-1.5 rounded-full bg-current" />
+      <span className={`h-1.5 w-1.5 rounded-full bg-current ${pulse ? "status-badge-dot" : ""}`} />
       {label}
     </span>
   );
