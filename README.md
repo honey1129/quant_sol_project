@@ -206,31 +206,55 @@ python -m run.scheduler
 
 ## VPS 部署
 
-### 1. 一键初始化 Python 环境
+### 1. 推荐：一条命令部署测试盘
+
+```bash
+bash run/deploy_paper_vps.sh
+```
+
+如果你希望部署前顺手把服务器上的当前分支 fast-forward 到最新代码，可以用：
+
+```bash
+bash run/deploy_paper_vps.sh --git-pull
+```
+
+这个脚本会：
+
+- 可选执行 `git pull --ff-only`
+- 校验 `.env` 是否存在且为 OKX 测试盘配置
+- 检查模型文件是否齐全
+- 创建 `.venv`
+- 安装依赖
+- 执行 `run/check_okx_paper_ready.py`
+- 用 PM2 启动或重载 `quant_okx_paper`
+
+常用参数：
+
+- `--git-pull`: 部署前拉最新代码
+- `--skip-check`: 跳过测试盘预检
+- `--skip-start`: 只安装和校验，不启动 PM2
+
+### 2. 旧版基础引导脚本
+
+如果你只想先建 Python 环境，不立即启动服务，也可以继续用：
 
 ```bash
 bash run/bootstrap_vps.sh
 ```
 
-这个脚本会：
-
-- 创建 `.venv`
-- 安装依赖
-- 给出后续测试盘启动命令
-
-### 2. 安装 PM2
+### 3. 安装 PM2
 
 ```bash
 npm install -g pm2
 ```
 
-### 3. 先做测试盘预检
+### 4. 手动做测试盘预检
 
 ```bash
 PYTHONPATH=. TELEGRAM_ENABLED=0 .venv/bin/python run/check_okx_paper_ready.py
 ```
 
-### 4. 用 PM2 常驻测试盘
+### 5. 手动用 PM2 常驻测试盘
 
 ```bash
 pm2 start ecosystem.paper.config.js
@@ -243,7 +267,7 @@ PM2 里默认跑的是：
 .venv/bin/python -m run.live_trading_monitor
 ```
 
-### 5. 查看日志
+### 6. 查看日志
 
 ```bash
 pm2 logs quant_okx_paper
