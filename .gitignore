@@ -7,6 +7,7 @@ __pycache__/
 # 虚拟环境 (venv, .venv, env)
 venv/
 .venv/
+.venv311/
 env/
 ENV/
 env.bak/
@@ -77,6 +78,7 @@ models/*.pkl
 
 # 虚拟环境
 .venv/
+.venv311/
 env/
 venv/
 
