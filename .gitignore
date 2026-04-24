@@ -28,6 +28,9 @@ data/
 *.csv
 *.json
 *.xlsx
+!dashboard-ui/tsconfig.json
+!dashboard-ui/src/data/
+!dashboard-ui/src/data/mockData.ts
 
 # 模型文件
 models/
