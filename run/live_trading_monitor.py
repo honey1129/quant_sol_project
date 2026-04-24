@@ -16,6 +16,13 @@ from core.position_manager import PositionManager
 
 
 LIVE_STATE_PATH = os.path.join(BASE_DIR, "logs", "live_trading_state.json")
+HEARTBEAT_LOG_INTERVAL_SEC = 30.0
+
+
+def should_emit_interval_log(last_emitted_at, now_ts, interval_sec):
+    if last_emitted_at is None:
+        return True
+    return float(now_ts) - float(last_emitted_at) >= float(interval_sec)
 
 
 def load_last_bar_ts(state_path):
@@ -57,6 +64,10 @@ class LiveTrader:
         self.hold_bars = 0
         self.state_path = LIVE_STATE_PATH
         self.last_bar_ts = load_last_bar_ts(self.state_path) if bool(config.LIVE_PERSIST_LAST_BAR) else None
+        self.loop_count = 0
+        self.same_bar_skip_count = 0
+        self.last_heartbeat_logged_at = None
+        self.heartbeat_log_interval_sec = HEARTBEAT_LOG_INTERVAL_SEC
 
         # ===== 模型/特征=====
         feature_path = os.path.join(BASE_DIR, config.FEATURE_LIST_PATH) if "BASE_DIR" in globals() else config.FEATURE_LIST_PATH
@@ -211,13 +222,34 @@ class LiveTrader:
             return
         persist_last_bar_ts(self.state_path, bar_ts)
 
+    def _maybe_log_same_bar_heartbeat(self, current_bar_ts):
+        now_ts = time.monotonic()
+        if not should_emit_interval_log(
+            self.last_heartbeat_logged_at,
+            now_ts,
+            self.heartbeat_log_interval_sec,
+        ):
+            return
+
+        self.last_heartbeat_logged_at = now_ts
+        log_info(
+            f"心跳: 运行中，最近已处理bar={self.last_bar_ts}, "
+            f"当前最新已收盘bar={current_bar_ts}, 连续跳过同bar次数={self.same_bar_skip_count}"
+        )
+
     def run_once_on_new_bar(self):
+        self.loop_count += 1
         bar_ts, price, long_prob, short_prob, money_flow_ratio, volatility, atr_ratio = self._get_latest_features()
 
         if self.last_bar_ts is not None and bar_ts == self.last_bar_ts:
+            self.same_bar_skip_count += 1
+            self._maybe_log_same_bar_heartbeat(bar_ts)
             return
+
+        self.same_bar_skip_count = 0
         self.last_bar_ts = bar_ts
         self._persist_last_bar_state(bar_ts)
+        self.last_heartbeat_logged_at = time.monotonic()
 
         if bool(config.LIVE_RECONCILE_PENDING_ORDERS):
             self.client.cancel_pending_orders()
@@ -291,7 +323,7 @@ def run():
     trader = LiveTrader(client)
     trader.ensure_runtime_ready()
 
-    log_info("🟢 Live trading monitor started (daemon loop)")
+    log_info(f"🟢 Live trading monitor started (daemon loop, poll_sec={POLL_SEC})")
     while True:
         try:
             trader.run_once_on_new_bar()

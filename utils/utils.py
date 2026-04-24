@@ -27,6 +27,8 @@ logging.basicConfig(
 # ✅ 屏蔽冗余日志
 logging.getLogger("okx").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 _telegram_disabled_for_process = False
 
