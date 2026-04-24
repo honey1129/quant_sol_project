@@ -87,6 +87,10 @@ class LiveTrader:
             add_threshold=self.ADD_THRESHOLD,
             max_rebalance_ratio=self.MAX_REBALANCE_RATIO,
             min_adjust_amount=self.MIN_ADJUST_AMOUNT,
+            signal_min_prob_diff=config.SIGNAL_MIN_PROB_DIFF,
+            min_signal_target_ratio=config.MIN_SIGNAL_TARGET_RATIO,
+            reverse_signal_min_prob_diff=config.REVERSE_SIGNAL_MIN_PROB_DIFF,
+            reverse_min_target_ratio=config.REVERSE_MIN_TARGET_RATIO,
             reward_risk=float(self.reward_risk),
         )
 

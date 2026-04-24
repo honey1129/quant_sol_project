@@ -134,6 +134,63 @@ class StrategyCoreRebalanceTests(unittest.TestCase):
         self.assertAlmostEqual(take_profit, 0.03)
         self.assertAlmostEqual(stop_loss, 0.02)
 
+    def test_flat_position_stays_flat_on_weak_signal_gap(self):
+        core = self.build_core(target_ratio=0.2, signal_min_prob_diff=0.12)
+
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.54,
+            short_prob=0.46,
+            money_flow_ratio=1.0,
+            volatility=0.01,
+        )
+
+        self.assertEqual(out["action"], "HOLD")
+        self.assertEqual(out["reason"], "FlatNoSignal")
+
+    def test_existing_position_ignores_weak_reverse_signal(self):
+        core = self.build_core(
+            target_ratio=0.09,
+            signal_min_prob_diff=0.12,
+            reverse_signal_min_prob_diff=0.18,
+            reverse_min_target_ratio=0.1,
+        )
+        core.set_state(position=10.0, entry_price=100.0, hold_bars=0)
+
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.40,
+            short_prob=0.60,
+            money_flow_ratio=1.0,
+            volatility=0.01,
+        )
+
+        self.assertEqual(out["action"], "HOLD")
+        self.assertTrue(out["reason"].startswith("WeakReverseSignal"))
+
+    def test_existing_position_closes_on_strong_reverse_signal(self):
+        core = self.build_core(
+            target_ratio=0.2,
+            signal_min_prob_diff=0.12,
+            reverse_signal_min_prob_diff=0.18,
+            reverse_min_target_ratio=0.1,
+        )
+        core.set_state(position=10.0, entry_price=100.0, hold_bars=0)
+
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.35,
+            short_prob=0.65,
+            money_flow_ratio=1.0,
+            volatility=0.01,
+        )
+
+        self.assertEqual(out["action"], "CLOSE")
+        self.assertEqual(out["reason"], "ReverseClose")
+
 
 if __name__ == "__main__":
     unittest.main()
