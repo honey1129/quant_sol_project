@@ -409,6 +409,9 @@ build_dashboard_ui() {
     return
   fi
 
+  [[ -f "$PROJECT_ROOT/dashboard-ui/tsconfig.json" ]] || \
+    fail "Missing dashboard-ui/tsconfig.json. Sync the latest frontend source to the VPS first."
+
   require_command node
   require_command npm
 
