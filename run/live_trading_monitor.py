@@ -80,6 +80,7 @@ class LiveTrader:
         self.heartbeat_log_interval_sec = HEARTBEAT_LOG_INTERVAL_SEC
         self.last_dashboard_account = {}
         self.last_signal_snapshot = {}
+        self.last_position_snapshot = {}
         self.last_bar_snapshot = {}
         self.last_execution = {}
 
@@ -263,6 +264,8 @@ class LiveTrader:
             }
         if account_snapshot is not None:
             self.last_dashboard_account = account_snapshot
+        if position_snapshot is not None:
+            self.last_position_snapshot = position_snapshot
 
         payload = {
             "runtime": {
@@ -283,7 +286,7 @@ class LiveTrader:
             "bar": self.last_bar_snapshot,
             "signal": signal_snapshot if signal_snapshot is not None else self.last_signal_snapshot,
             "account": account_snapshot if account_snapshot is not None else self.last_dashboard_account,
-            "position": position_snapshot or {},
+            "position": position_snapshot if position_snapshot is not None else self.last_position_snapshot,
             "decision": decision or {},
             "last_execution": self.last_execution,
         }
@@ -296,7 +299,7 @@ class LiveTrader:
                 "total_eq": account_for_history.get("total_eq"),
                 "avail_eq": account_for_history.get("avail_eq"),
                 "price": current_price,
-                "position_qty": (position_snapshot or {}).get("net_qty"),
+                "position_qty": (payload.get("position") or {}).get("net_qty"),
             }
 
         write_runtime_dashboard_snapshot(payload, history_point=history_point)

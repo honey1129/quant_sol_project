@@ -12,7 +12,7 @@ import { TopNav } from "./components/TopNav";
 import { TradesTable } from "./components/TradesTable";
 import { buildDashboardSnapshotFromApi } from "./lib/dashboardAdapter";
 import { formatCurrency, formatNumber, formatPercent } from "./lib/format";
-import { getRiskLevelLabel, getSignalDirectionLabel, getStrategyStatusLabel } from "./lib/uiText";
+import { getRiskLevelLabel, getSignalDirectionLabel } from "./lib/uiText";
 import type {
   ApiDashboardBundle,
   ApiStrategyParamsSaveResponse,
@@ -257,7 +257,7 @@ export default function App() {
   ];
 
   const streamItems = [
-    `状态 ${getStrategyStatusLabel(snapshot.status)}`,
+    `交易所 ${snapshot.exchange}`,
     `信号 ${getSignalDirectionLabel(snapshot.signal.direction)}`,
     `风险 ${getRiskLevelLabel(snapshot.metrics.riskLevel)}`,
     `持仓 ${snapshot.metrics.openPositions}`,
@@ -398,17 +398,7 @@ export default function App() {
         onThemeToggle={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
       />
 
-      <section
-        className="dashboard-hero panel-enter"
-        style={{ "--panel-delay": "0.04s" } as CSSProperties}
-      >
-        <div className="dashboard-hero-copy">
-          <p className="terminal-kicker">Runtime Pulse</p>
-          <h2 className="terminal-title">让页面状态跟着策略节奏一起呼吸</h2>
-          <p className="terminal-subtitle">
-            保留量化监控的密度，同时把关键状态做成持续动态反馈，方便快速扫一眼就知道系统是否在正常工作。
-          </p>
-        </div>
+      <section className="mb-6 panel-enter" style={{ "--panel-delay": "0.04s" } as CSSProperties}>
         <div className="dashboard-stream" aria-hidden="true">
           <div className="dashboard-stream-track">
             {[...streamItems, ...streamItems].map((item, index) => (
