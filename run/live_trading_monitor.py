@@ -223,6 +223,8 @@ class LiveTrader:
     def _build_mixed_position_snapshot(self, long_pos, short_pos, current_price=None, pending_orders=None):
         long_size = float(long_pos.get("size", 0) or 0)
         short_size = float(short_pos.get("size", 0) or 0)
+        long_entry_price = float(long_pos.get("entry_price", 0) or 0)
+        short_entry_price = float(short_pos.get("entry_price", 0) or 0)
         notional = None
         if current_price is not None:
             notional = (long_size + short_size) * float(current_price)
@@ -231,6 +233,8 @@ class LiveTrader:
             "direction": "mixed",
             "net_qty": long_size - short_size,
             "entry_price": None,
+            "long_entry_price": long_entry_price if long_entry_price > 0 else None,
+            "short_entry_price": short_entry_price if short_entry_price > 0 else None,
             "hold_bars": int(self.hold_bars),
             "notional": notional,
             "pending_orders": pending_orders,

@@ -98,6 +98,41 @@ class DashboardServerTests(unittest.TestCase):
         self.assertAlmostEqual(summary["fees_paid"], 27.02)
         self.assertAlmostEqual(summary["slippage_cost"], 14.96)
 
+    def test_build_metrics_snapshot_counts_single_position_as_one(self):
+        metrics = dashboard_server.build_metrics_snapshot(
+            {
+                "account": {"total_eq": 1000},
+                "performance": {},
+                "position": {"direction": "long", "net_qty": 2.5},
+            },
+            history=[],
+            risk_snapshot={"risk_level": "Low"},
+            backtest_summary={},
+            backtest_csv_metrics={},
+        )
+
+        self.assertEqual(metrics["open_positions"], 1)
+
+    def test_build_metrics_snapshot_counts_mixed_position_legs(self):
+        metrics = dashboard_server.build_metrics_snapshot(
+            {
+                "account": {"total_eq": 1000},
+                "performance": {},
+                "position": {
+                    "direction": "mixed",
+                    "net_qty": 0,
+                    "long_qty": 3.0,
+                    "short_qty": 3.0,
+                },
+            },
+            history=[],
+            risk_snapshot={"risk_level": "High"},
+            backtest_summary={},
+            backtest_csv_metrics={},
+        )
+
+        self.assertEqual(metrics["open_positions"], 2)
+
     def test_parse_recent_trade_rows_returns_latest_first(self):
         log_lines = [
             "2026-04-24 10:10:00,000 - INFO - 执行开仓: target_ratio=0.240, qty=1.250000",

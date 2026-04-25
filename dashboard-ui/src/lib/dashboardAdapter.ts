@@ -163,6 +163,43 @@ function computeApproxRiskBands(
   };
 }
 
+function buildPositionRow({
+  symbol,
+  direction,
+  qty,
+  entryPrice,
+  currentPrice,
+  leverage,
+  holdBars,
+  params,
+}: {
+  symbol: string;
+  direction: "long" | "short";
+  qty: number;
+  entryPrice: number | null;
+  currentPrice: number | null;
+  leverage: number;
+  holdBars: number;
+  params: StrategyParams;
+}): PositionRow {
+  const unrealizedPnl = computeUnrealizedPnl(direction, qty, entryPrice, currentPrice);
+  const riskBands = computeApproxRiskBands(direction, entryPrice, params);
+  const holdingMinutes = holdBars * timeframeToMinutes(params.timeframe);
+
+  return {
+    symbol,
+    direction: direction === "short" ? "Short" : "Long",
+    entryPrice,
+    currentPrice,
+    positionSize: `${Math.abs(qty).toFixed(4)} ${extractBaseAsset(symbol)}`,
+    leverage: `${leverage.toFixed(0)}x`,
+    unrealizedPnl,
+    stopLoss: riskBands.stopLoss,
+    takeProfit: riskBands.takeProfit,
+    holdingTime: humanizeMinutes(holdingMinutes),
+  };
+}
+
 function buildEquityCurve(
   history: ApiDashboardHistoryPoint[],
   fallbackCurve: EquityPoint[],
@@ -301,31 +338,67 @@ function buildPositionRows(bundle: ApiDashboardBundle, params: StrategyParams, f
   if (!bundle.status || !market?.symbol) {
     return fallbackRows;
   }
-  if (direction === "flat" || qty === null || qty === 0) {
+  if (direction === "flat") {
     return [];
   }
 
-  const entryPrice = toNumber(position?.entry_price);
   const currentPrice = toNumber(market?.last_price);
   const leverage = toNumber(market?.leverage) ?? params.maxLeverage;
-  const unrealizedPnl = computeUnrealizedPnl(direction, qty, entryPrice, currentPrice);
-  const riskBands = computeApproxRiskBands(direction, entryPrice, params);
   const holdBars = toNumber(position?.hold_bars) ?? 0;
-  const holdingMinutes = holdBars * timeframeToMinutes(params.timeframe);
+  const entryPrice = toNumber(position?.entry_price);
+
+  if (direction === "mixed") {
+    const longQty = toNumber(position?.long_qty) ?? 0;
+    const shortQty = toNumber(position?.short_qty) ?? 0;
+    const rows: PositionRow[] = [];
+
+    if (longQty > 0) {
+      rows.push(
+        buildPositionRow({
+          symbol: market.symbol,
+          direction: "long",
+          qty: longQty,
+          entryPrice: toNumber(position?.long_entry_price),
+          currentPrice,
+          leverage,
+          holdBars,
+          params,
+        }),
+      );
+    }
+    if (shortQty > 0) {
+      rows.push(
+        buildPositionRow({
+          symbol: market.symbol,
+          direction: "short",
+          qty: shortQty,
+          entryPrice: toNumber(position?.short_entry_price),
+          currentPrice,
+          leverage,
+          holdBars,
+          params,
+        }),
+      );
+    }
+
+    return rows;
+  }
+
+  if (qty === null || qty === 0) {
+    return [];
+  }
 
   return [
-    {
+    buildPositionRow({
       symbol: market.symbol,
-      direction: direction === "short" ? "Short" : "Long",
+      direction: direction === "short" ? "short" : "long",
+      qty,
       entryPrice,
       currentPrice,
-      positionSize: `${Math.abs(qty).toFixed(4)} ${extractBaseAsset(market.symbol)}`,
-      leverage: `${leverage.toFixed(0)}x`,
-      unrealizedPnl,
-      stopLoss: riskBands.stopLoss,
-      takeProfit: riskBands.takeProfit,
-      holdingTime: humanizeMinutes(holdingMinutes),
-    },
+      leverage,
+      holdBars,
+      params,
+    }),
   ];
 }
 
@@ -475,6 +548,8 @@ export function buildDashboardSnapshotFromApi(bundle: ApiDashboardBundle | null 
   const equityCurve = buildEquityCurve(bundle.history || [], mockSnapshot.equityCurve, currentEquity, currentPrice, updatedAt);
   const positions = buildPositionRows(bundle, params, []);
   const positionNotional = toNumber(position.notional);
+  const netPositionQty = toNumber(position.net_qty);
+  const positionMode = typeof position.direction === "string" ? position.direction : null;
   const exposurePct = currentEquity > 0 && positionNotional !== null ? (positionNotional / currentEquity) * 100 : 0;
   const leverage = toNumber(liveRisk?.current_leverage) ?? toNumber(market.leverage) ?? params.maxLeverage;
   const runtimeStatus = normalizeStatus(runtime.last_status);
@@ -500,6 +575,9 @@ export function buildDashboardSnapshotFromApi(bundle: ApiDashboardBundle | null 
       sharpeRatio: toNumber(liveMetrics?.sharpe_ratio) ?? mockSnapshot.metrics.sharpeRatio,
       winRatePct: toNumber(liveMetrics?.win_rate_pct) ?? mockSnapshot.metrics.winRatePct,
       openPositions: toNumber(liveMetrics?.open_positions) ?? positions.length,
+      netPositionQty,
+      positionNotional,
+      positionMode,
       riskLevel: normalizeRiskLevel(liveMetrics?.risk_level, derivedRiskLevel),
     },
     signal: {

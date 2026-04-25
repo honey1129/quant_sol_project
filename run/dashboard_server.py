@@ -897,8 +897,14 @@ def build_metrics_snapshot(status, history, risk_snapshot, backtest_summary, bac
         max_drawdown_pct = safe_float(backtest_summary.get("max_drawdown_pct"))
 
     open_positions = 0
+    direction = str(position.get("direction") or "").lower()
+    long_qty = safe_float(position.get("long_qty"))
+    short_qty = safe_float(position.get("short_qty"))
     net_qty = safe_float(position.get("net_qty"))
-    if net_qty is not None and abs(net_qty) > 0:
+
+    if direction == "mixed" or (long_qty is not None or short_qty is not None):
+        open_positions = int((long_qty or 0) > 0) + int((short_qty or 0) > 0)
+    elif net_qty is not None and abs(net_qty) > 0:
         open_positions = 1
 
     return {

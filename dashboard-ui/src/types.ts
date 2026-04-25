@@ -23,6 +23,9 @@ export interface CoreMetrics {
   sharpeRatio: number;
   winRatePct: number;
   openPositions: number;
+  netPositionQty?: number | null;
+  positionNotional?: number | null;
+  positionMode?: string | null;
   riskLevel: RiskLevel;
 }
 
@@ -146,6 +149,10 @@ export interface ApiDashboardPosition {
   direction?: string;
   net_qty?: number | null;
   entry_price?: number | null;
+  long_qty?: number | null;
+  short_qty?: number | null;
+  long_entry_price?: number | null;
+  short_entry_price?: number | null;
   hold_bars?: number | null;
   notional?: number | null;
   pending_orders?: number | null;

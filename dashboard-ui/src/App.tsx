@@ -53,6 +53,46 @@ function prependLogEntry(current: LogEntry[], entry: LogEntry): LogEntry[] {
   return [entry, ...current].slice(0, 12);
 }
 
+function describePositionState(
+  positionMode: string | null | undefined,
+  netPositionQty: number | null | undefined,
+  positionNotional: number | null | undefined,
+) {
+  const mode = String(positionMode || "").toLowerCase();
+  const qty = netPositionQty ?? null;
+  const hasQty = qty !== null && Number.isFinite(qty);
+  const qtyLabel = hasQty ? `${qty > 0 ? "+" : ""}${formatNumber(qty, 4)}` : "--";
+  const notionalLabel = positionNotional !== null && positionNotional !== undefined
+    ? formatCurrency(positionNotional)
+    : "--";
+
+  if (mode === "mixed") {
+    return {
+      change: `双向持仓中 | 净仓 ${qtyLabel}`,
+      helper: `总名义敞口 ${notionalLabel}`,
+    };
+  }
+
+  if (mode === "long") {
+    return {
+      change: `净多仓 ${qtyLabel}`,
+      helper: `当前名义敞口 ${notionalLabel}`,
+    };
+  }
+
+  if (mode === "short") {
+    return {
+      change: `净空仓 ${qtyLabel}`,
+      helper: `当前名义敞口 ${notionalLabel}`,
+    };
+  }
+
+  return {
+    change: "当前无活跃仓位",
+    helper: `当前名义敞口 ${notionalLabel}`,
+  };
+}
+
 export default function App() {
   const [theme, setTheme] = useState<ThemeMode>(getInitialTheme);
   const [now, setNow] = useState<Date>(new Date());
@@ -141,6 +181,11 @@ export default function App() {
 
   const filteredCurve = filterSeriesByRange(range, snapshot.equityCurve);
   const visibleLogs = [...localLogs, ...snapshot.logs].slice(0, 12);
+  const positionMetricText = describePositionState(
+    snapshot.metrics.positionMode,
+    snapshot.metrics.netPositionQty,
+    snapshot.metrics.positionNotional,
+  );
 
   const metricCards: Array<{
     label: string;
@@ -196,10 +241,10 @@ export default function App() {
       tone: "positive" as const,
     },
     {
-      label: "当前持仓",
+      label: "活跃仓位",
       value: String(snapshot.metrics.openPositions),
-      change: "当前衍生品风险敞口",
-      helper: "策略组合中的活跃仓位",
+      change: positionMetricText.change,
+      helper: positionMetricText.helper,
       tone: "neutral" as const,
     },
     {
