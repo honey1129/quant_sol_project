@@ -39,7 +39,9 @@ function parseLogTimestamp(value: string, fallback: string): string {
   if (!match) {
     return fallback;
   }
-  const iso = match[1].replace(" ", "T").replace(",", ".");
+  // VPS runtime logs are emitted without timezone suffix. Treat them as UTC
+  // so the UI can consistently render them in Asia/Shanghai.
+  const iso = `${match[1].replace(" ", "T").replace(",", ".")}Z`;
   const date = new Date(iso);
   return Number.isNaN(date.getTime()) ? fallback : date.toISOString();
 }
