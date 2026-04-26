@@ -141,6 +141,21 @@ def normalize_bar_ts(value):
     return None
 
 
+def parse_any_timestamp_to_utc(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text in {"", "None", "null"}:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def strip_log_prefix(line):
     parsed = parse_log_line(line)
     if not parsed:
@@ -636,15 +651,15 @@ def compute_daily_pnl(history):
         total_eq = safe_float(point.get("total_eq"))
         if not ts or total_eq is None:
             continue
-        try:
-            dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
-        except ValueError:
+        dt = parse_any_timestamp_to_utc(ts)
+        if dt is None:
             continue
         normalized.append((dt, total_eq))
 
     if not normalized:
         return None
 
+    normalized.sort(key=lambda item: item[0])
     latest_dt, latest_eq = normalized[-1]
     anchor_eq = normalized[0][1]
     threshold = latest_dt - timedelta(days=1)
