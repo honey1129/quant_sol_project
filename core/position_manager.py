@@ -15,7 +15,7 @@ class PositionManager:
         if reward_risk <= 0:
             return 0.0
         kelly = ((prob * (reward_risk + 1)) - 1) / reward_risk
-        return max(0, min(kelly, 0.5))
+        return max(0, min(kelly, 0.75))
 
     # 波动率动态调整账户余额
     def volatility_adjust_balance(self, total_balance, volatility):

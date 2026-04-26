@@ -58,8 +58,8 @@ ADAPTIVE_STOP_LOSS_MIN = float(os.getenv("ADAPTIVE_STOP_LOSS_MIN", 0.0055))
 ADAPTIVE_STOP_LOSS_MAX = float(os.getenv("ADAPTIVE_STOP_LOSS_MAX", 0.025))
 
 # ✅ 策略阈值
-THRESHOLD_LONG = float(os.getenv("THRESHOLD_LONG", 0.55))
-THRESHOLD_SHORT = float(os.getenv("THRESHOLD_SHORT", 0.45))
+THRESHOLD_LONG = float(os.getenv("THRESHOLD_LONG", 0.56))
+THRESHOLD_SHORT = float(os.getenv("THRESHOLD_SHORT", 0.56))
 
 # ✅ 合约配置
 LOT_SIZE = float(os.getenv("LOT_SIZE", 0.01))
@@ -78,28 +78,28 @@ SMOOTH_ALPHA = float(os.getenv("SMOOTH_ALPHA", 0.3))
 TRAILING_STOP = float(os.getenv("TRAILING_STOP", 0.03))           # 移动止损 3%
 MAX_HOLD_BARS = float(os.getenv("MAX_HOLD_BARS", 96))
 
-MIN_HOLD_BARS=float(os.getenv("MIN_HOLD_BARS", 8))
+MIN_HOLD_BARS=float(os.getenv("MIN_HOLD_BARS", 4))
 TRAILING_EXIT=float(os.getenv("TRAILING_EXIT", 0.008))
 
 # ✅ 仓位边界
-POSITION_MIN = float(os.getenv("POSITION_MIN", 0.05))
-POSITION_MAX = float(os.getenv("POSITION_MAX", 0.3))
-MAX_POSITION_RATIO = float(os.getenv("MAX_POSITION_RATIO", 0.3))
-BASE_POSITION_RATIO = float(os.getenv("BASE_POSITION_RATIO", 0.1))
-MIN_ADJUST_AMOUNT = float(os.getenv("MIN_ADJUST_AMOUNT", 50))
+POSITION_MIN = float(os.getenv("POSITION_MIN", 0.08))
+POSITION_MAX = float(os.getenv("POSITION_MAX", 0.45))
+MAX_POSITION_RATIO = float(os.getenv("MAX_POSITION_RATIO", 0.45))
+BASE_POSITION_RATIO = float(os.getenv("BASE_POSITION_RATIO", 0.12))
+MIN_ADJUST_AMOUNT = float(os.getenv("MIN_ADJUST_AMOUNT", 25))
 ADJUST_UNIT = float(os.getenv("ADJUST_UNIT", 50))
-ADD_THRESHOLD = float(os.getenv("ADD_THRESHOLD", 0.15))
-MAX_REBALANCE_RATIO = float(os.getenv("MAX_REBALANCE_RATIO", 0.3))
-SIGNAL_MIN_PROB_DIFF = float(os.getenv("SIGNAL_MIN_PROB_DIFF", 0.18))
-MIN_SIGNAL_TARGET_RATIO = float(os.getenv("MIN_SIGNAL_TARGET_RATIO", 0.08))
-REVERSE_SIGNAL_MIN_PROB_DIFF = float(os.getenv("REVERSE_SIGNAL_MIN_PROB_DIFF", 0.26))
-REVERSE_MIN_TARGET_RATIO = float(os.getenv("REVERSE_MIN_TARGET_RATIO", 0.12))
+ADD_THRESHOLD = float(os.getenv("ADD_THRESHOLD", 0.08))
+MAX_REBALANCE_RATIO = float(os.getenv("MAX_REBALANCE_RATIO", 0.5))
+SIGNAL_MIN_PROB_DIFF = float(os.getenv("SIGNAL_MIN_PROB_DIFF", 0.12))
+MIN_SIGNAL_TARGET_RATIO = float(os.getenv("MIN_SIGNAL_TARGET_RATIO", 0.04))
+REVERSE_SIGNAL_MIN_PROB_DIFF = float(os.getenv("REVERSE_SIGNAL_MIN_PROB_DIFF", 0.18))
+REVERSE_MIN_TARGET_RATIO = float(os.getenv("REVERSE_MIN_TARGET_RATIO", 0.08))
 
 # ✅ Kelly 盈亏比
-KELLY_REWARD_RISK = float(os.getenv("KELLY_REWARD_RISK", 2.5))
+KELLY_REWARD_RISK = float(os.getenv("KELLY_REWARD_RISK", 2.8))
 
 # ✅ 动态风险预算
-TARGET_VOL = float(os.getenv("TARGET_VOL", 0.015))
+TARGET_VOL = float(os.getenv("TARGET_VOL", 0.02))
 
 # ✅ 回测参数
 MAX_POSITION = float(os.getenv("MAX_POSITION", 0.4))

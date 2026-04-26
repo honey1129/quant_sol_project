@@ -3,7 +3,7 @@
 import numpy as np
 
 class RewardRiskEstimator:
-    def __init__(self, min_trades=20, default_rr=1.0):
+    def __init__(self, min_trades=12, default_rr=1.8):
         self.min_trades = min_trades
         self.default_rr = default_rr
         self.trades = []
@@ -25,4 +25,4 @@ class RewardRiskEstimator:
         avg_loss = np.mean(losses)
 
         rr = avg_win / avg_loss
-        return max(0.3, min(rr, 3.0))
+        return max(0.8, min(rr, 3.5))

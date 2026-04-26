@@ -152,8 +152,9 @@ class LiveTrader:
             log_info(f"reward_risk={val:.4f}")
             return val
         except Exception as e:
-            log_error(f"reward_risk 获取失败，使用默认 1.0：{e}")
-            return 1.0
+            fallback_rr = float(getattr(config, "KELLY_REWARD_RISK", 1.8) or 1.8)
+            log_error(f"reward_risk 获取失败，使用默认 {fallback_rr:.4f}：{e}")
+            return fallback_rr
 
     def _predict_latest_probs(self, row: pd.Series):
         X = row[self.feature_cols].values.reshape(1, -1).astype(float)
