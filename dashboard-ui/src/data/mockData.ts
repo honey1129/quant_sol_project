@@ -3,10 +3,13 @@ import type {
   DashboardSnapshot,
   EquityPoint,
   LogEntry,
+  MarketCandle,
+  OrderBookSnapshot,
   PositionRow,
   RiskSnapshot,
   StrategyParams,
   StrategySignal,
+  SystemPulse,
   TradeRow,
 } from "../types";
 
@@ -36,6 +39,62 @@ function generateEquityCurve(): EquityPoint[] {
       drawdown: Number((((equity - peak) / peak) * 100).toFixed(2)),
     };
   });
+}
+
+function generateMarketCandles(): MarketCandle[] {
+  const now = Date.now();
+  let price = 162.4;
+
+  return Array.from({ length: 42 }, (_, index) => {
+    const drift = Math.sin(index / 4.3) * 1.9 + Math.cos(index / 8.2) * 1.1 + 0.32;
+    const open = price;
+    const close = Number((open + drift).toFixed(2));
+    const high = Number((Math.max(open, close) + Math.abs(drift) * 0.9 + 0.8).toFixed(2));
+    const low = Number((Math.min(open, close) - Math.abs(drift) * 0.7 - 0.65).toFixed(2));
+    const volume = Number((138_000 + Math.abs(drift) * 42_000 + ((index % 5) + 1) * 5_800).toFixed(0));
+    price = close;
+
+    return {
+      timestamp: new Date(now - (41 - index) * 60 * 60 * 1000).toISOString(),
+      open: Number(open.toFixed(2)),
+      high,
+      low,
+      close,
+      volume,
+    };
+  });
+}
+
+function buildOrderBook(midPrice: number): OrderBookSnapshot {
+  const asks = Array.from({ length: 6 }, (_, index) => {
+    const price = Number((midPrice + 0.06 + index * 0.04).toFixed(2));
+    const size = Number((420 + (index + 1) * 138.5).toFixed(1));
+    return { price, size, total: 0 };
+  });
+  const bids = Array.from({ length: 6 }, (_, index) => {
+    const price = Number((midPrice - 0.02 - index * 0.04).toFixed(2));
+    const size = Number((390 + (index + 1) * 121.3).toFixed(1));
+    return { price, size, total: 0 };
+  });
+
+  let askTotal = 0;
+  let bidTotal = 0;
+  asks.forEach((level) => {
+    askTotal += level.size;
+    level.total = Number(askTotal.toFixed(1));
+  });
+  bids.forEach((level) => {
+    bidTotal += level.size;
+    level.total = Number(bidTotal.toFixed(1));
+  });
+
+  return {
+    midPrice,
+    spread: Number((asks[0].price - bids[0].price).toFixed(2)),
+    spreadPct: Number((((asks[0].price - bids[0].price) / midPrice) * 100).toFixed(4)),
+    asks,
+    bids,
+  };
 }
 
 function buildMetrics(equityCurve: EquityPoint[], positions: PositionRow[], riskLevel: CoreMetrics["riskLevel"]): CoreMetrics {
@@ -208,6 +267,16 @@ const signal: StrategySignal = {
   nextRunAt: minutesFromNow(3),
 };
 
+const marketCandles = generateMarketCandles();
+const orderBook = buildOrderBook(marketCandles[marketCandles.length - 1]?.close ?? 168.92);
+
+const systemPulse: SystemPulse = {
+  cpu: 28,
+  memory: 46,
+  disk: 32,
+  latency: 28,
+};
+
 const logs: LogEntry[] = [
   { id: "log-1", time: minutesAgo(1), level: "SUCCESS", message: "SOLUSDT.P 订单已成交，执行延迟 184ms。" },
   { id: "log-2", time: minutesAgo(2), level: "INFO", message: "信号引擎已重新计算 15m / 1H 周期过滤因子。" },
@@ -239,6 +308,14 @@ export const dashboardSnapshot: DashboardSnapshot = {
   updatedAt: new Date().toISOString(),
   dataSource: "mock",
   equityCurve,
+  marketChart: {
+    symbol: "SOL/USDT",
+    timeframe: "1小时",
+    venue: "OKX",
+    candles: marketCandles,
+  },
+  orderBook,
+  systemPulse,
   metrics,
   signal,
   positions,

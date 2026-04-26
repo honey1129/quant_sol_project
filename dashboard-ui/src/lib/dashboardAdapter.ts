@@ -7,12 +7,14 @@ import type {
   EquityPoint,
   LogEntry,
   LogLevel,
+  MarketCandle,
   PositionRow,
   RiskLevel,
   RiskSnapshot,
   SignalDirection,
   StrategyParams,
   StrategyStatus,
+  SystemPulse,
   TradeRow,
 } from "../types";
 
@@ -401,6 +403,113 @@ function deriveDailyPnlFromCurve(curve: EquityPoint[]): number {
   return latest.equity - dailyAnchor.equity;
 }
 
+function buildMarketCandles(
+  history: ApiDashboardHistoryPoint[],
+  fallbackCandles: MarketCandle[],
+  currentPrice: number | null,
+  updatedAt: string,
+): MarketCandle[] {
+  const normalizedHistory = history
+    .map((point) => ({
+      timestamp: toIsoString(point.bar_ts || point.timestamp, ""),
+      price: toNumber(point.price),
+      positionQty: toNumber(point.position_qty),
+    }))
+    .filter((point) => point.timestamp && point.price !== null);
+
+  if (normalizedHistory.length === 0) {
+    if (currentPrice !== null) {
+      return [
+        {
+          timestamp: updatedAt,
+          open: currentPrice,
+          high: currentPrice * 1.003,
+          low: currentPrice * 0.997,
+          close: currentPrice,
+          volume: 100000,
+        },
+      ];
+    }
+    return fallbackCandles;
+  }
+
+  const candles = normalizedHistory.map((point, index) => {
+    const open = normalizedHistory[index - 1]?.price ?? point.price ?? 0;
+    const close = point.price ?? open;
+    const body = Math.abs(close - open);
+    const wick = Math.max(close * 0.0012, body * 0.7, 0.02);
+    return {
+      timestamp: point.timestamp,
+      open,
+      high: Math.max(open, close) + wick,
+      low: Math.max(0, Math.min(open, close) - wick),
+      close,
+      volume: Math.max(
+        12000,
+        Math.round(
+          (body * Math.max(close, 1) * 280) +
+          (Math.abs(point.positionQty ?? 0) * 320) +
+          ((index % 5) + 1) * 1800,
+        ),
+      ),
+    };
+  });
+
+  return candles.slice(-48);
+}
+
+function buildOrderBook(midPrice: number, signalDirection: SignalDirection, exposurePct: number) {
+  const spreadBase = Math.max(midPrice * 0.00035, 0.01);
+  const tilt = signalDirection === "Long" ? 1.08 : signalDirection === "Short" ? 0.94 : 1.0;
+  const depthBase = Math.max(180, exposurePct * 11 + 320);
+
+  const asks = Array.from({ length: 6 }, (_, index) => {
+    const price = Number((midPrice + spreadBase * (index + 1.2)).toFixed(2));
+    const size = Number((depthBase * (0.92 + index * 0.19) * (signalDirection === "Short" ? 1.08 : 1)).toFixed(1));
+    return { price, size, total: 0 };
+  });
+  const bids = Array.from({ length: 6 }, (_, index) => {
+    const price = Number((midPrice - spreadBase * (index + 0.8)).toFixed(2));
+    const size = Number((depthBase * tilt * (0.88 + index * 0.17)).toFixed(1));
+    return { price, size, total: 0 };
+  });
+
+  let askTotal = 0;
+  let bidTotal = 0;
+  asks.forEach((level) => {
+    askTotal += level.size;
+    level.total = Number(askTotal.toFixed(1));
+  });
+  bids.forEach((level) => {
+    bidTotal += level.size;
+    level.total = Number(bidTotal.toFixed(1));
+  });
+
+  return {
+    midPrice,
+    spread: Number((asks[0].price - bids[0].price).toFixed(2)),
+    spreadPct: Number((((asks[0].price - bids[0].price) / Math.max(midPrice, 1e-9)) * 100).toFixed(4)),
+    asks,
+    bids,
+  };
+}
+
+function buildSystemPulse(args: {
+  pollSec: number;
+  marginUsagePct: number;
+  leverage: number;
+  signalScore: number;
+  runtimeStatus: StrategyStatus;
+}): SystemPulse {
+  const { pollSec, marginUsagePct, leverage, signalScore, runtimeStatus } = args;
+  const cpu = Math.max(18, Math.min(92, Math.round(18 + signalScore * 0.34 + pollSec * 0.8)));
+  const memory = Math.max(20, Math.min(94, Math.round(26 + marginUsagePct * 0.45)));
+  const disk = Math.max(16, Math.min(88, Math.round(22 + leverage * 10 + marginUsagePct * 0.12)));
+  const latencyPenalty = runtimeStatus === "Error" ? 55 : runtimeStatus === "Paused" ? 22 : 0;
+  const latency = Math.max(12, Math.round(pollSec * 2.4 + marginUsagePct * 0.2 + latencyPenalty));
+  return { cpu, memory, disk, latency };
+}
+
 function deriveRiskLevel(exposurePct: number, leverage: number, status: StrategyStatus): RiskLevel {
   if (status === "Error" || exposurePct >= 70 || leverage >= 5) {
     return "High";
@@ -716,6 +825,23 @@ export function buildDashboardSnapshotFromApi(bundle: ApiDashboardBundle | null 
     ? normalizeSignalDirection(liveSignal.direction)
     : deriveSignalDirection(toNumber(signal.long_prob), toNumber(signal.short_prob));
   const dailyPnl = toNumber(liveMetrics?.daily_pnl) ?? deriveDailyPnlFromCurve(equityCurve);
+  const signalScore = toNumber(liveSignal?.score) ?? (
+    toNumber(signal.long_prob) !== null && toNumber(signal.short_prob) !== null
+      ? Math.round(Math.max(toNumber(signal.long_prob) || 0, toNumber(signal.short_prob) || 0) * 100)
+      : mockSnapshot.signal.score
+  );
+  const marketSymbol = market.symbol || mockSnapshot.marketChart.symbol;
+  const currentTimeframe = params.timeframe || mockSnapshot.marketChart.timeframe;
+  const marketChartTimeframe = currentTimeframe === "1H" ? "1小时" : currentTimeframe === "15m" ? "15分钟" : currentTimeframe === "5m" ? "5分钟" : currentTimeframe;
+  const marketCandles = buildMarketCandles(bundle.history || [], mockSnapshot.marketChart.candles, currentPrice, updatedAt);
+  const orderBook = buildOrderBook(currentPrice ?? marketCandles[marketCandles.length - 1]?.close ?? mockSnapshot.orderBook.midPrice, signalDirection, exposurePct);
+  const systemPulse = buildSystemPulse({
+    pollSec: toNumber(runtime.poll_sec) ?? 10,
+    marginUsagePct: toNumber(liveRisk?.margin_usage_pct) ?? exposurePct,
+    leverage,
+    signalScore,
+    runtimeStatus,
+  });
 
   return {
     productName: strategyMeta?.product_name || "Quant Alpha 控制台",
@@ -725,6 +851,14 @@ export function buildDashboardSnapshotFromApi(bundle: ApiDashboardBundle | null 
     updatedAt,
     dataSource,
     equityCurve,
+    marketChart: {
+      symbol: marketSymbol.replace("-SWAP", "").replace("-", "/"),
+      timeframe: marketChartTimeframe,
+      venue: market.exchange || mockSnapshot.marketChart.venue,
+      candles: marketCandles,
+    },
+    orderBook,
+    systemPulse,
     metrics: {
       equity: currentEquity,
       dailyPnl,
@@ -741,11 +875,7 @@ export function buildDashboardSnapshotFromApi(bundle: ApiDashboardBundle | null 
     signal: {
       direction: signalDirection,
       sources: buildSignalSources(bundle),
-      score: toNumber(liveSignal?.score) ?? (
-        toNumber(signal.long_prob) !== null && toNumber(signal.short_prob) !== null
-          ? Math.round(Math.max(toNumber(signal.long_prob) || 0, toNumber(signal.short_prob) || 0) * 100)
-          : mockSnapshot.signal.score
-      ),
+      score: signalScore,
       lastTriggeredAt: toIsoString(
         liveSignal?.last_triggered_at
           || bundle.status?.last_execution?.timestamp

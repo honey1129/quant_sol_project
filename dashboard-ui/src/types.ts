@@ -29,6 +29,43 @@ export interface CoreMetrics {
   riskLevel: RiskLevel;
 }
 
+export interface MarketCandle {
+  timestamp: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export interface MarketChartSnapshot {
+  symbol: string;
+  timeframe: string;
+  venue: string;
+  candles: MarketCandle[];
+}
+
+export interface OrderBookLevel {
+  price: number;
+  size: number;
+  total: number;
+}
+
+export interface OrderBookSnapshot {
+  midPrice: number;
+  spread: number;
+  spreadPct: number;
+  asks: OrderBookLevel[];
+  bids: OrderBookLevel[];
+}
+
+export interface SystemPulse {
+  cpu: number;
+  memory: number;
+  disk: number;
+  latency: number;
+}
+
 export interface StrategySignal {
   direction: SignalDirection;
   sources: SignalSource[];
@@ -105,6 +142,9 @@ export interface DashboardSnapshot {
   updatedAt: string;
   dataSource: DataSource;
   equityCurve: EquityPoint[];
+  marketChart: MarketChartSnapshot;
+  orderBook: OrderBookSnapshot;
+  systemPulse: SystemPulse;
   metrics: CoreMetrics;
   signal: StrategySignal;
   positions: PositionRow[];

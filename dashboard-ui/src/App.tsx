@@ -3,11 +3,14 @@ import { dashboardSnapshot as mockSnapshot } from "./data/mockData";
 import { DrawdownChart } from "./components/DrawdownChart";
 import { EquityChart } from "./components/EquityChart";
 import { LogPanel } from "./components/LogPanel";
+import { MarketChartPanel } from "./components/MarketChartPanel";
 import { MetricCard } from "./components/MetricCard";
+import { OrderBookPanel } from "./components/OrderBookPanel";
 import { ParamsPanel } from "./components/ParamsPanel";
 import { PositionsTable } from "./components/PositionsTable";
 import { RiskPanel } from "./components/RiskPanel";
 import { SignalPanel } from "./components/SignalPanel";
+import { SystemPulsePanel } from "./components/SystemPulsePanel";
 import { TopNav } from "./components/TopNav";
 import { TradesTable } from "./components/TradesTable";
 import { buildDashboardSnapshotFromApi } from "./lib/dashboardAdapter";
@@ -95,19 +98,6 @@ function describePositionState(
     change: "当前无活跃仓位",
     helper: `当前名义敞口 ${notionalLabel}`,
   };
-}
-
-function logToneClass(level: LogEntry["level"]) {
-  if (level === "ERROR") {
-    return "text-rose-300";
-  }
-  if (level === "WARN") {
-    return "text-amber-300";
-  }
-  if (level === "SUCCESS") {
-    return "text-emerald-300";
-  }
-  return "text-slate-300";
 }
 
 const sidebarItems = [
@@ -209,7 +199,6 @@ export default function App() {
 
   const filteredCurve = filterSeriesByRange(range, snapshot.equityCurve);
   const visibleLogs = [...localLogs, ...snapshot.logs].slice(0, 12);
-  const recentAlerts = visibleLogs.slice(0, 4);
   const positionMetricText = describePositionState(
     snapshot.metrics.positionMode,
     snapshot.metrics.netPositionQty,
@@ -458,6 +447,8 @@ export default function App() {
             </p>
           </div>
         </section>
+
+        <SystemPulsePanel systemPulse={snapshot.systemPulse} />
       </aside>
 
       <main className="cockpit-main">
@@ -493,62 +484,32 @@ export default function App() {
           ))}
         </section>
 
-        <section className="mt-6 grid gap-6 2xl:grid-cols-[1.38fr_0.98fr_0.88fr]">
-          <div className="space-y-6 2xl:col-span-2">
+        <section className="mt-6 grid gap-6 2xl:grid-cols-[1.12fr_1.08fr_0.8fr]">
+          <div className="space-y-6">
             <EquityChart data={filteredCurve} range={range} onRangeChange={setRange} />
+            <TradesTable trades={snapshot.trades} />
+            <DrawdownChart data={filteredCurve} range={range} />
+          </div>
 
-            <div className="grid gap-6 xl:grid-cols-[1.02fr_0.98fr]">
-              <TradesTable trades={snapshot.trades} />
-              <PositionsTable positions={snapshot.positions} />
-            </div>
-
-            <div className="grid gap-6 xl:grid-cols-[1fr_1fr]">
-              <DrawdownChart data={filteredCurve} range={range} />
-              <ParamsPanel
-                params={params}
-                savedAt={savedAt}
-                saving={savingParams}
-                restarting={restartingStrategy}
-                onChange={handleParamChange}
-                onSave={handleSaveParams}
-                onRestart={handleRestartStrategy}
-                onReset={handleResetParams}
-              />
-            </div>
+          <div className="space-y-6">
+            <MarketChartPanel marketChart={snapshot.marketChart} />
+            <PositionsTable positions={snapshot.positions} />
+            <ParamsPanel
+              params={params}
+              savedAt={savedAt}
+              saving={savingParams}
+              restarting={restartingStrategy}
+              onChange={handleParamChange}
+              onSave={handleSaveParams}
+              onRestart={handleRestartStrategy}
+              onReset={handleResetParams}
+            />
           </div>
 
           <div className="space-y-6">
             <SignalPanel signal={snapshot.signal} now={now} />
+            <OrderBookPanel orderBook={snapshot.orderBook} symbol={snapshot.marketChart.symbol} />
             <RiskPanel risk={snapshot.risk} />
-
-            <section className="terminal-panel">
-              <div className="mb-5 flex items-center justify-between">
-                <div>
-                  <p className="panel-kicker">预警通知</p>
-                  <h2 className="panel-title">最新事件</h2>
-                </div>
-                <span className="panel-chip">{recentAlerts.length} 条</span>
-              </div>
-              <div className="space-y-3">
-                {recentAlerts.length === 0 ? (
-                  <div className="rounded-2xl border border-dashed border-white/10 bg-white/[0.03] px-4 py-8 text-center text-sm text-slate-500">
-                    暂无近期预警。
-                  </div>
-                ) : recentAlerts.map((log) => (
-                  <article key={log.id} className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3">
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <p className={`text-sm font-medium ${logToneClass(log.level)}`}>{log.message}</p>
-                        <p className="mt-1 text-xs text-slate-500">{formatDateTime(log.time)}</p>
-                      </div>
-                      <span className="rounded-full border border-white/10 px-2.5 py-1 text-[10px] uppercase tracking-[0.2em] text-slate-400">
-                        {log.level}
-                      </span>
-                    </div>
-                  </article>
-                ))}
-              </div>
-            </section>
           </div>
         </section>
 
