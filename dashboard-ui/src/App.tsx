@@ -1,4 +1,4 @@
-import { startTransition, useEffect, useRef, useState, type CSSProperties } from "react";
+import { startTransition, useEffect, useRef, useState } from "react";
 import { dashboardSnapshot as mockSnapshot } from "./data/mockData";
 import { DrawdownChart } from "./components/DrawdownChart";
 import { EquityChart } from "./components/EquityChart";
@@ -11,8 +11,12 @@ import { SignalPanel } from "./components/SignalPanel";
 import { TopNav } from "./components/TopNav";
 import { TradesTable } from "./components/TradesTable";
 import { buildDashboardSnapshotFromApi } from "./lib/dashboardAdapter";
-import { formatCurrency, formatNumber, formatPercent } from "./lib/format";
-import { getRiskLevelLabel, getSignalDirectionLabel } from "./lib/uiText";
+import { formatClock, formatCurrency, formatDateTime, formatNumber, formatPercent } from "./lib/format";
+import {
+  getConnectionStatusLabel,
+  getRiskLevelLabel,
+  getSignalDirectionLabel,
+} from "./lib/uiText";
 import type {
   ApiDashboardBundle,
   ApiStrategyParamsSaveResponse,
@@ -92,6 +96,30 @@ function describePositionState(
     helper: `当前名义敞口 ${notionalLabel}`,
   };
 }
+
+function logToneClass(level: LogEntry["level"]) {
+  if (level === "ERROR") {
+    return "text-rose-300";
+  }
+  if (level === "WARN") {
+    return "text-amber-300";
+  }
+  if (level === "SUCCESS") {
+    return "text-emerald-300";
+  }
+  return "text-slate-300";
+}
+
+const sidebarItems = [
+  { label: "总览", icon: "⌂", active: true },
+  { label: "策略中心", icon: "◫" },
+  { label: "行情监控", icon: "⌁" },
+  { label: "回测分析", icon: "◌" },
+  { label: "实盘交易", icon: "◎" },
+  { label: "风险控制", icon: "◍" },
+  { label: "账户管理", icon: "◪" },
+  { label: "系统设置", icon: "⚙" },
+];
 
 export default function App() {
   const [theme, setTheme] = useState<ThemeMode>(getInitialTheme);
@@ -181,6 +209,7 @@ export default function App() {
 
   const filteredCurve = filterSeriesByRange(range, snapshot.equityCurve);
   const visibleLogs = [...localLogs, ...snapshot.logs].slice(0, 12);
+  const recentAlerts = visibleLogs.slice(0, 4);
   const positionMetricText = describePositionState(
     snapshot.metrics.positionMode,
     snapshot.metrics.netPositionQty,
@@ -196,74 +225,69 @@ export default function App() {
   }> = [
     {
       label: "总资产",
-      value: formatCurrency(snapshot.metrics.equity),
-      change: formatCurrency(snapshot.metrics.dailyPnl),
-      helper: "当前账户权益",
-      tone: "highlight" as const,
+      value: formatCurrency(snapshot.metrics.equity).replace("$", ""),
+      change: "USDT",
+      helper: `≈ ${formatCurrency(snapshot.metrics.equity)} USD`,
+      tone: "neutral" as const,
     },
     {
-      label: "今日收益",
+      label: "当日收益",
       value: formatCurrency(snapshot.metrics.dailyPnl),
-      change: snapshot.metrics.dailyPnl >= 0 ? "当前交易时段盈利中" : "当前交易时段低于目标",
-      helper: "近 24 小时盈亏",
+      change: formatPercent(snapshot.metrics.dailyPnl / Math.max(snapshot.metrics.equity - snapshot.metrics.dailyPnl, 1) * 100, 2),
+      helper: "近 24 小时权益变化",
       tone: snapshot.metrics.dailyPnl >= 0 ? "positive" : "negative",
     },
     {
-      label: "累计收益",
+      label: "累计收益率",
       value: formatPercent(snapshot.metrics.totalReturnPct),
-      change: snapshot.dataSource === "mock" ? "模拟基线数据" : "来源于实时净值历史",
-      helper: "复合累计收益率",
+      change: snapshot.dataSource === "live" ? "实时净值历史" : "回测/混合快照",
+      helper: "账户累计表现",
       tone: "positive" as const,
-    },
-    {
-      label: "最大回撤",
-      value: formatPercent(snapshot.metrics.maxDrawdownPct, 2, false),
-      change: "历史最大资金回撤",
-      helper: "从峰值到谷值的跌幅",
-      tone: "negative" as const,
     },
     {
       label: "夏普比率",
       value: formatNumber(snapshot.metrics.sharpeRatio, 2),
-      change: snapshot.dataSource === "live"
-        ? "来源于最新回测研究快照"
-        : "风险调整后收益",
-      helper: "年化估算值",
+      change: snapshot.dataSource === "live" ? "近期研究快照" : "风险调整收益",
+      helper: "策略稳定性",
       tone: "neutral" as const,
+    },
+    {
+      label: "最大回撤",
+      value: formatPercent(snapshot.metrics.maxDrawdownPct, 2, false),
+      change: "历史极值",
+      helper: "资金回撤压力",
+      tone: "negative" as const,
     },
     {
       label: "胜率",
-      value: formatPercent(snapshot.metrics.winRatePct, 1, false),
-      change: snapshot.dataSource === "live"
-        ? "来源于最新回测平仓交易"
-        : "仅统计已成交交易",
-      helper: "执行质量表现",
-      tone: "positive" as const,
-    },
-    {
-      label: "活跃仓位",
-      value: String(snapshot.metrics.openPositions),
-      change: positionMetricText.change,
-      helper: positionMetricText.helper,
-      tone: "neutral" as const,
-    },
-    {
-      label: "风险等级",
-      value: getRiskLevelLabel(snapshot.metrics.riskLevel),
-      change: "基于杠杆与保证金占用",
-      helper: "当前交易时段风险分级",
-      tone: snapshot.metrics.riskLevel === "High" ? "negative" : "highlight",
+      value: formatPercent(snapshot.metrics.winRatePct, 2, false),
+      change: `${snapshot.trades.length} 条最近交易映射`,
+      helper: "执行质量",
+      tone: "highlight" as const,
     },
   ];
 
-  const streamItems = [
-    `交易所 ${snapshot.exchange}`,
-    `信号 ${getSignalDirectionLabel(snapshot.signal.direction)}`,
-    `风险 ${getRiskLevelLabel(snapshot.metrics.riskLevel)}`,
-    `持仓 ${snapshot.metrics.openPositions}`,
-    `净值 ${formatCurrency(snapshot.metrics.equity)}`,
-    `今日 ${formatCurrency(snapshot.metrics.dailyPnl)}`,
-    `轮询 ${POLL_MS / 1000}s`,
+  const systemStatusItems = [
+    {
+      label: "API 连接",
+      value: getConnectionStatusLabel(snapshot.risk.apiStatus),
+      tone: snapshot.risk.apiStatus === "Connected" ? "ok" : "warn",
+    },
+    {
+      label: "行情连接",
+      value: getConnectionStatusLabel(snapshot.risk.wsStatus),
+      tone: snapshot.risk.wsStatus === "Connected" ? "ok" : "warn",
+    },
+    {
+      label: "策略状态",
+      value: getSignalDirectionLabel(snapshot.signal.direction),
+      tone: snapshot.status === "Running" ? "ok" : "warn",
+    },
+    {
+      label: "最近更新",
+      value: formatClock(now),
+      tone: "ok",
+    },
   ];
 
   function handleParamChange<K extends keyof StrategyParams>(key: K, value: StrategyParams[K]) {
@@ -374,105 +398,183 @@ export default function App() {
     setParams(snapshot.params);
     setParamsDirty(false);
     const entry: LogEntry = {
-        id: `reset-${Date.now()}`,
-        time: new Date().toISOString(),
-        level: "INFO",
-        message: snapshot.dataSource === "live"
-          ? "策略参数已重置为 /api/dashboard 当前返回的最新值。"
-          : "策略参数已重置为模拟基线配置。",
-      };
+      id: `reset-${Date.now()}`,
+      time: new Date().toISOString(),
+      level: "INFO",
+      message: snapshot.dataSource === "live"
+        ? "策略参数已重置为 /api/dashboard 当前返回的最新值。"
+        : "策略参数已重置为模拟基线配置。",
+    };
     setLocalLogs((current) => prependLogEntry(current, entry));
   }
 
   return (
-    <div className="dashboard-shell min-h-screen px-4 py-4 sm:px-6 xl:px-8">
-      <TopNav
-        productName={snapshot.productName}
-        strategyName={snapshot.strategyName}
-        exchange={snapshot.exchange}
-        status={snapshot.status}
-        updatedAt={snapshot.updatedAt}
-        dataSource={snapshot.dataSource}
-        now={now}
-        theme={theme}
-        onThemeToggle={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
-      />
-
-      <section className="mb-6 panel-enter" style={{ "--panel-delay": "0.04s" } as CSSProperties}>
-        <div className="dashboard-stream" aria-hidden="true">
-          <div className="dashboard-stream-track">
-            {[...streamItems, ...streamItems].map((item, index) => (
-              <span key={`${item}-${index}`} className="dashboard-stream-item">
-                {item}
-              </span>
-            ))}
+    <div className="cockpit-shell">
+      <aside className="cockpit-sidebar">
+        <div className="cockpit-brand">
+          <div className="cockpit-brand-mark">◫</div>
+          <div>
+            <p className="cockpit-brand-kicker">量化交易控制台</p>
+            <h1 className="cockpit-brand-title">{snapshot.strategyName}</h1>
           </div>
         </div>
-      </section>
 
-      {error ? (
-        <div className="mb-6 rounded-2xl border border-amber-400/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
-          实时接口拉取告警：{error}。当前页面继续保留最近一次成功获取的状态。
-        </div>
-      ) : null}
+        <nav className="cockpit-nav">
+          {sidebarItems.map((item) => (
+            <button
+              key={item.label}
+              type="button"
+              className={`cockpit-nav-item ${item.active ? "is-active" : ""}`}
+            >
+              <span className="cockpit-nav-icon">{item.icon}</span>
+              <span>{item.label}</span>
+            </button>
+          ))}
+        </nav>
 
-      <section
-        className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-8"
-        style={{ "--panel-delay": "0.08s" } as CSSProperties}
-      >
-        {metricCards.map((metric, index) => (
-          <MetricCard
-            key={metric.label}
-            label={metric.label}
-            value={metric.value}
-            change={metric.change}
-            helper={metric.helper}
-            tone={metric.tone}
-            index={index}
-          />
-        ))}
-      </section>
+        <section className="cockpit-sidebar-panel">
+          <div className="flex items-center justify-between">
+            <p className="panel-kicker">系统状态</p>
+            <span className="panel-chip">实时</span>
+          </div>
+          <div className="mt-5 space-y-3">
+            {systemStatusItems.map((item) => (
+              <div key={item.label} className="flex items-center justify-between text-sm">
+                <span className="text-slate-400">{item.label}</span>
+                <span className="flex items-center gap-2 font-medium text-slate-100">
+                  <span className={`h-2.5 w-2.5 rounded-full ${item.tone === "ok" ? "bg-emerald-400" : "bg-amber-400"}`} />
+                  {item.value}
+                </span>
+              </div>
+            ))}
+          </div>
+          <div className="mt-6 rounded-2xl border border-white/8 bg-white/[0.03] p-4">
+            <p className="text-xs uppercase tracking-[0.22em] text-slate-500">运行摘要</p>
+            <p className="mt-3 text-sm text-slate-300">
+              交易所 {snapshot.exchange} · 风险 {getRiskLevelLabel(snapshot.metrics.riskLevel)} · 持仓 {snapshot.metrics.openPositions}
+            </p>
+            <p className="mt-2 text-xs text-slate-500">
+              最近更新 {formatDateTime(snapshot.updatedAt)} · 轮询 {POLL_MS / 1000}s
+            </p>
+          </div>
+        </section>
+      </aside>
 
-      <section
-        className="mt-6 grid gap-6 xl:grid-cols-[1.55fr_0.95fr]"
-        style={{ "--panel-delay": "0.12s" } as CSSProperties}
-      >
-        <div className="space-y-6 panel-enter">
-          <EquityChart data={filteredCurve} range={range} onRangeChange={setRange} />
-          <DrawdownChart data={filteredCurve} range={range} />
-        </div>
+      <main className="cockpit-main">
+        <TopNav
+          productName={snapshot.productName}
+          strategyName={snapshot.strategyName}
+          exchange={snapshot.exchange}
+          status={snapshot.status}
+          updatedAt={snapshot.updatedAt}
+          dataSource={snapshot.dataSource}
+          now={now}
+          theme={theme}
+          onThemeToggle={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
+        />
 
-        <div className="space-y-6 panel-enter" style={{ "--panel-delay": "0.18s" } as CSSProperties}>
-          <SignalPanel signal={snapshot.signal} now={now} />
-          <RiskPanel risk={snapshot.risk} />
-          <ParamsPanel
-            params={params}
-            savedAt={savedAt}
-            saving={savingParams}
-            restarting={restartingStrategy}
-            onChange={handleParamChange}
-            onSave={handleSaveParams}
-            onRestart={handleRestartStrategy}
-            onReset={handleResetParams}
-          />
-        </div>
-      </section>
+        {error ? (
+          <div className="mb-5 rounded-2xl border border-amber-400/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+            实时接口拉取告警：{error}。当前页面继续保留最近一次成功获取的状态。
+          </div>
+        ) : null}
 
-      <section
-        className="mt-6 grid gap-6 xl:grid-cols-[1.15fr_1fr]"
-        style={{ "--panel-delay": "0.22s" } as CSSProperties}
-      >
-        <div className="panel-enter">
-          <PositionsTable positions={snapshot.positions} />
-        </div>
-        <div className="panel-enter" style={{ "--panel-delay": "0.26s" } as CSSProperties}>
-          <TradesTable trades={snapshot.trades} />
-        </div>
-      </section>
+        <section className="grid gap-4 md:grid-cols-2 2xl:grid-cols-6">
+          {metricCards.map((metric, index) => (
+            <MetricCard
+              key={metric.label}
+              label={metric.label}
+              value={metric.value}
+              change={metric.change}
+              helper={metric.helper}
+              tone={metric.tone}
+              index={index}
+            />
+          ))}
+        </section>
 
-      <section className="mt-6 panel-enter" style={{ "--panel-delay": "0.3s" } as CSSProperties}>
-        <LogPanel logs={visibleLogs} />
-      </section>
+        <section className="mt-6 grid gap-6 2xl:grid-cols-[1.38fr_0.98fr_0.88fr]">
+          <div className="space-y-6 2xl:col-span-2">
+            <EquityChart data={filteredCurve} range={range} onRangeChange={setRange} />
+
+            <div className="grid gap-6 xl:grid-cols-[1.02fr_0.98fr]">
+              <TradesTable trades={snapshot.trades} />
+              <PositionsTable positions={snapshot.positions} />
+            </div>
+
+            <div className="grid gap-6 xl:grid-cols-[1fr_1fr]">
+              <DrawdownChart data={filteredCurve} range={range} />
+              <ParamsPanel
+                params={params}
+                savedAt={savedAt}
+                saving={savingParams}
+                restarting={restartingStrategy}
+                onChange={handleParamChange}
+                onSave={handleSaveParams}
+                onRestart={handleRestartStrategy}
+                onReset={handleResetParams}
+              />
+            </div>
+          </div>
+
+          <div className="space-y-6">
+            <SignalPanel signal={snapshot.signal} now={now} />
+            <RiskPanel risk={snapshot.risk} />
+
+            <section className="terminal-panel">
+              <div className="mb-5 flex items-center justify-between">
+                <div>
+                  <p className="panel-kicker">预警通知</p>
+                  <h2 className="panel-title">最新事件</h2>
+                </div>
+                <span className="panel-chip">{recentAlerts.length} 条</span>
+              </div>
+              <div className="space-y-3">
+                {recentAlerts.length === 0 ? (
+                  <div className="rounded-2xl border border-dashed border-white/10 bg-white/[0.03] px-4 py-8 text-center text-sm text-slate-500">
+                    暂无近期预警。
+                  </div>
+                ) : recentAlerts.map((log) => (
+                  <article key={log.id} className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className={`text-sm font-medium ${logToneClass(log.level)}`}>{log.message}</p>
+                        <p className="mt-1 text-xs text-slate-500">{formatDateTime(log.time)}</p>
+                      </div>
+                      <span className="rounded-full border border-white/10 px-2.5 py-1 text-[10px] uppercase tracking-[0.2em] text-slate-400">
+                        {log.level}
+                      </span>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section className="mt-6">
+          <LogPanel logs={visibleLogs} />
+        </section>
+
+        <footer className="mt-6 grid gap-4 xl:grid-cols-4">
+          <div className="cockpit-footer-stat">
+            <p>当前信号</p>
+            <strong>{getSignalDirectionLabel(snapshot.signal.direction)}</strong>
+          </div>
+          <div className="cockpit-footer-stat">
+            <p>风险等级</p>
+            <strong>{getRiskLevelLabel(snapshot.metrics.riskLevel)}</strong>
+          </div>
+          <div className="cockpit-footer-stat">
+            <p>名义敞口</p>
+            <strong>{positionMetricText.helper.replace("当前名义敞口 ", "").replace("总名义敞口 ", "")}</strong>
+          </div>
+          <div className="cockpit-footer-stat">
+            <p>账户模式</p>
+            <strong>{snapshot.metrics.openPositions > 0 ? positionMetricText.change : "空仓待命"}</strong>
+          </div>
+        </footer>
+      </main>
     </div>
   );
 }

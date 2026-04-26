@@ -26,22 +26,22 @@ export function ParamsPanel({
     <section className="terminal-panel">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <p className="terminal-kicker">参数面板</p>
-          <h2 className="terminal-title">策略参数</h2>
+          <p className="panel-kicker">系统设置</p>
+          <h2 className="panel-title">策略参数面板</h2>
         </div>
         <div className="text-right text-xs text-slate-500">
-          <p>实时快照，可在本地编辑后保存</p>
+          <p>支持在线调整</p>
           <p>{savedAt ? `上次保存 ${formatClock(savedAt)} UTC+8` : "尚未保存"}</p>
         </div>
       </div>
 
       <div className="mt-6 grid gap-4 md:grid-cols-2">
         <label className="space-y-2">
-          <span className="terminal-label">周期</span>
+          <span className="panel-field-label">周期</span>
           <select
             value={params.timeframe}
             onChange={(event) => onChange("timeframe", event.target.value)}
-            className="terminal-input"
+            className="panel-input"
           >
             {["5m", "15m", "1H", "4H"].map((value) => (
               <option key={value} value={value}>{value}</option>
@@ -50,9 +50,9 @@ export function ParamsPanel({
         </label>
 
         <label className="space-y-2">
-          <span className="terminal-label">均线周期</span>
+          <span className="panel-field-label">均线周期</span>
           <input
-            className="terminal-input"
+            className="panel-input"
             type="number"
             value={params.maPeriod}
             onChange={(event) => onChange("maPeriod", Number(event.target.value))}
@@ -60,9 +60,9 @@ export function ParamsPanel({
         </label>
 
         <label className="space-y-2">
-          <span className="terminal-label">RSI 周期</span>
+          <span className="panel-field-label">RSI 周期</span>
           <input
-            className="terminal-input"
+            className="panel-input"
             type="number"
             value={params.rsiPeriod}
             onChange={(event) => onChange("rsiPeriod", Number(event.target.value))}
@@ -70,9 +70,9 @@ export function ParamsPanel({
         </label>
 
         <label className="space-y-2">
-          <span className="terminal-label">ATR 止损倍数</span>
+          <span className="panel-field-label">ATR 止损倍数</span>
           <input
-            className="terminal-input"
+            className="panel-input"
             type="number"
             step="0.1"
             value={params.atrMultiplier}
@@ -81,9 +81,9 @@ export function ParamsPanel({
         </label>
 
         <label className="space-y-2">
-          <span className="terminal-label">止损比例 %</span>
+          <span className="panel-field-label">止损比例 %</span>
           <input
-            className="terminal-input"
+            className="panel-input"
             type="number"
             step="0.1"
             value={params.stopLossPct}
@@ -92,9 +92,9 @@ export function ParamsPanel({
         </label>
 
         <label className="space-y-2">
-          <span className="terminal-label">止盈比例 %</span>
+          <span className="panel-field-label">止盈比例 %</span>
           <input
-            className="terminal-input"
+            className="panel-input"
             type="number"
             step="0.1"
             value={params.takeProfitPct}
@@ -103,9 +103,9 @@ export function ParamsPanel({
         </label>
 
         <label className="space-y-2">
-          <span className="terminal-label">仓位比例（目标资金）</span>
+          <span className="panel-field-label">仓位比例</span>
           <input
-            className="terminal-input"
+            className="panel-input"
             type="number"
             step="0.1"
             value={params.positionSizePct}
@@ -114,9 +114,9 @@ export function ParamsPanel({
         </label>
 
         <label className="space-y-2">
-          <span className="terminal-label">最大杠杆</span>
+          <span className="panel-field-label">最大杠杆</span>
           <input
-            className="terminal-input"
+            className="panel-input"
             type="number"
             step="1"
             value={params.maxLeverage}
@@ -126,24 +126,24 @@ export function ParamsPanel({
       </div>
 
       <div className="mt-6 flex flex-wrap gap-3">
-        <button type="button" onClick={onSave} disabled={saving} className="terminal-button-primary disabled:cursor-not-allowed disabled:opacity-60">
+        <button type="button" onClick={onSave} disabled={saving} className="panel-button-primary disabled:cursor-not-allowed disabled:opacity-60">
           {saving ? "保存中..." : "保存参数"}
         </button>
         <button
           type="button"
           onClick={onRestart}
           disabled={saving || restarting}
-          className="rounded-2xl border border-amber-400/20 bg-amber-500/10 px-4 py-3 text-sm font-semibold text-amber-300 transition hover:border-amber-300/40 hover:bg-amber-500/15 disabled:cursor-not-allowed disabled:opacity-60"
+          className="panel-button-warning disabled:cursor-not-allowed disabled:opacity-60"
         >
           {restarting ? "重启中..." : "重启策略"}
         </button>
-        <button type="button" onClick={onReset} disabled={saving} className="terminal-button-secondary disabled:cursor-not-allowed disabled:opacity-60">
+        <button type="button" onClick={onReset} disabled={saving} className="panel-button-secondary disabled:cursor-not-allowed disabled:opacity-60">
           重置
         </button>
       </div>
 
-      <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
-        保存会把最新参数写入 <span className="font-mono">.env</span>。要让实盘进程生效，还需要重启策略守护进程。
+      <p className="mt-4 text-xs leading-6 text-slate-500">
+        参数写入 <span className="font-mono text-slate-300">.env</span> 后，记得重载实盘进程与 dashboard，确保新配置生效。
       </p>
     </section>
   );

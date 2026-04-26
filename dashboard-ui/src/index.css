@@ -3,74 +3,63 @@
 @tailwind utilities;
 
 @layer base {
+  :root {
+    color-scheme: dark;
+  }
+
   html {
     @apply antialiased;
   }
 
   body {
-    @apply min-h-screen bg-slate-100 text-slate-900 transition-colors duration-300 dark:bg-slate-950 dark:text-slate-100;
+    @apply min-h-screen bg-[#030813] text-slate-100;
     background-image:
-      radial-gradient(circle at top left, rgba(56, 189, 248, 0.12), transparent 26%),
-      radial-gradient(circle at top right, rgba(34, 197, 94, 0.08), transparent 24%);
+      radial-gradient(circle at top left, rgba(47, 124, 255, 0.18), transparent 26%),
+      radial-gradient(circle at top right, rgba(16, 185, 129, 0.12), transparent 20%),
+      linear-gradient(180deg, rgba(4, 12, 28, 0.98), rgba(2, 7, 18, 1));
     overflow-x: hidden;
   }
 
   body::before {
     content: "";
-    @apply pointer-events-none fixed inset-0 -z-10 bg-grid-light bg-[size:32px_32px] opacity-70 dark:bg-grid-dark;
-    mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.9), transparent 94%);
-    animation: gridDrift 24s linear infinite;
+    position: fixed;
+    inset: 0;
+    z-index: -2;
+    pointer-events: none;
+    background-image:
+      linear-gradient(rgba(113, 146, 197, 0.06) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(113, 146, 197, 0.05) 1px, transparent 1px);
+    background-size: 56px 56px;
+    mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.96), transparent 96%);
   }
 
   body::after {
     content: "";
     position: fixed;
     inset: -18%;
-    z-index: -20;
+    z-index: -3;
     pointer-events: none;
     background:
-      radial-gradient(circle at 22% 24%, rgba(56, 189, 248, 0.22), transparent 22%),
-      radial-gradient(circle at 78% 18%, rgba(16, 185, 129, 0.2), transparent 20%),
-      radial-gradient(circle at 55% 78%, rgba(14, 165, 233, 0.16), transparent 24%);
-    filter: blur(28px);
-    animation: auroraFloat 18s ease-in-out infinite alternate;
+      radial-gradient(circle at 16% 18%, rgba(28, 100, 242, 0.22), transparent 18%),
+      radial-gradient(circle at 80% 18%, rgba(16, 185, 129, 0.16), transparent 20%),
+      radial-gradient(circle at 55% 78%, rgba(59, 130, 246, 0.12), transparent 18%);
+    filter: blur(38px);
   }
 
   #root {
     @apply min-h-screen;
-    position: relative;
   }
 
   * {
     scrollbar-width: thin;
-    scrollbar-color: rgba(148, 163, 184, 0.3) transparent;
-  }
-}
-
-@keyframes auroraFloat {
-  0% {
-    transform: translate3d(-2%, -1%, 0) scale(1);
-  }
-
-  100% {
-    transform: translate3d(2%, 2%, 0) scale(1.08);
-  }
-}
-
-@keyframes gridDrift {
-  0% {
-    transform: translate3d(0, 0, 0);
-  }
-
-  100% {
-    transform: translate3d(32px, 16px, 0);
+    scrollbar-color: rgba(103, 132, 184, 0.4) transparent;
   }
 }
 
 @keyframes panelRise {
   0% {
     opacity: 0;
-    transform: translate3d(0, 18px, 0);
+    transform: translate3d(0, 16px, 0);
   }
 
   100% {
@@ -79,38 +68,7 @@
   }
 }
 
-@keyframes heroSweep {
-  0% {
-    transform: translateX(-130%);
-  }
-
-  100% {
-    transform: translateX(130%);
-  }
-}
-
-@keyframes streamRun {
-  0% {
-    transform: translateX(0);
-  }
-
-  100% {
-    transform: translateX(-50%);
-  }
-}
-
-@keyframes floatCard {
-  0%,
-  100% {
-    transform: translate3d(0, 0, 0);
-  }
-
-  50% {
-    transform: translate3d(0, -6px, 0);
-  }
-}
-
-@keyframes softPulse {
+@keyframes pulseDot {
   0%,
   100% {
     opacity: 0.45;
@@ -119,307 +77,341 @@
 
   50% {
     opacity: 1;
-    transform: scale(1.6);
+    transform: scale(1.75);
   }
 }
 
-@keyframes shimmerFlow {
-  0% {
-    transform: translateX(-130%);
-  }
-
-  100% {
-    transform: translateX(130%);
-  }
-}
-
-@keyframes meterBreath {
+@keyframes softFloat {
   0%,
   100% {
-    filter: saturate(1);
+    transform: translateY(0);
   }
 
   50% {
-    filter: saturate(1.22);
-  }
-}
-
-@keyframes chartScan {
-  0% {
-    transform: translateY(-120%);
-  }
-
-  100% {
-    transform: translateY(320%);
+    transform: translateY(-4px);
   }
 }
 
 @layer components {
+  .cockpit-shell {
+    @apply min-h-screen gap-6 p-4 xl:grid xl:grid-cols-[248px_minmax(0,1fr)] xl:p-6;
+  }
+
+  .cockpit-sidebar {
+    @apply mb-6 flex flex-col gap-5 xl:mb-0;
+  }
+
+  .cockpit-brand {
+    @apply flex items-center gap-4 rounded-[28px] border border-white/10 px-5 py-5 shadow-[0_24px_80px_rgba(2,6,23,0.38)] backdrop-blur-xl;
+    background: rgba(8, 17, 31, 0.9);
+  }
+
+  .cockpit-brand-mark {
+    @apply grid h-12 w-12 place-items-center rounded-2xl bg-gradient-to-br from-[#2f7cff] to-[#4fc3f7] text-xl font-semibold text-white shadow-[0_16px_28px_rgba(47,124,255,0.36)];
+  }
+
+  .cockpit-brand-kicker {
+    @apply text-[11px] uppercase tracking-[0.28em] text-[#6cbcff];
+  }
+
+  .cockpit-brand-title {
+    @apply mt-1 text-lg font-semibold text-white;
+  }
+
+  .cockpit-nav {
+    @apply rounded-[28px] border border-white/10 p-3 shadow-[0_24px_80px_rgba(2,6,23,0.38)] backdrop-blur-xl;
+    background: rgba(8, 17, 31, 0.9);
+  }
+
+  .cockpit-nav-item {
+    @apply flex w-full items-center gap-3 rounded-2xl px-4 py-3 text-left text-sm font-medium text-slate-400 transition hover:bg-white/[0.05] hover:text-white;
+  }
+
+  .cockpit-nav-item.is-active {
+    @apply bg-gradient-to-r from-[#173d7c] to-[#10274a] text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.05)];
+  }
+
+  .cockpit-nav-icon {
+    @apply grid h-8 w-8 place-items-center rounded-xl border border-white/10 bg-white/[0.04] text-sm text-slate-300;
+  }
+
+  .cockpit-sidebar-panel,
   .terminal-panel {
-    @apply rounded-3xl border border-white/10 bg-white/70 p-5 shadow-terminal backdrop-blur-xl transition dark:bg-slate-900/70;
-    position: relative;
-    overflow: hidden;
-    isolation: isolate;
+    @apply rounded-[28px] border border-white/10 p-5 shadow-[0_24px_80px_rgba(2,6,23,0.38)] backdrop-blur-xl;
+    background: rgba(8, 17, 31, 0.88);
+    animation: panelRise 0.6s ease both;
   }
 
-  .terminal-panel::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    border-radius: inherit;
-    background: linear-gradient(120deg, transparent 20%, rgba(255, 255, 255, 0.12) 50%, transparent 80%);
-    opacity: 0;
-    transform: translateX(-120%);
-    transition: opacity 220ms ease;
-    pointer-events: none;
-  }
-
-  .terminal-panel:hover {
-    transform: translateY(-4px);
-    box-shadow: 0 32px 72px rgba(2, 6, 23, 0.28);
-  }
-
-  .terminal-panel:hover::before {
-    opacity: 1;
-    animation: shimmerFlow 1.8s ease;
-  }
-
-  .terminal-kicker {
-    @apply text-[11px] tracking-[0.14em] text-sky-500 dark:text-sky-400;
-  }
-
-  .terminal-title {
-    @apply mt-2 text-2xl font-semibold text-slate-950 dark:text-white;
-  }
-
-  .terminal-subtitle {
-    @apply mt-2 text-sm text-slate-500 dark:text-slate-400;
-  }
-
-  .terminal-label {
-    @apply text-[11px] tracking-[0.14em] text-slate-500 dark:text-slate-400;
-  }
-
-  .terminal-input {
-    @apply w-full rounded-2xl border border-white/10 bg-white/90 px-4 py-3 font-mono text-sm text-slate-900 outline-none transition focus:border-sky-400/40 focus:ring-2 focus:ring-sky-400/20 dark:bg-slate-950/80 dark:text-white;
-  }
-
-  .terminal-button-primary {
-    @apply rounded-2xl bg-sky-500 px-4 py-3 text-sm font-semibold text-white transition hover:bg-sky-400;
-  }
-
-  .terminal-button-secondary {
-    @apply rounded-2xl border border-white/10 bg-slate-950/[0.03] px-4 py-3 text-sm font-semibold text-slate-700 transition hover:border-sky-400/30 hover:text-sky-500 dark:bg-white/5 dark:text-slate-200 dark:hover:text-sky-300;
-  }
-
-  .dashboard-shell {
-    position: relative;
-    isolation: isolate;
-  }
-
-  .dashboard-shell::before,
-  .dashboard-shell::after {
-    content: "";
-    position: fixed;
-    inset: auto;
-    z-index: -5;
-    pointer-events: none;
-    border-radius: 9999px;
-    filter: blur(18px);
-    opacity: 0.42;
-  }
-
-  .dashboard-shell::before {
-    top: 9rem;
-    left: -4rem;
-    width: 13rem;
-    height: 13rem;
-    background: rgba(14, 165, 233, 0.22);
-    animation: auroraFloat 14s ease-in-out infinite alternate;
-  }
-
-  .dashboard-shell::after {
-    right: -3rem;
-    bottom: 5rem;
-    width: 14rem;
-    height: 14rem;
-    background: rgba(16, 185, 129, 0.18);
-    animation: auroraFloat 17s ease-in-out infinite alternate-reverse;
+  .cockpit-main {
+    @apply min-w-0;
   }
 
   .top-nav-shell {
-    position: relative;
-    overflow: hidden;
+    @apply mb-5 flex flex-col gap-4 rounded-[28px] border border-white/10 px-5 py-4 shadow-[0_20px_60px_rgba(2,6,23,0.34)] backdrop-blur-xl xl:flex-row xl:items-center xl:justify-between;
+    background: rgba(8, 17, 31, 0.92);
   }
 
-  .top-nav-shell::after {
-    content: "";
-    position: absolute;
-    inset: auto -20% 0;
-    height: 1px;
-    background: linear-gradient(90deg, transparent, rgba(56, 189, 248, 0.9), transparent);
-    animation: streamRun 8s linear infinite;
+  .top-search {
+    @apply flex min-w-0 flex-1 items-center gap-3 rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3;
   }
 
-  .dashboard-hero {
-    @apply mb-6 grid gap-5 rounded-[28px] border border-white/10 bg-white/65 px-5 py-5 shadow-terminal backdrop-blur-xl dark:bg-slate-950/75;
-    position: relative;
-    overflow: hidden;
-    isolation: isolate;
+  .top-search-icon {
+    @apply text-lg text-slate-500;
   }
 
-  .dashboard-hero::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    background:
-      radial-gradient(circle at 15% 25%, rgba(56, 189, 248, 0.2), transparent 24%),
-      radial-gradient(circle at 80% 20%, rgba(16, 185, 129, 0.16), transparent 22%);
-    pointer-events: none;
+  .top-search-input {
+    @apply min-w-0 flex-1 bg-transparent text-sm text-slate-100 outline-none placeholder:text-slate-500;
   }
 
-  .dashboard-hero::after {
-    content: "";
-    position: absolute;
-    inset: -20%;
-    background: linear-gradient(110deg, transparent 38%, rgba(255, 255, 255, 0.2) 50%, transparent 62%);
-    animation: heroSweep 10s linear infinite;
-    pointer-events: none;
+  .top-header-meta {
+    @apply items-center gap-3 text-xs text-slate-500;
   }
 
-  .dashboard-hero-copy {
-    position: relative;
-    z-index: 1;
-    max-width: 54rem;
+  .top-header-separator {
+    @apply h-1 w-1 rounded-full bg-slate-600;
   }
 
-  .dashboard-stream {
-    position: relative;
-    z-index: 1;
-    overflow: hidden;
-    border-radius: 9999px;
-    border: 1px solid rgba(148, 163, 184, 0.16);
-    background: rgba(15, 23, 42, 0.08);
-    padding: 0.75rem 0;
+  .top-actions {
+    @apply flex flex-wrap items-center gap-3;
   }
 
-  .dashboard-stream-track {
-    display: flex;
-    width: max-content;
-    min-width: 100%;
-    animation: streamRun 22s linear infinite;
+  .top-chip {
+    @apply flex items-center gap-2 rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-2 text-xs text-slate-200;
   }
 
-  .dashboard-stream-item {
-    flex: none;
-    padding: 0 1.15rem;
-    font-size: 0.72rem;
-    font-weight: 600;
-    letter-spacing: 0.24em;
-    text-transform: uppercase;
-    color: rgb(125 211 252);
-    white-space: nowrap;
+  .top-chip strong {
+    @apply text-sm font-semibold text-white;
   }
 
-  .panel-enter {
-    animation: panelRise 650ms ease both;
-    animation-delay: var(--panel-delay, 0s);
+  .top-theme-button {
+    @apply rounded-2xl border border-white/10 px-4 py-2 text-sm font-semibold text-slate-100 transition;
+    background: #10203a;
+  }
+
+  .top-theme-button:hover {
+    border-color: rgba(47, 124, 255, 0.4);
+    background: #13294f;
+  }
+
+  .panel-kicker {
+    @apply text-[11px] uppercase tracking-[0.26em] text-[#6cbcff];
+  }
+
+  .panel-title {
+    @apply mt-2 text-[28px] font-semibold leading-tight text-white;
+  }
+
+  .panel-subtitle {
+    @apply mt-2 max-w-2xl text-sm leading-7 text-slate-400;
+  }
+
+  .panel-chip {
+    @apply rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.24em] text-slate-300;
+  }
+
+  .panel-pill {
+    @apply rounded-full px-3 py-1 text-xs font-medium;
+    border: 1px solid rgba(47, 124, 255, 0.2);
+    background: rgba(18, 51, 95, 0.6);
+    color: #8ec5ff;
+  }
+
+  .panel-stat-card {
+    @apply rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-4;
+  }
+
+  .panel-stat-card p {
+    @apply text-xs uppercase tracking-[0.2em] text-slate-500;
+  }
+
+  .panel-stat-card strong {
+    @apply mt-2 block font-mono text-sm font-medium text-slate-100;
+  }
+
+  .panel-field-label {
+    @apply text-[11px] uppercase tracking-[0.22em] text-slate-500;
+  }
+
+  .panel-input {
+    @apply w-full rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-slate-100 outline-none transition placeholder:text-slate-500;
+  }
+
+  .panel-input:focus {
+    border-color: rgba(47, 124, 255, 0.5);
+    background: rgba(255, 255, 255, 0.05);
+  }
+
+  .panel-button-primary {
+    @apply rounded-2xl bg-gradient-to-r from-[#2f7cff] to-[#45b3ff] px-4 py-3 text-sm font-semibold text-white shadow-[0_14px_28px_rgba(47,124,255,0.28)] transition hover:brightness-110;
+  }
+
+  .panel-button-secondary {
+    @apply rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 text-sm font-semibold text-slate-200 transition hover:border-white/20 hover:bg-white/[0.05];
+  }
+
+  .panel-button-warning {
+    @apply rounded-2xl border border-amber-400/20 bg-amber-500/10 px-4 py-3 text-sm font-semibold text-amber-200 transition hover:border-amber-300/40 hover:bg-amber-500/15;
   }
 
   .metric-card {
-    position: relative;
-    overflow: hidden;
-    animation: floatCard 8s ease-in-out infinite;
-    animation-delay: var(--card-delay, 0s);
+    @apply rounded-[26px] border border-white/10 px-5 py-5 shadow-[0_22px_64px_rgba(2,6,23,0.34)] backdrop-blur-xl transition hover:-translate-y-1;
+    animation: panelRise 0.55s ease both;
   }
 
-  .metric-card::before {
-    content: "";
-    position: absolute;
-    inset: auto auto -32% -10%;
-    width: 7rem;
-    height: 7rem;
-    border-radius: 9999px;
-    background: rgba(125, 211, 252, 0.12);
-    filter: blur(10px);
-    pointer-events: none;
+  .metric-card-neutral {
+    @apply bg-[linear-gradient(180deg,rgba(14,24,41,0.96),rgba(9,16,29,0.96))];
   }
 
-  .metric-card::after {
+  .metric-card-positive {
+    @apply bg-[linear-gradient(180deg,rgba(10,33,28,0.96),rgba(7,20,24,0.96))];
+  }
+
+  .metric-card-negative {
+    @apply bg-[linear-gradient(180deg,rgba(42,16,31,0.96),rgba(20,10,24,0.96))];
+  }
+
+  .metric-card-highlight {
+    @apply bg-[linear-gradient(180deg,rgba(16,23,49,0.96),rgba(8,15,34,0.96))];
+  }
+
+  .metric-card-label {
+    @apply text-xs uppercase tracking-[0.22em] text-slate-500;
+  }
+
+  .metric-card-value {
+    @apply mt-4 font-mono text-[36px] font-semibold tracking-tight text-white;
+  }
+
+  .metric-card-change {
+    @apply text-sm font-semibold text-slate-200;
+  }
+
+  .metric-card-helper {
+    @apply mt-1 text-xs text-slate-500;
+  }
+
+  .metric-card-orb {
+    @apply h-3.5 w-3.5 rounded-full bg-gradient-to-r from-[#2f7cff] to-[#5eead4] shadow-[0_0_18px_rgba(47,124,255,0.65)];
+  }
+
+  .metric-card-spark {
+    @apply flex items-end gap-1;
+  }
+
+  .metric-card-spark span {
+    @apply block w-1 rounded-full bg-gradient-to-t from-[#2f7cff] to-[#67e8f9];
+    animation: softFloat 2.8s ease-in-out infinite;
+  }
+
+  .metric-card-spark span:nth-child(1) { height: 10px; animation-delay: 0s; }
+  .metric-card-spark span:nth-child(2) { height: 18px; animation-delay: 0.14s; }
+  .metric-card-spark span:nth-child(3) { height: 14px; animation-delay: 0.24s; }
+  .metric-card-spark span:nth-child(4) { height: 22px; animation-delay: 0.32s; }
+  .metric-card-spark span:nth-child(5) { height: 28px; animation-delay: 0.44s; }
+
+  .chart-stage {
+    @apply rounded-[26px] border p-4;
+    border-color: rgba(255, 255, 255, 0.08);
+    background: #07111d;
+  }
+
+  .signal-ring-wrap {
+    @apply flex flex-col gap-5 rounded-[26px] border border-white/10 bg-white/[0.03] p-5 xl:flex-row xl:items-center;
+  }
+
+  .signal-ring {
+    @apply relative grid h-36 w-36 place-items-center rounded-full;
+    background: conic-gradient(#52d273 var(--score), rgba(255, 255, 255, 0.06) 0);
+  }
+
+  .signal-ring::before {
     content: "";
-    position: absolute;
-    inset: -25% auto -25% -10%;
-    width: 45%;
-    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.18), transparent);
-    transform: translateX(-180%) skewX(-18deg);
-    animation: shimmerFlow 8s linear infinite;
-    animation-delay: var(--card-delay, 0s);
-    pointer-events: none;
+    @apply absolute inset-[12px] rounded-full;
+    background: #08111f;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+  }
+
+  .signal-ring-core {
+    @apply relative z-10 flex flex-col items-center;
+  }
+
+  .signal-ring-score {
+    @apply font-mono text-4xl font-semibold text-white;
+  }
+
+  .signal-ring-label {
+    @apply text-sm text-slate-500;
+  }
+
+  .risk-meter {
+    @apply rounded-2xl border bg-white/[0.03] p-4;
+    border-color: rgba(255, 255, 255, 0.08);
+  }
+
+  .risk-meter-head {
+    @apply mb-3 flex items-center justify-between text-sm text-slate-400;
+  }
+
+  .risk-meter-head strong {
+    @apply font-mono text-slate-100;
+  }
+
+  .risk-meter-track {
+    @apply h-2.5 overflow-hidden rounded-full;
+    background: #101a2c;
+  }
+
+  .risk-meter-fill {
+    @apply h-full rounded-full;
+  }
+
+  .risk-meter-fill-amber {
+    @apply bg-gradient-to-r from-[#f59e0b] to-[#f97316];
+  }
+
+  .risk-meter-fill-violet {
+    @apply bg-gradient-to-r from-[#8b5cf6] to-[#d946ef];
+  }
+
+  .risk-meter-fill-emerald {
+    @apply bg-gradient-to-r from-[#22c55e] to-[#14b8a6];
+  }
+
+  .dashboard-table {
+    @apply min-w-full table-auto text-left text-sm;
+  }
+
+  .dashboard-table thead th {
+    @apply px-3 py-3 text-[11px] font-medium uppercase tracking-[0.18em] text-slate-500;
+  }
+
+  .dashboard-table tbody td {
+    @apply border-t px-3 py-4 text-slate-300;
+    border-color: rgba(255, 255, 255, 0.06);
+  }
+
+  .dashboard-table tbody tr {
+    @apply transition hover:bg-white/[0.03];
+  }
+
+  .empty-state-panel {
+    @apply rounded-2xl border border-dashed border-white/10 bg-white/[0.03] px-4 py-10 text-center text-sm text-slate-500;
+  }
+
+  .cockpit-footer-stat {
+    @apply rounded-2xl border border-white/10 px-4 py-4 shadow-[0_18px_48px_rgba(2,6,23,0.32)];
+    background: rgba(8, 17, 31, 0.84);
+  }
+
+  .cockpit-footer-stat p {
+    @apply text-[11px] uppercase tracking-[0.22em] text-slate-500;
+  }
+
+  .cockpit-footer-stat strong {
+    @apply mt-2 block text-sm font-medium text-slate-100;
   }
 
   .status-badge-dot {
-    animation: softPulse 1.8s ease-in-out infinite;
-    transform-origin: center;
-  }
-
-  .panel-scan::after {
-    content: "";
-    position: absolute;
-    inset: -40% 0 auto;
-    height: 38%;
-    background: linear-gradient(180deg, transparent, rgba(56, 189, 248, 0.08), transparent);
-    animation: chartScan 8s linear infinite;
-    pointer-events: none;
-    z-index: 0;
-  }
-
-  .chart-stage {
-    position: relative;
-    overflow: hidden;
-    border-radius: 1.5rem;
-  }
-
-  .chart-stage::after {
-    content: "";
-    position: absolute;
-    inset: -40% 0 auto;
-    height: 34%;
-    background: linear-gradient(180deg, transparent, rgba(255, 255, 255, 0.06), transparent);
-    animation: chartScan 10s linear infinite;
-    pointer-events: none;
-  }
-
-  .signal-meter {
-    position: relative;
-    overflow: hidden;
-  }
-
-  .signal-score {
-    text-shadow: 0 0 24px rgba(56, 189, 248, 0.24);
-  }
-
-  .signal-meter-bar {
-    position: relative;
-    animation: meterBreath 2.8s ease-in-out infinite;
-    transform-origin: left center;
-  }
-
-  .signal-meter-bar::after {
-    content: "";
-    position: absolute;
-    inset: 0;
-    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.32), transparent);
-    animation: shimmerFlow 2.8s linear infinite;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-    scroll-behavior: auto !important;
+    animation: pulseDot 1.9s ease-in-out infinite;
   }
 }

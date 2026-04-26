@@ -17,53 +17,69 @@ function toneFromConnection(status: RiskSnapshot["apiStatus"] | RiskSnapshot["ws
   return "rose";
 }
 
+function safeBarWidth(value: number | null | undefined, fallback = 0) {
+  const numeric = Number.isFinite(Number(value)) ? Number(value) : fallback;
+  return `${Math.max(0, Math.min(100, numeric))}%`;
+}
+
 export function RiskPanel({ risk }: RiskPanelProps) {
+  const dailyLossLimit = Number.isFinite(Number(risk.dailyLossLimitPct)) ? Number(risk.dailyLossLimitPct) : 10;
+  const dailyLossWidth = dailyLossLimit > 0 ? (risk.dailyLossUsedPct / dailyLossLimit) * 100 : 0;
+
   return (
     <section className="terminal-panel">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <p className="terminal-kicker">风控台</p>
-          <h2 className="terminal-title">风控与连接状态</h2>
+          <p className="panel-kicker">风险控制</p>
+          <h2 className="panel-title">风控与连接状态</h2>
         </div>
         <StatusBadge label={risk.riskTriggered ? "已触发" : "正常"} tone={risk.riskTriggered ? "rose" : "emerald"} />
       </div>
 
       <div className="mt-6 space-y-4">
-        <div>
-          <div className="mb-2 flex items-center justify-between text-sm text-slate-400">
-            <span>保证金使用率</span>
-            <span className="font-mono text-slate-950 dark:text-white">{formatPercent(risk.marginUsagePct, 1, false)}</span>
+        <div className="risk-meter">
+          <div className="risk-meter-head">
+            <span>风险暴露</span>
+            <strong>{formatPercent(risk.marginUsagePct, 1, false)}</strong>
           </div>
-          <div className="h-2.5 overflow-hidden rounded-full bg-slate-300 dark:bg-slate-800">
-            <div className="h-full rounded-full bg-gradient-to-r from-sky-500 to-cyan-400" style={{ width: `${risk.marginUsagePct}%` }} />
+          <div className="risk-meter-track">
+            <div className="risk-meter-fill risk-meter-fill-amber" style={{ width: safeBarWidth(risk.marginUsagePct) }} />
           </div>
         </div>
 
-        <div>
-          <div className="mb-2 flex items-center justify-between text-sm text-slate-400">
-            <span>当日亏损阈值消耗</span>
-            <span className="font-mono text-slate-950 dark:text-white">
-              {formatPercent(risk.dailyLossUsedPct, 1, false)} / {formatPercent(risk.dailyLossLimitPct, 1, false)}
-            </span>
+        <div className="risk-meter">
+          <div className="risk-meter-head">
+            <span>日内亏损使用率</span>
+            <strong>{formatPercent(risk.dailyLossUsedPct, 1, false)}</strong>
           </div>
-          <div className="h-2.5 overflow-hidden rounded-full bg-slate-300 dark:bg-slate-800">
-            <div className="h-full rounded-full bg-gradient-to-r from-amber-500 to-rose-500" style={{ width: `${(risk.dailyLossUsedPct / risk.dailyLossLimitPct) * 100}%` }} />
+          <div className="risk-meter-track">
+            <div className="risk-meter-fill risk-meter-fill-violet" style={{ width: safeBarWidth(dailyLossWidth) }} />
+          </div>
+        </div>
+
+        <div className="risk-meter">
+          <div className="risk-meter-head">
+            <span>单笔风险阈值</span>
+            <strong>{formatPercent(risk.maxLossPerTradePct, 1, false)}</strong>
+          </div>
+          <div className="risk-meter-track">
+            <div className="risk-meter-fill risk-meter-fill-emerald" style={{ width: safeBarWidth(risk.maxLossPerTradePct) }} />
           </div>
         </div>
       </div>
 
       <div className="mt-6 grid gap-3 md:grid-cols-2">
-        <div className="rounded-2xl border border-white/10 bg-slate-950/[0.03] p-4 dark:bg-white/[0.03]">
-          <p className="text-xs tracking-[0.14em] text-slate-500">当前杠杆</p>
-          <p className="mt-2 font-mono text-lg text-slate-950 dark:text-white">{formatNumber(risk.currentLeverage, 1)}x</p>
+        <div className="panel-stat-card">
+          <p>当前杠杆</p>
+          <strong>{formatNumber(risk.currentLeverage, 1)}x</strong>
         </div>
-        <div className="rounded-2xl border border-white/10 bg-slate-950/[0.03] p-4 dark:bg-white/[0.03]">
-          <p className="text-xs tracking-[0.14em] text-slate-500">单笔最大亏损</p>
-          <p className="mt-2 font-mono text-lg text-slate-950 dark:text-white">{formatPercent(risk.maxLossPerTradePct, 1, false)}</p>
+        <div className="panel-stat-card">
+          <p>连接状态</p>
+          <strong>{getConnectionStatusLabel(risk.apiStatus)}</strong>
         </div>
       </div>
 
-      <div className="mt-6 flex flex-wrap gap-2">
+      <div className="mt-5 flex flex-wrap gap-2">
         <StatusBadge label={`API ${getConnectionStatusLabel(risk.apiStatus)}`} tone={toneFromConnection(risk.apiStatus)} />
         <StatusBadge label={`WS ${getConnectionStatusLabel(risk.wsStatus)}`} tone={toneFromConnection(risk.wsStatus)} />
       </div>

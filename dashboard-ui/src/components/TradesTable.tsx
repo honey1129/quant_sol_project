@@ -1,19 +1,10 @@
 import type { TradeRow } from "../types";
 import { formatDateTime, formatOptionalCurrency } from "../lib/format";
-import { getSignalDirectionLabel, getTradeFieldSourceLabel, getTradeStatusLabel } from "../lib/uiText";
+import { getSignalDirectionLabel, getTradeStatusLabel } from "../lib/uiText";
 import { StatusBadge } from "./StatusBadge";
 
 interface TradesTableProps {
   trades: TradeRow[];
-}
-
-function ValueCell({ value, source }: { value: number | null; source?: string }) {
-  return (
-    <div>
-      <div className="font-mono">{formatOptionalCurrency(value)}</div>
-      <div className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">{getTradeFieldSourceLabel(source)}</div>
-    </div>
-  );
 }
 
 function getStatusTone(status: TradeRow["status"]) {
@@ -29,55 +20,50 @@ function getStatusTone(status: TradeRow["status"]) {
 export function TradesTable({ trades }: TradesTableProps) {
   return (
     <section className="terminal-panel">
-      <div className="mb-5">
-        <p className="terminal-kicker">成交记录</p>
-        <h2 className="terminal-title">历史交易</h2>
+      <div className="mb-5 flex items-center justify-between">
+        <div>
+          <p className="panel-kicker">最近成交</p>
+          <h2 className="panel-title">执行记录</h2>
+        </div>
+        <span className="panel-chip">{trades.length} 笔</span>
       </div>
 
       {trades.length === 0 ? (
-        <div className="rounded-2xl border border-dashed border-white/10 bg-slate-950/[0.03] px-4 py-10 text-center text-sm text-slate-500 dark:bg-white/[0.03] dark:text-slate-400">
+        <div className="empty-state-panel">
           暂无最近成交记录。
         </div>
       ) : (
-      <div className="overflow-x-auto">
-        <table className="min-w-full table-auto text-left">
-          <thead className="text-xs tracking-[0.14em] text-slate-500">
-            <tr>
-              {["时间", "标的", "方向", "开仓", "平仓", "盈亏", "手续费", "滑点", "原因", "状态"].map((head) => (
-                <th key={head} className="px-3 py-3 font-medium">{head}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {trades.map((trade, index) => (
-              <tr key={`${trade.symbol}-${index}`} className="border-t border-white/6 text-sm text-slate-700 dark:text-slate-200">
-                <td className="px-3 py-4 font-mono">{formatDateTime(trade.time)}</td>
-                <td className="px-3 py-4 font-semibold text-slate-950 dark:text-white">{trade.symbol}</td>
-                <td className="px-3 py-4">
-                  <StatusBadge label={getSignalDirectionLabel(trade.side)} tone={trade.side === "Long" ? "emerald" : "rose"} />
-                </td>
-                <td className="px-3 py-4"><ValueCell value={trade.entry} source={trade.entrySource} /></td>
-                <td className="px-3 py-4"><ValueCell value={trade.exit} source={trade.exitSource} /></td>
-                <td className={`px-3 py-4 ${
-                  trade.pnl === null
-                    ? "text-slate-500 dark:text-slate-400"
-                    : trade.pnl >= 0
-                      ? "text-emerald-400"
-                      : "text-rose-400"
-                }`}>
-                  <ValueCell value={trade.pnl} source={trade.pnlSource} />
-                </td>
-                <td className="px-3 py-4"><ValueCell value={trade.fee} source={trade.feeSource} /></td>
-                <td className="px-3 py-4"><ValueCell value={trade.slippage} source={trade.slippageSource} /></td>
-                <td className="max-w-[260px] px-3 py-4 text-slate-500 dark:text-slate-400">{trade.reason}</td>
-                <td className="px-3 py-4">
-                  <StatusBadge label={getTradeStatusLabel(trade.status)} tone={getStatusTone(trade.status)} />
-                </td>
+        <div className="overflow-x-auto">
+          <table className="dashboard-table">
+            <thead>
+              <tr>
+                {["时间", "标的", "方向", "开仓", "平仓", "盈亏", "原因", "状态"].map((head) => (
+                  <th key={head}>{head}</th>
+                ))}
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+              {trades.map((trade, index) => (
+                <tr key={`${trade.symbol}-${index}`}>
+                  <td className="font-mono">{formatDateTime(trade.time)}</td>
+                  <td className="font-semibold text-slate-50">{trade.symbol}</td>
+                  <td>
+                    <StatusBadge label={getSignalDirectionLabel(trade.side)} tone={trade.side === "Long" ? "emerald" : "rose"} />
+                  </td>
+                  <td className="font-mono">{formatOptionalCurrency(trade.entry)}</td>
+                  <td className="font-mono">{formatOptionalCurrency(trade.exit)}</td>
+                  <td className={trade.pnl !== null && trade.pnl >= 0 ? "text-emerald-300" : "text-rose-300"}>
+                    {formatOptionalCurrency(trade.pnl)}
+                  </td>
+                  <td className="max-w-[280px] text-slate-400">{trade.reason}</td>
+                  <td>
+                    <StatusBadge label={getTradeStatusLabel(trade.status)} tone={getStatusTone(trade.status)} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </section>
   );

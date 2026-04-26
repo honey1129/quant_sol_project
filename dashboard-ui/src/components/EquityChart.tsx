@@ -21,62 +21,90 @@ interface EquityChartProps {
 
 export function EquityChart({ data, range, onRangeChange }: EquityChartProps) {
   const compactAxis = range !== "1D";
+  const latest = data[data.length - 1];
 
   return (
-    <section className="terminal-panel panel-scan">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+    <section className="terminal-panel">
+      <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
         <div>
-          <p className="terminal-kicker">收益表现</p>
-          <h2 className="terminal-title">资金曲线与基准对比</h2>
-          <p className="terminal-subtitle">将账户净值与标准化加密基准放在一起，便于快速识别 Alpha 漂移。</p>
+          <p className="panel-kicker">策略累计收益曲线</p>
+          <h2 className="panel-title">资金曲线与基准对比</h2>
+          <p className="panel-subtitle">
+            统一观察账户权益、标准化基准与近期拐点，快速识别 Alpha 是否在扩张。
+          </p>
         </div>
-        <RangeTabs value={range} onChange={onRangeChange} />
+        <div className="flex flex-col items-start gap-3 xl:items-end">
+          <RangeTabs value={range} onChange={onRangeChange} />
+          <p className="text-xs text-slate-500">
+            最新净值 <span className="font-mono text-slate-200">{latest ? formatCurrency(latest.equity) : "--"}</span>
+          </p>
+        </div>
       </div>
 
-      <div className="chart-stage mt-6 h-[340px]">
+      <div className="chart-stage mt-6 h-[360px]">
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={data}>
             <defs>
               <linearGradient id="equityGradient" x1="0" x2="0" y1="0" y2="1">
-                <stop offset="0%" stopColor="#22c55e" stopOpacity={0.34} />
-                <stop offset="100%" stopColor="#22c55e" stopOpacity={0.02} />
+                <stop offset="0%" stopColor="#2f7cff" stopOpacity={0.42} />
+                <stop offset="100%" stopColor="#2f7cff" stopOpacity={0.02} />
+              </linearGradient>
+              <linearGradient id="benchmarkGradient" x1="0" x2="0" y1="0" y2="1">
+                <stop offset="0%" stopColor="#34d399" stopOpacity={0.18} />
+                <stop offset="100%" stopColor="#34d399" stopOpacity={0.01} />
               </linearGradient>
             </defs>
-            <CartesianGrid stroke="rgba(148,163,184,0.15)" strokeDasharray="3 3" />
+            <CartesianGrid stroke="rgba(148,163,184,0.12)" strokeDasharray="4 4" vertical={false} />
             <XAxis
               dataKey="timestamp"
               tickFormatter={(value) => formatAxisTime(value, compactAxis)}
-              stroke="#64748b"
+              stroke="#61708d"
               minTickGap={28}
             />
-            <YAxis tickFormatter={(value) => formatCompact(Number(value))} stroke="#64748b" width={86} />
+            <YAxis tickFormatter={(value) => formatCompact(Number(value))} stroke="#61708d" width={86} />
             <Tooltip
               contentStyle={{
-                background: "rgba(2, 6, 23, 0.95)",
-                border: "1px solid rgba(148, 163, 184, 0.15)",
-                borderRadius: 16,
-                color: "#e2e8f0",
+                background: "rgba(10, 18, 34, 0.96)",
+                border: "1px solid rgba(120, 144, 188, 0.22)",
+                borderRadius: 18,
+                color: "#d9e7ff",
+                boxShadow: "0 18px 48px rgba(1, 6, 17, 0.38)",
               }}
               labelFormatter={(value) => formatDateTime(String(value))}
               formatter={(value: number, name: string) => [formatCurrency(Number(value)), name]}
             />
-            <Legend />
+            <Legend wrapperStyle={{ color: "#9fb2d7" }} />
+            <Line
+              type="monotone"
+              dataKey="equity"
+              stroke="#3b82f6"
+              strokeWidth={2.8}
+              dot={false}
+              activeDot={{ r: 5, fill: "#8ec5ff", stroke: "#0f172a" }}
+              name="累计收益率"
+            />
             <Area
               type="monotone"
               dataKey="equity"
-              stroke="#22c55e"
-              strokeWidth={2.4}
               fill="url(#equityGradient)"
+              stroke="transparent"
               name="账户净值"
             />
             <Line
               type="monotone"
               dataKey="benchmark"
-              stroke="#f59e0b"
-              strokeWidth={2}
+              stroke="#38bdf8"
+              strokeWidth={1.8}
+              strokeDasharray="6 6"
               dot={false}
-              strokeDasharray="5 5"
-              name="基准收益"
+              name="基准走势"
+            />
+            <Area
+              type="monotone"
+              dataKey="benchmark"
+              fill="url(#benchmarkGradient)"
+              stroke="transparent"
+              name="基准阴影"
             />
           </AreaChart>
         </ResponsiveContainer>
