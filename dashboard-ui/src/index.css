@@ -135,6 +135,18 @@
     @apply grid h-8 w-8 place-items-center rounded-xl border border-white/10 bg-white/[0.04] text-sm text-slate-300;
   }
 
+  .cockpit-nav-copy {
+    @apply flex min-w-0 flex-col;
+  }
+
+  .cockpit-nav-meta {
+    @apply mt-0.5 text-[11px] text-slate-500;
+  }
+
+  .cockpit-nav-item.is-active .cockpit-nav-meta {
+    color: #9cc7ff;
+  }
+
   .cockpit-sidebar-panel,
   .terminal-panel {
     @apply rounded-[28px] border border-white/10 p-5 shadow-[0_24px_80px_rgba(2,6,23,0.38)] backdrop-blur-xl;
@@ -144,6 +156,54 @@
 
   .cockpit-main {
     @apply min-w-0;
+  }
+
+  .page-banner {
+    @apply rounded-[30px] border border-white/10 px-5 py-5 shadow-[0_24px_80px_rgba(2,6,23,0.34)] backdrop-blur-xl;
+    background:
+      radial-gradient(circle at top right, rgba(52, 120, 255, 0.18), transparent 24%),
+      linear-gradient(135deg, rgba(10, 23, 43, 0.96), rgba(7, 15, 28, 0.94));
+    animation: panelRise 0.55s ease both;
+  }
+
+  .page-banner-grid {
+    @apply flex flex-col gap-5 xl:flex-row xl:items-end xl:justify-between;
+  }
+
+  .page-banner-copy {
+    @apply min-w-0 max-w-3xl;
+  }
+
+  .page-banner-title {
+    @apply mt-2 text-[34px] font-semibold tracking-tight text-white;
+  }
+
+  .page-banner-subtitle {
+    @apply mt-3 text-sm leading-7 text-slate-400;
+  }
+
+  .page-banner-meta {
+    @apply mt-5 flex flex-wrap gap-2;
+  }
+
+  .page-banner-stats {
+    @apply grid gap-3 md:grid-cols-2 xl:min-w-[360px];
+  }
+
+  .page-banner-stat {
+    @apply rounded-[22px] border border-white/10 bg-white/[0.04] px-4 py-4;
+  }
+
+  .page-banner-stat p {
+    @apply text-[11px] uppercase tracking-[0.2em] text-slate-500;
+  }
+
+  .page-banner-stat strong {
+    @apply mt-2 block text-base font-semibold text-white;
+  }
+
+  .page-banner-stat span {
+    @apply mt-1 block text-xs text-slate-400;
   }
 
   .dashboard-hero-grid {
@@ -160,6 +220,34 @@
 
   .dashboard-analysis-grid {
     @apply grid gap-6;
+  }
+
+  .page-summary-grid {
+    @apply grid gap-3 md:grid-cols-2;
+  }
+
+  .page-summary-card {
+    @apply rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-4;
+  }
+
+  .page-summary-card p {
+    @apply text-[11px] uppercase tracking-[0.2em] text-slate-500;
+  }
+
+  .page-summary-card strong {
+    @apply mt-2 block font-mono text-base font-semibold text-white;
+  }
+
+  .page-summary-card strong.is-positive {
+    @apply text-emerald-300;
+  }
+
+  .page-summary-card strong.is-negative {
+    @apply text-rose-300;
+  }
+
+  .page-summary-card span {
+    @apply mt-1 block text-xs leading-5 text-slate-400;
   }
 
   @screen xl {

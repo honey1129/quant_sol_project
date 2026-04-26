@@ -16,8 +16,10 @@ import { buildDashboardSnapshotFromApi } from "./lib/dashboardAdapter";
 import { formatClock, formatCurrency, formatDateTime, formatNumber, formatPercent } from "./lib/format";
 import {
   getConnectionStatusLabel,
+  getDataSourceLabel,
   getRiskLevelLabel,
   getSignalDirectionLabel,
+  getStrategyStatusLabel,
 } from "./lib/uiText";
 import type {
   ApiDashboardBundle,
@@ -30,6 +32,41 @@ import type {
 } from "./types";
 
 const POLL_MS = 10_000;
+const MAX_LOG_ENTRIES = 12;
+
+type NavPageId =
+  | "overview"
+  | "strategy"
+  | "market"
+  | "backtest"
+  | "live"
+  | "risk"
+  | "account"
+  | "settings";
+
+type DashboardMetric = {
+  label: string;
+  value: string;
+  change: string;
+  helper: string;
+  tone: "neutral" | "positive" | "negative" | "highlight";
+};
+
+type SummaryItem = {
+  label: string;
+  value: string;
+  helper?: string;
+  tone?: "positive" | "negative";
+};
+
+type SidebarItem = {
+  id: NavPageId;
+  label: string;
+  icon: string;
+  description: string;
+};
+
+const DEFAULT_PAGE: NavPageId = "overview";
 
 function getInitialTheme(): ThemeMode {
   if (typeof window === "undefined") {
@@ -56,7 +93,7 @@ function filterSeriesByRange(range: TimeRange, series = mockSnapshot.equityCurve
 }
 
 function prependLogEntry(current: LogEntry[], entry: LogEntry): LogEntry[] {
-  return [entry, ...current].slice(0, 12);
+  return [entry, ...current].slice(0, MAX_LOG_ENTRIES);
 }
 
 function describePositionState(
@@ -99,20 +136,128 @@ function describePositionState(
   };
 }
 
-const sidebarItems = [
-  { label: "总览", icon: "⌂", active: true },
-  { label: "策略中心", icon: "◫" },
-  { label: "行情监控", icon: "⌁" },
-  { label: "回测分析", icon: "◌" },
-  { label: "实盘交易", icon: "◎" },
-  { label: "风险控制", icon: "◍" },
-  { label: "账户管理", icon: "◪" },
-  { label: "系统设置", icon: "⚙" },
+function parseHashRoute(hash: string): NavPageId {
+  const route = hash.replace(/^#\/?/, "").trim();
+  switch (route) {
+    case "strategy":
+    case "market":
+    case "backtest":
+    case "live":
+    case "risk":
+    case "account":
+    case "settings":
+      return route;
+    default:
+      return DEFAULT_PAGE;
+  }
+}
+
+function buildHashRoute(page: NavPageId): string {
+  return `#/${page}`;
+}
+
+function getInitialPage(): NavPageId {
+  if (typeof window === "undefined") {
+    return DEFAULT_PAGE;
+  }
+  return parseHashRoute(window.location.hash);
+}
+
+const sidebarItems: SidebarItem[] = [
+  { id: "overview", label: "总览", icon: "⌂", description: "主控视图" },
+  { id: "strategy", label: "策略中心", icon: "◫", description: "信号与研究" },
+  { id: "market", label: "行情监控", icon: "⌁", description: "K 线与盘口" },
+  { id: "backtest", label: "回测分析", icon: "◌", description: "收益与回撤" },
+  { id: "live", label: "实盘交易", icon: "◎", description: "持仓与成交" },
+  { id: "risk", label: "风险控制", icon: "◍", description: "风险阈值" },
+  { id: "account", label: "账户管理", icon: "◪", description: "资产与敞口" },
+  { id: "settings", label: "系统设置", icon: "⚙", description: "参数与运行态" },
 ];
+
+const pageMeta: Record<NavPageId, { kicker: string; title: string; description: string }> = {
+  overview: {
+    kicker: "Overview",
+    title: "交易总览",
+    description: "把最常看的状态集中到一个入口：市场主图、当前信号、核心仓位和最近执行。",
+  },
+  strategy: {
+    kicker: "Strategy Center",
+    title: "策略中心",
+    description: "聚焦信号输出、策略健康度和研究侧的稳定性，而不是把执行和监控都挤在同一页。",
+  },
+  market: {
+    kicker: "Market Monitor",
+    title: "行情监控",
+    description: "单独观察市场主图、盘口深度和短时结构，避免行情判断被其它业务面板打断。",
+  },
+  backtest: {
+    kicker: "Backtest Review",
+    title: "回测分析",
+    description: "这里专门看回撤压力、研究收益质量和成交样本，保留复盘视角，不再塞进首页。",
+  },
+  live: {
+    kicker: "Live Trading",
+    title: "实盘交易",
+    description: "把持仓、成交和运行日志汇总到执行页，方便盯盘时连续观察状态演进。",
+  },
+  risk: {
+    kicker: "Risk Control",
+    title: "风险控制",
+    description: "集中展示杠杆、敞口、日内亏损使用率和回撤轨迹，减少风控信息分散。",
+  },
+  account: {
+    kicker: "Account",
+    title: "账户管理",
+    description: "把权益、收益、名义敞口和账户状态收束成账户页，便于看资金层面的真实状态。",
+  },
+  settings: {
+    kicker: "System Settings",
+    title: "系统设置",
+    description: "参数修改、运行态脉冲和运行环境摘要统一归档到设置页，操作边界更清晰。",
+  },
+};
+
+function SummaryPanel({
+  kicker,
+  title,
+  description,
+  items,
+  badge = "摘要",
+}: {
+  kicker: string;
+  title: string;
+  description: string;
+  items: SummaryItem[];
+  badge?: string;
+}) {
+  return (
+    <section className="terminal-panel">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <p className="panel-kicker">{kicker}</p>
+          <h2 className="panel-title">{title}</h2>
+          <p className="panel-subtitle">{description}</p>
+        </div>
+        <span className="panel-chip">{badge}</span>
+      </div>
+
+      <div className="page-summary-grid mt-6">
+        {items.map((item) => (
+          <article key={item.label} className="page-summary-card">
+            <p>{item.label}</p>
+            <strong className={item.tone ? `is-${item.tone}` : ""}>{item.value}</strong>
+            {item.helper ? <span>{item.helper}</span> : null}
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
 
 export default function App() {
   const [theme, setTheme] = useState<ThemeMode>(getInitialTheme);
   const [now, setNow] = useState<Date>(new Date());
+  const [currentPage, setCurrentPage] = useState<NavPageId>(getInitialPage);
   const [snapshot, setSnapshot] = useState(mockSnapshot);
   const [params, setParams] = useState<StrategyParams>(mockSnapshot.params);
   const [paramsDirty, setParamsDirty] = useState(false);
@@ -139,6 +284,27 @@ export default function App() {
   useEffect(() => {
     paramsDirtyRef.current = paramsDirty;
   }, [paramsDirty]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return undefined;
+    }
+
+    const syncRoute = () => {
+      setCurrentPage(parseHashRoute(window.location.hash));
+    };
+
+    if (!window.location.hash) {
+      window.location.hash = buildHashRoute(DEFAULT_PAGE);
+    } else {
+      syncRoute();
+    }
+
+    window.addEventListener("hashchange", syncRoute);
+    return () => {
+      window.removeEventListener("hashchange", syncRoute);
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -204,13 +370,7 @@ export default function App() {
     snapshot.metrics.positionNotional,
   );
 
-  const metricCards: Array<{
-    label: string;
-    value: string;
-    change: string;
-    helper: string;
-    tone: "neutral" | "positive" | "negative" | "highlight";
-  }> = [
+  const metricCards: DashboardMetric[] = [
     {
       label: "总资产",
       value: formatCurrency(snapshot.metrics.equity).replace("$", ""),
@@ -275,6 +435,372 @@ export default function App() {
       label: "最近更新",
       value: formatClock(now),
       tone: "ok",
+    },
+  ];
+
+  const activePage = sidebarItems.find((item) => item.id === currentPage) ?? sidebarItems[0];
+  const activePageInfo = pageMeta[currentPage];
+  const latestCandle = snapshot.marketChart.candles[snapshot.marketChart.candles.length - 1] ?? null;
+  const previousCandle = snapshot.marketChart.candles[snapshot.marketChart.candles.length - 2] ?? latestCandle;
+  const marketDelta = latestCandle && previousCandle ? latestCandle.close - previousCandle.close : 0;
+  const marketDeltaPct = latestCandle && previousCandle && previousCandle.close
+    ? (marketDelta / previousCandle.close) * 100
+    : 0;
+  const bidDepth = snapshot.orderBook.bids.reduce((sum, level) => sum + level.total, 0);
+  const askDepth = snapshot.orderBook.asks.reduce((sum, level) => sum + level.total, 0);
+  const depthRatio = askDepth > 0 ? bidDepth / askDepth : 0;
+  const dailyReturnPct = snapshot.metrics.dailyPnl / Math.max(snapshot.metrics.equity - snapshot.metrics.dailyPnl, 1) * 100;
+  const recentLogs = visibleLogs.slice(0, 6);
+  const overviewLogs = visibleLogs.slice(0, 4);
+
+  const strategyMetricCards: DashboardMetric[] = [
+    {
+      label: "当前信号",
+      value: getSignalDirectionLabel(snapshot.signal.direction),
+      change: `评分 ${snapshot.signal.score}/100`,
+      helper: "主模型与确认因子综合输出",
+      tone: snapshot.signal.direction === "Long"
+        ? "positive"
+        : snapshot.signal.direction === "Short"
+          ? "negative"
+          : "highlight",
+    },
+    {
+      label: "运行周期",
+      value: snapshot.params.timeframe,
+      change: `MA ${snapshot.params.maPeriod} / RSI ${snapshot.params.rsiPeriod}`,
+      helper: "当前核心指标窗口",
+      tone: "neutral",
+    },
+    {
+      label: "止盈 / 止损",
+      value: `${formatNumber(snapshot.params.takeProfitPct, 1)}% / ${formatNumber(snapshot.params.stopLossPct, 1)}%`,
+      change: `ATR ${formatNumber(snapshot.params.atrMultiplier, 1)}x`,
+      helper: "收益风险配比",
+      tone: "highlight",
+    },
+    {
+      label: "仓位与杠杆",
+      value: `${formatNumber(snapshot.params.positionSizePct, 1)}%`,
+      change: `最大 ${formatNumber(snapshot.params.maxLeverage, 1)}x`,
+      helper: "执行层边界",
+      tone: "neutral",
+    },
+  ];
+
+  const marketMetricCards: DashboardMetric[] = [
+    {
+      label: "最新价格",
+      value: latestCandle ? formatNumber(latestCandle.close, 2) : "--",
+      change: `${marketDelta >= 0 ? "+" : ""}${formatNumber(marketDelta, 2)} / ${marketDeltaPct >= 0 ? "+" : ""}${formatNumber(marketDeltaPct, 2)}%`,
+      helper: `${snapshot.marketChart.symbol} · ${snapshot.marketChart.timeframe}`,
+      tone: marketDelta >= 0 ? "positive" : "negative",
+    },
+    {
+      label: "盘口价差",
+      value: formatNumber(snapshot.orderBook.spread, 2),
+      change: formatPercent(snapshot.orderBook.spreadPct, 4, false),
+      helper: "L2 深度即时快照",
+      tone: "neutral",
+    },
+    {
+      label: "买卖深度比",
+      value: `${formatNumber(depthRatio, 2)}x`,
+      change: `Bid ${formatNumber(bidDepth, 1)} / Ask ${formatNumber(askDepth, 1)}`,
+      helper: "短时订单流倾向",
+      tone: depthRatio >= 1 ? "positive" : "negative",
+    },
+    {
+      label: "交易场所",
+      value: snapshot.marketChart.venue,
+      change: snapshot.marketChart.timeframe,
+      helper: "当前监控图表来源",
+      tone: "highlight",
+    },
+  ];
+
+  const liveMetricCards: DashboardMetric[] = [
+    {
+      label: "活跃持仓",
+      value: String(snapshot.metrics.openPositions),
+      change: snapshot.metrics.openPositions > 0 ? "执行中" : "空仓待命",
+      helper: positionMetricText.change,
+      tone: snapshot.metrics.openPositions > 0 ? "positive" : "neutral",
+    },
+    {
+      label: "名义敞口",
+      value: positionMetricText.helper.replace("当前名义敞口 ", "").replace("总名义敞口 ", ""),
+      change: snapshot.metrics.positionMode ? String(snapshot.metrics.positionMode).toUpperCase() : "FLAT",
+      helper: "实时仓位暴露",
+      tone: "highlight",
+    },
+    {
+      label: "API / WS",
+      value: `${getConnectionStatusLabel(snapshot.risk.apiStatus)} / ${getConnectionStatusLabel(snapshot.risk.wsStatus)}`,
+      change: snapshot.risk.riskTriggered ? "风控已触发" : "执行链路正常",
+      helper: "实盘连接健康度",
+      tone: snapshot.risk.riskTriggered ? "negative" : "positive",
+    },
+    {
+      label: "轮询节奏",
+      value: `${POLL_MS / 1000}s`,
+      change: getStrategyStatusLabel(snapshot.status),
+      helper: "策略执行频率",
+      tone: "neutral",
+    },
+  ];
+
+  const riskMetricCards: DashboardMetric[] = [
+    {
+      label: "风险等级",
+      value: getRiskLevelLabel(snapshot.metrics.riskLevel),
+      change: snapshot.risk.riskTriggered ? "已进入限制态" : "监控正常",
+      helper: "综合风控判定",
+      tone: snapshot.risk.riskTriggered ? "negative" : "highlight",
+    },
+    {
+      label: "风险暴露",
+      value: formatPercent(snapshot.risk.marginUsagePct, 1, false),
+      change: `当前杠杆 ${formatNumber(snapshot.risk.currentLeverage, 1)}x`,
+      helper: "保证金占用率",
+      tone: snapshot.risk.marginUsagePct > 60 ? "negative" : "neutral",
+    },
+    {
+      label: "日内亏损使用",
+      value: formatPercent(snapshot.risk.dailyLossUsedPct, 1, false),
+      change: `上限 ${formatPercent(snapshot.risk.dailyLossLimitPct, 1, false)}`,
+      helper: "日损阈值消耗",
+      tone: snapshot.risk.dailyLossUsedPct > snapshot.risk.dailyLossLimitPct * 0.7 ? "negative" : "highlight",
+    },
+    {
+      label: "单笔风险",
+      value: formatPercent(snapshot.risk.maxLossPerTradePct, 1, false),
+      change: "每笔交易预算",
+      helper: "避免单次失控",
+      tone: "neutral",
+    },
+  ];
+
+  const accountMetricCards: DashboardMetric[] = [
+    metricCards[0],
+    metricCards[1],
+    {
+      label: "账户模式",
+      value: snapshot.metrics.openPositions > 0 ? positionMetricText.change : "空仓待命",
+      change: getStrategyStatusLabel(snapshot.status),
+      helper: "当前仓位状态",
+      tone: snapshot.metrics.openPositions > 0 ? "highlight" : "neutral",
+    },
+    {
+      label: "风控等级",
+      value: getRiskLevelLabel(snapshot.metrics.riskLevel),
+      change: `最大回撤 ${formatPercent(snapshot.metrics.maxDrawdownPct, 2, false)}`,
+      helper: "资金压力快照",
+      tone: snapshot.metrics.riskLevel === "High" ? "negative" : "neutral",
+    },
+  ];
+
+  const settingsMetricCards: DashboardMetric[] = [
+    {
+      label: "交易所",
+      value: snapshot.exchange,
+      change: snapshot.marketChart.symbol,
+      helper: "当前连接市场",
+      tone: "neutral",
+    },
+    {
+      label: "系统状态",
+      value: getStrategyStatusLabel(snapshot.status),
+      change: getDataSourceLabel(snapshot.dataSource),
+      helper: "运行模式与数据来源",
+      tone: snapshot.status === "Error" ? "negative" : "highlight",
+    },
+    {
+      label: "最近更新",
+      value: formatDateTime(snapshot.updatedAt),
+      change: `轮询 ${POLL_MS / 1000}s`,
+      helper: "页面最近同步时间",
+      tone: "neutral",
+    },
+    {
+      label: "连接健康",
+      value: `${getConnectionStatusLabel(snapshot.risk.apiStatus)} / ${getConnectionStatusLabel(snapshot.risk.wsStatus)}`,
+      change: snapshot.risk.riskTriggered ? "风控保护中" : "运行稳定",
+      helper: "网络与执行链路",
+      tone: snapshot.risk.riskTriggered ? "negative" : "positive",
+    },
+  ];
+
+  const strategySummaryItems: SummaryItem[] = [
+    {
+      label: "策略状态",
+      value: getStrategyStatusLabel(snapshot.status),
+      helper: `最近信号 ${formatDateTime(snapshot.signal.lastTriggeredAt)}`,
+    },
+    {
+      label: "信号来源",
+      value: snapshot.signal.sources.join(" · ") || "暂无",
+      helper: "当前用于触发的确认因子",
+    },
+    {
+      label: "累计收益率",
+      value: formatPercent(snapshot.metrics.totalReturnPct),
+      helper: `夏普 ${formatNumber(snapshot.metrics.sharpeRatio, 2)} / 胜率 ${formatPercent(snapshot.metrics.winRatePct, 2, false)}`,
+      tone: snapshot.metrics.totalReturnPct >= 0 ? "positive" : "negative",
+    },
+    {
+      label: "策略节奏",
+      value: `${POLL_MS / 1000}s`,
+      helper: `下次运行前 ${Math.max(0, Math.floor((new Date(snapshot.signal.nextRunAt).getTime() - now.getTime()) / 1000))} 秒`,
+    },
+  ];
+
+  const marketSummaryItems: SummaryItem[] = [
+    {
+      label: "市场结构",
+      value: `${snapshot.marketChart.symbol} · ${snapshot.marketChart.timeframe}`,
+      helper: snapshot.marketChart.venue,
+    },
+    {
+      label: "成交方向",
+      value: `${marketDelta >= 0 ? "+" : ""}${formatNumber(marketDeltaPct, 2)}%`,
+      helper: "相对上一根已处理 K 线变化",
+      tone: marketDelta >= 0 ? "positive" : "negative",
+    },
+    {
+      label: "盘口厚度",
+      value: `${formatNumber(bidDepth, 1)} / ${formatNumber(askDepth, 1)}`,
+      helper: "Bid / Ask 累计量",
+    },
+    {
+      label: "订单流倾向",
+      value: `${formatNumber(depthRatio, 2)}x`,
+      helper: "大于 1 更偏买盘",
+      tone: depthRatio >= 1 ? "positive" : "negative",
+    },
+  ];
+
+  const backtestSummaryItems: SummaryItem[] = [
+    {
+      label: "累计收益",
+      value: formatPercent(snapshot.metrics.totalReturnPct),
+      helper: "研究期收益快照",
+      tone: snapshot.metrics.totalReturnPct >= 0 ? "positive" : "negative",
+    },
+    {
+      label: "最大回撤",
+      value: formatPercent(snapshot.metrics.maxDrawdownPct, 2, false),
+      helper: "资金谷底深度",
+      tone: "negative",
+    },
+    {
+      label: "收益质量",
+      value: `Sharpe ${formatNumber(snapshot.metrics.sharpeRatio, 2)}`,
+      helper: `胜率 ${formatPercent(snapshot.metrics.winRatePct, 2, false)}`,
+    },
+    {
+      label: "交易样本",
+      value: `${snapshot.trades.length} 条`,
+      helper: "最近映射到研究面板的成交记录",
+    },
+  ];
+
+  const liveSummaryItems: SummaryItem[] = [
+    {
+      label: "执行状态",
+      value: getStrategyStatusLabel(snapshot.status),
+      helper: `数据源 ${getDataSourceLabel(snapshot.dataSource)}`,
+    },
+    {
+      label: "当前持仓",
+      value: snapshot.metrics.openPositions > 0 ? `${snapshot.metrics.openPositions} 笔` : "空仓",
+      helper: positionMetricText.change,
+      tone: snapshot.metrics.openPositions > 0 ? "positive" : undefined,
+    },
+    {
+      label: "名义敞口",
+      value: positionMetricText.helper.replace("当前名义敞口 ", "").replace("总名义敞口 ", ""),
+      helper: "当前执行仓位暴露",
+    },
+    {
+      label: "链路健康",
+      value: `API ${getConnectionStatusLabel(snapshot.risk.apiStatus)} / WS ${getConnectionStatusLabel(snapshot.risk.wsStatus)}`,
+      helper: "交易与行情连接状态",
+      tone: snapshot.risk.riskTriggered ? "negative" : "positive",
+    },
+  ];
+
+  const riskSummaryItems: SummaryItem[] = [
+    {
+      label: "风险暴露",
+      value: formatPercent(snapshot.risk.marginUsagePct, 1, false),
+      helper: `当前杠杆 ${formatNumber(snapshot.risk.currentLeverage, 1)}x`,
+      tone: snapshot.risk.marginUsagePct > 60 ? "negative" : undefined,
+    },
+    {
+      label: "日内亏损使用",
+      value: formatPercent(snapshot.risk.dailyLossUsedPct, 1, false),
+      helper: `上限 ${formatPercent(snapshot.risk.dailyLossLimitPct, 1, false)}`,
+      tone: snapshot.risk.dailyLossUsedPct > snapshot.risk.dailyLossLimitPct * 0.7 ? "negative" : undefined,
+    },
+    {
+      label: "单笔风险预算",
+      value: formatPercent(snapshot.risk.maxLossPerTradePct, 1, false),
+      helper: "每笔交易最大允许亏损",
+    },
+    {
+      label: "风控状态",
+      value: snapshot.risk.riskTriggered ? "已触发" : "正常",
+      helper: "是否进入限制态",
+      tone: snapshot.risk.riskTriggered ? "negative" : "positive",
+    },
+  ];
+
+  const accountSummaryItems: SummaryItem[] = [
+    {
+      label: "账户净值",
+      value: formatCurrency(snapshot.metrics.equity).replace("$", ""),
+      helper: "USDT 计价总资产",
+    },
+    {
+      label: "当日收益",
+      value: formatCurrency(snapshot.metrics.dailyPnl),
+      helper: formatPercent(dailyReturnPct, 2),
+      tone: snapshot.metrics.dailyPnl >= 0 ? "positive" : "negative",
+    },
+    {
+      label: "账户模式",
+      value: snapshot.metrics.openPositions > 0 ? positionMetricText.change : "空仓待命",
+      helper: positionMetricText.helper,
+    },
+    {
+      label: "风险概览",
+      value: getRiskLevelLabel(snapshot.metrics.riskLevel),
+      helper: `最大回撤 ${formatPercent(snapshot.metrics.maxDrawdownPct, 2, false)}`,
+    },
+  ];
+
+  const settingsSummaryItems: SummaryItem[] = [
+    {
+      label: "运行环境",
+      value: snapshot.exchange,
+      helper: `${snapshot.productName} / ${snapshot.strategyName}`,
+    },
+    {
+      label: "策略状态",
+      value: getStrategyStatusLabel(snapshot.status),
+      helper: `最近更新 ${formatDateTime(snapshot.updatedAt)}`,
+    },
+    {
+      label: "数据来源",
+      value: getDataSourceLabel(snapshot.dataSource),
+      helper: "实时接口与本地回退自动切换",
+    },
+    {
+      label: "网络健康",
+      value: `API ${getConnectionStatusLabel(snapshot.risk.apiStatus)}`,
+      helper: `WS ${getConnectionStatusLabel(snapshot.risk.wsStatus)}`,
+      tone: snapshot.risk.riskTriggered ? "negative" : "positive",
     },
   ];
 
@@ -396,6 +922,217 @@ export default function App() {
     setLocalLogs((current) => prependLogEntry(current, entry));
   }
 
+  function navigateToPage(page: NavPageId) {
+    if (typeof window === "undefined") {
+      setCurrentPage(page);
+      return;
+    }
+
+    const nextHash = buildHashRoute(page);
+    if (window.location.hash !== nextHash) {
+      window.location.hash = nextHash;
+      return;
+    }
+
+    setCurrentPage(page);
+  }
+
+  function renderMetricGrid(cards: DashboardMetric[], columnsClassName: string) {
+    return (
+      <section className={`grid gap-4 ${columnsClassName}`}>
+        {cards.map((metric, index) => (
+          <MetricCard
+            key={metric.label}
+            label={metric.label}
+            value={metric.value}
+            change={metric.change}
+            helper={metric.helper}
+            tone={metric.tone}
+            index={index}
+          />
+        ))}
+      </section>
+    );
+  }
+
+  function renderPageContent() {
+    switch (currentPage) {
+      case "strategy":
+        return (
+          <>
+            {renderMetricGrid(strategyMetricCards, "md:grid-cols-2 2xl:grid-cols-4")}
+            <section className="dashboard-hero-grid mt-6">
+              <SignalPanel signal={snapshot.signal} now={now} />
+              <SummaryPanel
+                kicker="策略摘要"
+                title="策略运行轮廓"
+                description="把信号、来源、收益质量和调度节奏单独聚合，避免策略页被执行细节挤占。"
+                items={strategySummaryItems}
+                badge="Core"
+              />
+            </section>
+            <section className="dashboard-analysis-grid mt-6">
+              <DrawdownChart data={drawdownCurve} range={drawdownRange} />
+              <RiskPanel risk={snapshot.risk} />
+            </section>
+          </>
+        );
+      case "market":
+        return (
+          <>
+            {renderMetricGrid(marketMetricCards, "md:grid-cols-2 2xl:grid-cols-4")}
+            <section className="dashboard-hero-grid mt-6">
+              <MarketChartPanel marketChart={snapshot.marketChart} />
+              <OrderBookPanel orderBook={snapshot.orderBook} symbol={snapshot.marketChart.symbol} />
+            </section>
+            <section className="dashboard-dual-grid mt-6">
+              <SummaryPanel
+                kicker="盘口结构"
+                title="市场微观状态"
+                description="用价格、深度和订单流倾向来辅助判断当前信号是否有足够的市场支持。"
+                items={marketSummaryItems}
+                badge="Depth"
+              />
+              <SignalPanel signal={snapshot.signal} now={now} />
+            </section>
+          </>
+        );
+      case "backtest":
+        return (
+          <>
+            {renderMetricGrid([metricCards[1], metricCards[2], metricCards[3], metricCards[4]], "md:grid-cols-2 2xl:grid-cols-4")}
+            <section className="dashboard-analysis-grid mt-6">
+              <DrawdownChart data={drawdownCurve} range={drawdownRange} />
+              <SummaryPanel
+                kicker="研究结论"
+                title="回测表现摘要"
+                description="这里只保留复盘最常用的维度：收益、回撤、收益质量和最近成交样本。"
+                items={backtestSummaryItems}
+                badge="Review"
+              />
+            </section>
+            <section className="mt-6">
+              <TradesTable trades={snapshot.trades} />
+            </section>
+          </>
+        );
+      case "live":
+        return (
+          <>
+            {renderMetricGrid(liveMetricCards, "md:grid-cols-2 2xl:grid-cols-4")}
+            <section className="dashboard-hero-grid mt-6">
+              <PositionsTable positions={snapshot.positions} />
+              <div className="dashboard-right-rail">
+                <SignalPanel signal={snapshot.signal} now={now} />
+                <SummaryPanel
+                  kicker="执行摘要"
+                  title="实盘执行面"
+                  description="持仓、链路健康和名义敞口放在同一页，方便盯盘时直接判断是否存在执行异常。"
+                  items={liveSummaryItems}
+                  badge="Execution"
+                />
+              </div>
+            </section>
+            <section className="dashboard-dual-grid mt-6">
+              <TradesTable trades={snapshot.trades} />
+              <LogPanel logs={recentLogs} />
+            </section>
+          </>
+        );
+      case "risk":
+        return (
+          <>
+            {renderMetricGrid(riskMetricCards, "md:grid-cols-2 2xl:grid-cols-4")}
+            <section className="dashboard-analysis-grid mt-6">
+              <DrawdownChart data={drawdownCurve} range={drawdownRange} />
+              <RiskPanel risk={snapshot.risk} />
+            </section>
+            <section className="dashboard-dual-grid mt-6">
+              <SummaryPanel
+                kicker="风控边界"
+                title="风险阈值摘要"
+                description="聚合杠杆、日损、单笔风险和保护状态，便于确认策略是否接近失控边缘。"
+                items={riskSummaryItems}
+                badge="Guard"
+              />
+              <LogPanel logs={overviewLogs} />
+            </section>
+          </>
+        );
+      case "account":
+        return (
+          <>
+            {renderMetricGrid(accountMetricCards, "md:grid-cols-2 2xl:grid-cols-4")}
+            <section className="dashboard-dual-grid mt-6">
+              <SummaryPanel
+                kicker="账户总览"
+                title="资产与敞口"
+                description="把账户净值、收益、账户模式与风险概览集中到一起，专门看资金层面的真实状态。"
+                items={accountSummaryItems}
+                badge="Account"
+              />
+              <PositionsTable positions={snapshot.positions} />
+            </section>
+            <section className="mt-6">
+              <TradesTable trades={snapshot.trades} />
+            </section>
+          </>
+        );
+      case "settings":
+        return (
+          <>
+            {renderMetricGrid(settingsMetricCards, "md:grid-cols-2 2xl:grid-cols-4")}
+            <section className="dashboard-hero-grid mt-6">
+              <ParamsPanel
+                params={params}
+                savedAt={savedAt}
+                saving={savingParams}
+                restarting={restartingStrategy}
+                onChange={handleParamChange}
+                onSave={handleSaveParams}
+                onRestart={handleRestartStrategy}
+                onReset={handleResetParams}
+              />
+              <div className="dashboard-right-rail">
+                <SystemPulsePanel systemPulse={snapshot.systemPulse} />
+                <SummaryPanel
+                  kicker="运行环境"
+                  title="系统设置摘要"
+                  description="参数修改、连接状态和运行环境集中归档，避免和交易执行页混在一起。"
+                  items={settingsSummaryItems}
+                  badge="Runtime"
+                />
+              </div>
+            </section>
+            <section className="mt-6">
+              <LogPanel logs={recentLogs} />
+            </section>
+          </>
+        );
+      case "overview":
+      default:
+        return (
+          <>
+            {renderMetricGrid(metricCards, "md:grid-cols-2 2xl:grid-cols-6")}
+            <section className="dashboard-hero-grid mt-6">
+              <div className="min-w-0 space-y-6">
+                <MarketChartPanel marketChart={snapshot.marketChart} />
+                <PositionsTable positions={snapshot.positions} />
+              </div>
+              <div className="dashboard-right-rail">
+                <SignalPanel signal={snapshot.signal} now={now} />
+                <RiskPanel risk={snapshot.risk} />
+              </div>
+            </section>
+            <section className="dashboard-dual-grid mt-6">
+              <TradesTable trades={snapshot.trades} />
+              <LogPanel logs={overviewLogs} />
+            </section>
+          </>
+        );
+    }
+  }
+
   return (
     <div className="cockpit-shell">
       <aside className="cockpit-sidebar">
@@ -410,12 +1147,17 @@ export default function App() {
         <nav className="cockpit-nav">
           {sidebarItems.map((item) => (
             <button
-              key={item.label}
+              key={item.id}
               type="button"
-              className={`cockpit-nav-item ${item.active ? "is-active" : ""}`}
+              className={`cockpit-nav-item ${item.id === currentPage ? "is-active" : ""}`}
+              onClick={() => navigateToPage(item.id)}
+              aria-current={item.id === currentPage ? "page" : undefined}
             >
               <span className="cockpit-nav-icon">{item.icon}</span>
-              <span>{item.label}</span>
+              <span className="cockpit-nav-copy">
+                <span>{item.label}</span>
+                <span className="cockpit-nav-meta">{item.description}</span>
+              </span>
             </button>
           ))}
         </nav>
@@ -439,15 +1181,13 @@ export default function App() {
           <div className="mt-6 rounded-2xl border border-white/8 bg-white/[0.03] p-4">
             <p className="text-xs uppercase tracking-[0.22em] text-slate-500">运行摘要</p>
             <p className="mt-3 text-sm text-slate-300">
-              交易所 {snapshot.exchange} · 风险 {getRiskLevelLabel(snapshot.metrics.riskLevel)} · 持仓 {snapshot.metrics.openPositions}
+              当前页 {activePage.label} · 风险 {getRiskLevelLabel(snapshot.metrics.riskLevel)} · 持仓 {snapshot.metrics.openPositions}
             </p>
             <p className="mt-2 text-xs text-slate-500">
               最近更新 {formatDateTime(snapshot.updatedAt)} · 轮询 {POLL_MS / 1000}s
             </p>
           </div>
         </section>
-
-        <SystemPulsePanel systemPulse={snapshot.systemPulse} />
       </aside>
 
       <main className="cockpit-main">
@@ -469,55 +1209,37 @@ export default function App() {
           </div>
         ) : null}
 
-        <section className="grid gap-4 md:grid-cols-2 2xl:grid-cols-6">
-          {metricCards.map((metric, index) => (
-            <MetricCard
-              key={metric.label}
-              label={metric.label}
-              value={metric.value}
-              change={metric.change}
-              helper={metric.helper}
-              tone={metric.tone}
-              index={index}
-            />
-          ))}
-        </section>
+        <section className="page-banner">
+          <div className="page-banner-grid">
+            <div className="page-banner-copy">
+              <p className="panel-kicker">{activePageInfo.kicker}</p>
+              <h2 className="page-banner-title">{activePageInfo.title}</h2>
+              <p className="page-banner-subtitle">{activePageInfo.description}</p>
+              <div className="page-banner-meta">
+                <span className="panel-pill">{activePage.label}</span>
+                <span className="panel-pill">{snapshot.marketChart.symbol}</span>
+                <span className="panel-pill">{getDataSourceLabel(snapshot.dataSource)}</span>
+              </div>
+            </div>
 
-        <section className="dashboard-hero-grid mt-6">
-          <div className="min-w-0 space-y-6">
-            <MarketChartPanel marketChart={snapshot.marketChart} />
-            <div className="dashboard-dual-grid">
-              <PositionsTable positions={snapshot.positions} />
-              <TradesTable trades={snapshot.trades} />
+            <div className="page-banner-stats">
+              <div className="page-banner-stat">
+                <p>策略状态</p>
+                <strong>{getStrategyStatusLabel(snapshot.status)}</strong>
+                <span>当前信号 {getSignalDirectionLabel(snapshot.signal.direction)}</span>
+              </div>
+              <div className="page-banner-stat">
+                <p>最近同步</p>
+                <strong>{formatDateTime(snapshot.updatedAt)}</strong>
+                <span>{snapshot.exchange} · 轮询 {POLL_MS / 1000}s</span>
+              </div>
             </div>
           </div>
-
-          <div className="dashboard-right-rail">
-            <SignalPanel signal={snapshot.signal} now={now} />
-            <OrderBookPanel orderBook={snapshot.orderBook} symbol={snapshot.marketChart.symbol} />
-          </div>
         </section>
 
-        <section className="dashboard-analysis-grid mt-6">
-          <DrawdownChart data={drawdownCurve} range={drawdownRange} />
-          <div className="min-w-0 space-y-6">
-            <RiskPanel risk={snapshot.risk} />
-            <ParamsPanel
-              params={params}
-              savedAt={savedAt}
-              saving={savingParams}
-              restarting={restartingStrategy}
-              onChange={handleParamChange}
-              onSave={handleSaveParams}
-              onRestart={handleRestartStrategy}
-              onReset={handleResetParams}
-            />
-          </div>
-        </section>
-
-        <section className="mt-6">
-          <LogPanel logs={visibleLogs} />
-        </section>
+        <div className="mt-6">
+          {renderPageContent()}
+        </div>
 
         <footer className="mt-6 grid gap-4 xl:grid-cols-4">
           <div className="cockpit-footer-stat">
