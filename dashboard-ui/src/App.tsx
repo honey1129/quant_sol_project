@@ -1,7 +1,6 @@
 import { startTransition, useEffect, useRef, useState } from "react";
 import { dashboardSnapshot as mockSnapshot } from "./data/mockData";
 import { DrawdownChart } from "./components/DrawdownChart";
-import { EquityChart } from "./components/EquityChart";
 import { LogPanel } from "./components/LogPanel";
 import { MarketChartPanel } from "./components/MarketChartPanel";
 import { MetricCard } from "./components/MetricCard";
@@ -114,7 +113,6 @@ const sidebarItems = [
 export default function App() {
   const [theme, setTheme] = useState<ThemeMode>(getInitialTheme);
   const [now, setNow] = useState<Date>(new Date());
-  const [range, setRange] = useState<TimeRange>("30D");
   const [snapshot, setSnapshot] = useState(mockSnapshot);
   const [params, setParams] = useState<StrategyParams>(mockSnapshot.params);
   const [paramsDirty, setParamsDirty] = useState(false);
@@ -197,7 +195,8 @@ export default function App() {
     };
   }, []);
 
-  const filteredCurve = filterSeriesByRange(range, snapshot.equityCurve);
+  const drawdownRange: TimeRange = "30D";
+  const drawdownCurve = filterSeriesByRange(drawdownRange, snapshot.equityCurve);
   const visibleLogs = [...localLogs, ...snapshot.logs].slice(0, 12);
   const positionMetricText = describePositionState(
     snapshot.metrics.positionMode,
@@ -484,16 +483,25 @@ export default function App() {
           ))}
         </section>
 
-        <section className="mt-6 grid gap-6 2xl:grid-cols-[1.12fr_1.08fr_0.8fr]">
-          <div className="space-y-6">
-            <EquityChart data={filteredCurve} range={range} onRangeChange={setRange} />
-            <TradesTable trades={snapshot.trades} />
-            <DrawdownChart data={filteredCurve} range={range} />
+        <section className="dashboard-hero-grid mt-6">
+          <div className="min-w-0 space-y-6">
+            <MarketChartPanel marketChart={snapshot.marketChart} />
+            <div className="dashboard-dual-grid">
+              <PositionsTable positions={snapshot.positions} />
+              <TradesTable trades={snapshot.trades} />
+            </div>
           </div>
 
-          <div className="space-y-6">
-            <MarketChartPanel marketChart={snapshot.marketChart} />
-            <PositionsTable positions={snapshot.positions} />
+          <div className="dashboard-right-rail">
+            <SignalPanel signal={snapshot.signal} now={now} />
+            <OrderBookPanel orderBook={snapshot.orderBook} symbol={snapshot.marketChart.symbol} />
+          </div>
+        </section>
+
+        <section className="dashboard-analysis-grid mt-6">
+          <DrawdownChart data={drawdownCurve} range={drawdownRange} />
+          <div className="min-w-0 space-y-6">
+            <RiskPanel risk={snapshot.risk} />
             <ParamsPanel
               params={params}
               savedAt={savedAt}
@@ -504,12 +512,6 @@ export default function App() {
               onRestart={handleRestartStrategy}
               onReset={handleResetParams}
             />
-          </div>
-
-          <div className="space-y-6">
-            <SignalPanel signal={snapshot.signal} now={now} />
-            <OrderBookPanel orderBook={snapshot.orderBook} symbol={snapshot.marketChart.symbol} />
-            <RiskPanel risk={snapshot.risk} />
           </div>
         </section>
 

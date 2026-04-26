@@ -146,6 +146,39 @@
     @apply min-w-0;
   }
 
+  .dashboard-hero-grid {
+    @apply grid gap-6;
+  }
+
+  .dashboard-dual-grid {
+    @apply grid gap-6;
+  }
+
+  .dashboard-right-rail {
+    @apply min-w-0 space-y-6;
+  }
+
+  .dashboard-analysis-grid {
+    @apply grid gap-6;
+  }
+
+  @screen xl {
+    .dashboard-hero-grid {
+      grid-template-columns: minmax(0, 1.58fr) minmax(360px, 0.92fr);
+      align-items: start;
+    }
+
+    .dashboard-dual-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      align-items: start;
+    }
+
+    .dashboard-analysis-grid {
+      grid-template-columns: minmax(0, 1.22fr) minmax(320px, 0.94fr);
+      align-items: start;
+    }
+  }
+
   .top-nav-shell {
     @apply mb-5 flex flex-col gap-4 rounded-[28px] border border-white/10 px-5 py-4 shadow-[0_20px_60px_rgba(2,6,23,0.34)] backdrop-blur-xl xl:flex-row xl:items-center xl:justify-between;
     background: rgba(8, 17, 31, 0.92);
