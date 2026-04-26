@@ -1,10 +1,19 @@
 import type { TradeRow } from "../types";
 import { formatDateTime, formatOptionalCurrency } from "../lib/format";
-import { getSignalDirectionLabel, getTradeStatusLabel } from "../lib/uiText";
+import { getSignalDirectionLabel, getTradeFieldSourceLabel, getTradeStatusLabel } from "../lib/uiText";
 import { StatusBadge } from "./StatusBadge";
 
 interface TradesTableProps {
   trades: TradeRow[];
+}
+
+function ValueCell({ value, source }: { value: number | null; source?: string }) {
+  return (
+    <div>
+      <div className="font-mono">{formatOptionalCurrency(value)}</div>
+      <div className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">{getTradeFieldSourceLabel(source)}</div>
+    </div>
+  );
 }
 
 function getStatusTone(status: TradeRow["status"]) {
@@ -47,19 +56,19 @@ export function TradesTable({ trades }: TradesTableProps) {
                 <td className="px-3 py-4">
                   <StatusBadge label={getSignalDirectionLabel(trade.side)} tone={trade.side === "Long" ? "emerald" : "rose"} />
                 </td>
-                <td className="px-3 py-4 font-mono">{formatOptionalCurrency(trade.entry)}</td>
-                <td className="px-3 py-4 font-mono">{formatOptionalCurrency(trade.exit)}</td>
-                <td className={`px-3 py-4 font-mono ${
+                <td className="px-3 py-4"><ValueCell value={trade.entry} source={trade.entrySource} /></td>
+                <td className="px-3 py-4"><ValueCell value={trade.exit} source={trade.exitSource} /></td>
+                <td className={`px-3 py-4 ${
                   trade.pnl === null
                     ? "text-slate-500 dark:text-slate-400"
                     : trade.pnl >= 0
                       ? "text-emerald-400"
                       : "text-rose-400"
                 }`}>
-                  {formatOptionalCurrency(trade.pnl)}
+                  <ValueCell value={trade.pnl} source={trade.pnlSource} />
                 </td>
-                <td className="px-3 py-4 font-mono">{formatOptionalCurrency(trade.fee)}</td>
-                <td className="px-3 py-4 font-mono">{formatOptionalCurrency(trade.slippage)}</td>
+                <td className="px-3 py-4"><ValueCell value={trade.fee} source={trade.feeSource} /></td>
+                <td className="px-3 py-4"><ValueCell value={trade.slippage} source={trade.slippageSource} /></td>
                 <td className="max-w-[260px] px-3 py-4 text-slate-500 dark:text-slate-400">{trade.reason}</td>
                 <td className="px-3 py-4">
                   <StatusBadge label={getTradeStatusLabel(trade.status)} tone={getStatusTone(trade.status)} />

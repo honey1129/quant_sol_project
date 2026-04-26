@@ -55,10 +55,15 @@ export interface TradeRow {
   symbol: string;
   side: "Long" | "Short";
   entry: number | null;
+  entrySource?: string;
   exit: number | null;
+  exitSource?: string;
   pnl: number | null;
+  pnlSource?: string;
   fee: number | null;
+  feeSource?: string;
   slippage: number | null;
+  slippageSource?: string;
   reason: string;
   status: "Filled" | "Stopped" | "Take Profit" | "Canceled" | string;
 }
@@ -253,10 +258,15 @@ export interface ApiDashboardTradeRow {
   symbol?: string;
   side?: TradeRow["side"] | string;
   entry?: number | null;
+  entry_source?: string;
   exit?: number | null;
+  exit_source?: string;
   pnl?: number | null;
+  pnl_source?: string;
   fee?: number | null;
+  fee_source?: string;
   slippage?: number | null;
+  slippage_source?: string;
   reason?: string;
   status?: TradeRow["status"] | string;
 }

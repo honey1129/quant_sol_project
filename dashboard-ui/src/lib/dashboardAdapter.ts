@@ -17,6 +17,12 @@ import type {
 } from "../types";
 
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+const REASON_CODE_PATTERN = /reason=([A-Za-z0-9_().,-]+)/;
+const TARGET_RATIO_PATTERN = /target_ratio=(-?\d+(?:\.\d+)?)/;
+const DELTA_QTY_PATTERN = /delta_qty=(-?\d+(?:\.\d+)?)/;
+const QTY_PATTERN = /qty=(-?\d+(?:\.\d+)?)/;
+const MIN_HOLD_REASON_PATTERN = /MinHold\((\d+)\/(\d+)\)/;
+const WEAK_REVERSE_REASON_PATTERN = /WeakReverseSignal\(gap=([0-9.]+),dominant=([0-9.]+),ratio=([0-9.]+)\)/;
 
 function toNumber(value: unknown): number | null {
   if (value === null || value === undefined || value === "") {
@@ -49,6 +55,141 @@ function parseLogTimestamp(value: string, fallback: string): string {
 function stripLogPrefix(value: string): string {
   const match = value.match(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} - [A-Z]+ - (.*)$/);
   return match ? match[1] : value;
+}
+
+function humanizeReasonCode(reason: string): string {
+  const trimmed = String(reason || "").trim();
+  if (!trimmed) {
+    return "本次执行由策略最新状态驱动，未返回更具体的决策原因。";
+  }
+
+  const minHoldMatch = trimmed.match(MIN_HOLD_REASON_PATTERN);
+  if (minHoldMatch) {
+    return `当前仓位仍处于最小持有期内，为避免过早反复交易，系统选择继续持有（已持有 ${minHoldMatch[1]}/${minHoldMatch[2]} 根 K 线）。`;
+  }
+
+  const weakReverseMatch = trimmed.match(WEAK_REVERSE_REASON_PATTERN);
+  if (weakReverseMatch) {
+    return `检测到反向信号，但强度仍不足以直接反手，系统继续持仓等待更明确确认（概率差 ${weakReverseMatch[1]}，主导概率 ${weakReverseMatch[2]}，目标仓位比例 ${weakReverseMatch[3]}）。`;
+  }
+
+  const reasonMap: Record<string, string> = {
+    OpenFromFlat: "空仓状态下出现满足阈值的有效信号，系统首次建立新仓位。",
+    SameDirRebalance: "当前信号方向未变，但目标仓位与现有仓位存在明显偏差，系统按策略计划执行同方向调仓。",
+    "TP/SL": "当前持仓已触发止盈或止损阈值，系统执行风险退出以锁定结果或控制回撤。",
+    ReverseClose: "出现了足够强的反向信号，系统先平掉当前仓位，等待后续确认后再决定是否反手。",
+    FlatNoSignal: "当前为空仓，且信号强度不足以支持新开仓，系统继续等待更清晰机会。",
+    SameDirNoRebalance: "当前方向判断未变，但仓位偏差不足以触发调仓，系统保持现有持仓不动。",
+    NoSignalKeep: "当前没有足够优势的开平仓信号，系统维持现有仓位并继续观察。",
+    SameClosedBarSkip: "这根已收盘 K 线已经处理过，本轮仅更新状态并等待下一根新的已确认 K 线。",
+    DualSidePosition: "检测到账户同时存在多仓和空仓，系统进入保护性对账流程，优先处理异常双向持仓。",
+    LoopException: "主循环中出现异常，系统已记录错误并等待下一轮恢复执行。",
+    MonitorBoot: "监控进程刚完成启动，当前展示的是启动后的首次状态快照。",
+  };
+
+  return reasonMap[trimmed] || trimmed;
+}
+
+function humanizeTradeReason(reason: string, fallbackMessage?: string): string {
+  const raw = String(reason || fallbackMessage || "").trim();
+  const baseMessage = fallbackMessage ? stripLogPrefix(fallbackMessage) : raw;
+  const targetRatio = baseMessage.match(TARGET_RATIO_PATTERN)?.[1];
+  const deltaQty = baseMessage.match(DELTA_QTY_PATTERN)?.[1];
+  const qty = baseMessage.match(QTY_PATTERN)?.[1];
+  const reasonCode = (baseMessage.match(REASON_CODE_PATTERN)?.[1] || raw).trim();
+  const reasonText = humanizeReasonCode(reasonCode);
+
+  if (/执行开仓/.test(baseMessage) || /开仓未成交/.test(baseMessage)) {
+    const ratioText = targetRatio ? `目标仓位约 ${(Number(targetRatio) * 100).toFixed(1)}%` : "目标仓位按策略实时计算";
+    const qtyText = qty ? `，计划下单数量 ${Number(qty).toFixed(4)}` : "";
+    const statusText = /未成交/.test(baseMessage) ? "本次下单未成交，系统已回到仓位同步状态。" : "系统已据此发起开仓执行。";
+    return `${reasonText}${ratioText}${qtyText}。${statusText}`;
+  }
+
+  if (/执行调仓/.test(baseMessage) || /调仓未成交/.test(baseMessage)) {
+    const deltaText = deltaQty
+      ? `本次${Number(deltaQty) > 0 ? "增加" : "减少"}仓位 ${Math.abs(Number(deltaQty)).toFixed(4)}`
+      : "本次调仓数量按目标仓位偏差动态计算";
+    const statusText = /未成交/.test(baseMessage) ? "调仓委托未成交，系统已重新同步当前仓位。" : "系统已执行本次仓位调整。";
+    return `${reasonText}${deltaText}。${statusText}`;
+  }
+
+  if (/执行平仓/.test(baseMessage) || /平仓未成交/.test(baseMessage)) {
+    const statusText = /未成交/.test(baseMessage) ? "平仓委托未成交，系统已重新同步当前持仓。" : "系统已按规则执行平仓退出。";
+    return `${reasonText}${statusText}`;
+  }
+
+  return reasonText;
+}
+
+function humanizeRuntimeLogMessage(message: string): string {
+  const text = stripLogPrefix(String(message || "").trim());
+
+  if (/^已恢复最近处理 bar:/.test(text)) {
+    return text.replace(/^已恢复最近处理 bar:\s*/, "系统已恢复上次处理到的 K 线位置：");
+  }
+
+  if (/^reward_risk=/.test(text)) {
+    const value = text.split("=")[1];
+    return `仓位管理模块已刷新 reward/risk 参数，当前使用值为 ${value}。`;
+  }
+
+  if (/^新bar=/.test(text)) {
+    const bar = text.match(/新bar=([^\s]+)/)?.[1] || "--";
+    const price = text.match(/price=(-?\d+(?:\.\d+)?)/)?.[1];
+    const longProb = text.match(/long=(-?\d+(?:\.\d+)?)/)?.[1];
+    const shortProb = text.match(/short=(-?\d+(?:\.\d+)?)/)?.[1];
+    const mf = text.match(/mf=(-?\d+(?:\.\d+)?)/)?.[1];
+    const vol = text.match(/vol=(-?\d+(?:\.\d+)?)/)?.[1];
+    const atr = text.match(/atr_ratio=(-?\d+(?:\.\d+)?%)/)?.[1];
+    return `新一根已确认收盘 K 线到达：bar=${bar}，价格 ${price || "--"}，多头概率 ${longProb || "--"}，空头概率 ${shortProb || "--"}，资金流比 ${mf || "--"}，波动率 ${vol || "--"}，ATR 比率 ${atr || "--"}。`;
+  }
+
+  if (/^心跳:/.test(text)) {
+    return text
+      .replace(/^心跳:\s*运行中，/, "系统心跳正常，")
+      .replace("最近已处理bar=", "最近已处理 K 线：")
+      .replace("当前最新已收盘bar=", "当前最新已收盘 K 线：")
+      .replace("连续跳过同bar次数=", "连续跳过同一根 K 线次数：");
+  }
+
+  if (/执行开仓|开仓未成交|执行调仓|调仓未成交|执行平仓|平仓未成交/.test(text)) {
+    return humanizeTradeReason(text, text);
+  }
+
+  if (text === "无明显信号或目标为0：保持仓位不变") {
+    return "当前没有足够强的有效信号，或目标仓位接近 0，系统继续保持现有仓位不变。";
+  }
+
+  if (text === "检测到同时多空持仓，进入恢复流程，只做清仓对账，不执行新信号。") {
+    return "检测到账户同时存在多仓和空仓，系统进入异常恢复流程，只执行对账与清仓保护，不再发出新信号。";
+  }
+
+  if (text === "双边持仓仍未清理完成，本轮跳过信号执行。") {
+    return "双向持仓异常尚未完全清理，本轮为保护账户安全，系统跳过新的交易信号执行。";
+  }
+
+  if (text.startsWith("启动快照初始化失败")) {
+    return text.replace("启动快照初始化失败，将继续进入主循环:", "启动阶段快照初始化失败，但主循环仍继续运行，错误详情：");
+  }
+
+  if (text.startsWith("实盘循环异常:")) {
+    return text.replace("实盘循环异常:", "实盘主循环发生异常，已进入错误记录与下一轮恢复等待：");
+  }
+
+  if (text.startsWith("reward_risk 获取失败")) {
+    return text.replace("reward_risk 获取失败，使用默认 1.0：", "reward/risk 估算失败，系统临时回退到默认值 1.0，错误详情：");
+  }
+
+  if (text.includes("Live trading monitor started")) {
+    return text.replace(/🟢\s*Live trading monitor started \(daemon loop, poll_sec=(\d+)\)/, "实盘监控进程已启动，当前以守护模式运行，轮询间隔 $1 秒。");
+  }
+
+  if (text.includes("paper_ready_ok")) {
+    return "测试盘交易环境校验通过，API、持仓模式和基础运行条件已准备完成。";
+  }
+
+  return text;
 }
 
 function normalizeStatus(value?: string): StrategyStatus {
@@ -417,11 +558,16 @@ function buildTradeRows(bundle: ApiDashboardBundle): TradeRow[] {
         ) === "Short" ? "Short" : "Long",
       ),
       entry: toNumber(trade.entry),
+      entrySource: trade.entry_source || (toNumber(trade.entry) !== null ? "exchange_fill" : "not_recorded"),
       exit: toNumber(trade.exit),
+      exitSource: trade.exit_source || (toNumber(trade.exit) !== null ? "exchange_fill" : "not_recorded"),
       pnl: toNumber(trade.pnl),
+      pnlSource: trade.pnl_source || (toNumber(trade.pnl) !== null ? "exchange_fill" : "not_recorded"),
       fee: toNumber(trade.fee),
+      feeSource: trade.fee_source || (toNumber(trade.fee) !== null ? "exchange_fill" : "not_recorded"),
       slippage: toNumber(trade.slippage),
-      reason: trade.reason || "最近一次执行",
+      slippageSource: trade.slippage_source || (toNumber(trade.slippage) !== null ? "exchange_fill" : "not_recorded"),
+      reason: humanizeTradeReason(trade.reason || "最近一次执行"),
       status: trade.status || "Filled",
     }));
   }
@@ -443,11 +589,16 @@ function buildTradeRows(bundle: ApiDashboardBundle): TradeRow[] {
         symbol: marketSymbol,
         side: signalDirection === "Short" ? "Short" : "Long",
         entry: toNumber(bundle.status?.position?.entry_price),
+        entrySource: toNumber(bundle.status?.position?.entry_price) !== null ? "position_snapshot" : "not_recorded",
         exit: /执行平仓/.test(message) ? toNumber(bundle.status?.market?.last_price) : null,
+        exitSource: /执行平仓/.test(message) ? "market_snapshot" : "not_recorded",
         pnl: null,
+        pnlSource: "not_recorded",
         fee: null,
+        feeSource: "not_recorded",
         slippage: null,
-        reason: message,
+        slippageSource: "not_recorded",
+        reason: humanizeTradeReason(message, message),
         status: /未成交/.test(message) ? "Canceled" : "Filled",
       } as TradeRow;
     });
@@ -464,11 +615,16 @@ function buildTradeRows(bundle: ApiDashboardBundle): TradeRow[] {
         symbol: marketSymbol,
         side: signalDirection === "Short" ? "Short" : "Long",
         entry: toNumber(bundle.status?.position?.entry_price),
+        entrySource: toNumber(bundle.status?.position?.entry_price) !== null ? "position_snapshot" : "not_recorded",
         exit: lastExecution.action === "CLOSE" ? toNumber(bundle.status?.market?.last_price) : null,
+        exitSource: lastExecution.action === "CLOSE" ? "market_snapshot" : "not_recorded",
         pnl: null,
+        pnlSource: "not_recorded",
         fee: null,
+        feeSource: "not_recorded",
         slippage: null,
-        reason: lastExecution.reason || bundle.status?.decision?.reason || "最后一次执行",
+        slippageSource: "not_recorded",
+        reason: humanizeTradeReason(lastExecution.reason || bundle.status?.decision?.reason || "最后一次执行"),
         status: lastExecution.success === false ? "Canceled" : "Filled",
       },
     ];
@@ -493,7 +649,7 @@ function buildLogs(bundle: ApiDashboardBundle, fallbackLogs: LogEntry[]): LogEnt
       id: `api-log-${index}-${event.slice(0, 16)}`,
       time: parseLogTimestamp(event, bundle.generated_at || new Date().toISOString()),
       level: detectLogLevel(event),
-      message: stripLogPrefix(event),
+      message: humanizeRuntimeLogMessage(event),
     }));
 }
 

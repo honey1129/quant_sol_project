@@ -46,6 +46,28 @@ export function getTradeStatusLabel(status: TradeRow["status"]): string {
   return status;
 }
 
+export function getTradeFieldSourceLabel(source?: string): string {
+  if (source === "exchange_fill") {
+    return "交易所成交回报";
+  }
+  if (source === "position_snapshot") {
+    return "持仓快照估算";
+  }
+  if (source === "market_snapshot") {
+    return "当前市价快照";
+  }
+  if (source === "strategy_log") {
+    return "策略执行日志";
+  }
+  if (source === "runtime_decision") {
+    return "策略决策结果";
+  }
+  if (source === "not_recorded") {
+    return "暂无记录";
+  }
+  return "运行态推导";
+}
+
 export function getRiskLevelLabel(level: RiskLevel): string {
   if (level === "High") {
     return "高";

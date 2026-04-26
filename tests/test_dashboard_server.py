@@ -150,8 +150,11 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(len(trades), 3)
         self.assertEqual(trades[0]["status"], "Canceled")
         self.assertEqual(trades[0]["side"], "Short")
+        self.assertEqual(trades[0]["pnl_source"], "not_recorded")
         self.assertEqual(trades[1]["reason"], "SameDirRebalance")
+        self.assertEqual(trades[1]["entry_source"], "not_recorded")
         self.assertEqual(trades[2]["side"], "Short")
+        self.assertEqual(trades[2]["entry_source"], "position_snapshot")
 
     def test_save_strategy_params_persists_env_and_refreshes_config(self):
         dashboard_server.build_dashboard_bundle = lambda: {
