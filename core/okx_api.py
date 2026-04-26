@@ -315,7 +315,7 @@ class OKXClient:
             })
 
         df = pd.DataFrame(normalized_rows)
-        df['timestamp'] = pd.to_datetime(df['timestamp'].astype(float), unit='ms')
+        df['timestamp'] = pd.to_datetime(df['timestamp'].astype(float), unit='ms', utc=True)
         df.drop_duplicates(subset=['timestamp'], keep='last', inplace=True)
         df.sort_values('timestamp', inplace=True)
         for col in ['open', 'high', 'low', 'close', 'volume']:
@@ -378,7 +378,7 @@ class OKXClient:
             return pd.DataFrame(columns=['funding_time', 'funding_rate'])
 
         df = pd.DataFrame(all_rows)
-        df['funding_time'] = pd.to_datetime(df['fundingTime'].astype(float), unit='ms')
+        df['funding_time'] = pd.to_datetime(df['fundingTime'].astype(float), unit='ms', utc=True)
         rate_col = 'realizedRate' if 'realizedRate' in df.columns else 'fundingRate'
         df['funding_rate'] = df[rate_col].astype(float)
         df.drop_duplicates(subset=['funding_time'], keep='last', inplace=True)

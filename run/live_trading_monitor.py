@@ -10,6 +10,7 @@ from core import ml_feature_engineering, signal_engine
 from core.reward_risk import RewardRiskEstimator
 from core.strategy_core import StrategyCore
 from utils.utils import log_info, log_error, BASE_DIR
+from utils.utils import DISPLAY_TIMEZONE
 from utils.runtime_dashboard import write_runtime_dashboard_snapshot
 from config import config
 from core.okx_api import OKXClient
@@ -35,16 +36,23 @@ def load_last_bar_ts(state_path):
         raw_value = payload.get("last_bar_ts")
         if not raw_value:
             return None
-        return pd.Timestamp(raw_value)
+        return ensure_utc_timestamp(raw_value)
     except Exception:
         return None
+
+
+def ensure_utc_timestamp(value):
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is None:
+        return ts.tz_localize("UTC")
+    return ts.tz_convert("UTC")
 
 
 def persist_last_bar_ts(state_path, bar_ts):
     if bar_ts is None:
         return
     os.makedirs(os.path.dirname(state_path), exist_ok=True)
-    payload = {"last_bar_ts": pd.Timestamp(bar_ts).isoformat()}
+    payload = {"last_bar_ts": ensure_utc_timestamp(bar_ts).isoformat()}
     tmp_path = f"{state_path}.tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=True)
@@ -55,7 +63,16 @@ def normalize_ts(value):
     if value is None:
         return None
     try:
-        return pd.Timestamp(value).isoformat()
+        return ensure_utc_timestamp(value).isoformat()
+    except Exception:
+        return str(value)
+
+
+def format_display_ts(value):
+    if value is None:
+        return "None"
+    try:
+        return ensure_utc_timestamp(value).tz_convert(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         return str(value)
 
@@ -121,7 +138,7 @@ class LiveTrader:
         )
 
         if self.last_bar_ts is not None:
-            log_info(f"已恢复最近处理 bar: {self.last_bar_ts}")
+            log_info(f"已恢复最近处理 bar: {format_display_ts(self.last_bar_ts)}")
 
     def ensure_runtime_ready(self):
         self.client.ensure_trading_ready()
@@ -165,7 +182,7 @@ class LiveTrader:
 
         # merge_multi_period_features 已经只保留确认收盘bar，并对高周期特征做了滞后一根对齐。
         row = merged_df.iloc[-1]
-        bar_ts = merged_df.index[-1]
+        bar_ts = ensure_utc_timestamp(merged_df.index[-1])
         price = float(row["5m_close"])
         money_flow_ratio = float(row["money_flow_ratio"])
 
@@ -401,8 +418,8 @@ class LiveTrader:
 
         self.last_heartbeat_logged_at = now_ts
         log_info(
-            f"心跳: 运行中，最近已处理bar={self.last_bar_ts}, "
-            f"当前最新已收盘bar={current_bar_ts}, 连续跳过同bar次数={self.same_bar_skip_count}"
+            f"心跳: 运行中，最近已处理bar={format_display_ts(self.last_bar_ts)}, "
+            f"当前最新已收盘bar={format_display_ts(current_bar_ts)}, 连续跳过同bar次数={self.same_bar_skip_count}"
         )
 
     def run_once_on_new_bar(self):
@@ -447,7 +464,7 @@ class LiveTrader:
             self.client.cancel_pending_orders()
 
         log_info(
-            f"新bar={bar_ts} price={price:.4f} long={long_prob:.3f} short={short_prob:.3f} "
+            f"新bar={format_display_ts(bar_ts)} price={price:.4f} long={long_prob:.3f} short={short_prob:.3f} "
             f"mf={money_flow_ratio:.3f} vol={volatility:.6f} atr_ratio={0.0 if atr_ratio is None else atr_ratio:.4%}"
         )
 

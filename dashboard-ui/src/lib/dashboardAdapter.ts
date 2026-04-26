@@ -17,6 +17,7 @@ import type {
 } from "../types";
 
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+const DISPLAY_TIME_OFFSET = "+08:00";
 const REASON_CODE_PATTERN = /reason=([A-Za-z0-9_().,-]+)/;
 const TARGET_RATIO_PATTERN = /target_ratio=(-?\d+(?:\.\d+)?)/;
 const DELTA_QTY_PATTERN = /delta_qty=(-?\d+(?:\.\d+)?)/;
@@ -45,9 +46,8 @@ function parseLogTimestamp(value: string, fallback: string): string {
   if (!match) {
     return fallback;
   }
-  // VPS runtime logs are emitted without timezone suffix. Treat them as UTC
-  // so the UI can consistently render them in Asia/Shanghai.
-  const iso = `${match[1].replace(" ", "T").replace(",", ".")}Z`;
+  // Runtime log timestamps are rendered directly in Asia/Shanghai on the server.
+  const iso = `${match[1].replace(" ", "T").replace(",", ".")}${DISPLAY_TIME_OFFSET}`;
   const date = new Date(iso);
   return Number.isNaN(date.getTime()) ? fallback : date.toISOString();
 }

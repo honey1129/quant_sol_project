@@ -20,6 +20,7 @@ from utils.runtime_dashboard import (
     load_runtime_dashboard_status,
 )
 from utils.utils import BASE_DIR, LOG_FILE, LOGS_DIR
+from utils.utils import DISPLAY_TIMEZONE
 
 
 DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "8787"))
@@ -115,7 +116,7 @@ def log_ts_to_iso(value):
         parsed = datetime.strptime(value, "%Y-%m-%d %H:%M:%S,%f")
     except ValueError:
         return None
-    return parsed.replace(tzinfo=timezone.utc).isoformat()
+    return parsed.replace(tzinfo=DISPLAY_TIMEZONE).astimezone(timezone.utc).isoformat()
 
 
 def normalize_bar_ts(value):
@@ -124,10 +125,17 @@ def normalize_bar_ts(value):
     text = str(value).strip()
     if text in {"None", "null", ""}:
         return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=DISPLAY_TIMEZONE)
+        return parsed.astimezone(timezone.utc).isoformat()
+    except ValueError:
+        pass
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
         try:
             parsed = datetime.strptime(text, fmt)
-            return parsed.replace(tzinfo=timezone.utc).isoformat()
+            return parsed.replace(tzinfo=DISPLAY_TIMEZONE).astimezone(timezone.utc).isoformat()
         except ValueError:
             continue
     return None
