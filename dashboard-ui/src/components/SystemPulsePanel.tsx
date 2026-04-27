@@ -16,10 +16,7 @@ export function SystemPulsePanel({ systemPulse }: SystemPulsePanelProps) {
   return (
     <section className="cockpit-sidebar-panel">
       <div className="flex items-center justify-between">
-        <div>
-          <p className="panel-kicker">系统监控</p>
-          <h2 className="mt-2 text-lg font-semibold text-white">运行态脉冲</h2>
-        </div>
+        <h2 className="panel-title">运行态脉冲</h2>
         <span className="panel-chip">Live</span>
       </div>
 

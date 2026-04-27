@@ -29,10 +29,7 @@ export function RiskPanel({ risk }: RiskPanelProps) {
   return (
     <section className="terminal-panel">
       <div className="flex items-start justify-between gap-4">
-        <div>
-          <p className="panel-kicker">风险控制</p>
-          <h2 className="panel-title">风控与连接状态</h2>
-        </div>
+        <h2 className="panel-title">风控与连接状态</h2>
         <StatusBadge label={risk.riskTriggered ? "已触发" : "正常"} tone={risk.riskTriggered ? "rose" : "emerald"} />
       </div>
 

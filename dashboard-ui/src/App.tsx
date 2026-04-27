@@ -280,11 +280,7 @@ function SummaryPanel({
   return (
     <section className="terminal-panel">
       <div className="flex items-start justify-between gap-4">
-        <div>
-          <p className="panel-kicker">{kicker}</p>
-          <h2 className="panel-title">{title}</h2>
-          <p className="panel-subtitle">{description}</p>
-        </div>
+        <h2 className="panel-title">{title}</h2>
         <span className="panel-chip">{badge}</span>
       </div>
 
@@ -1205,58 +1201,60 @@ export default function App() {
   return (
     <div className="cockpit-shell">
       <aside className="cockpit-sidebar">
-        <div className="cockpit-brand">
-          <div className="cockpit-brand-mark">◫</div>
-          <div>
-            <p className="cockpit-brand-kicker">量化交易控制台</p>
-            <h1 className="cockpit-brand-title">{snapshot.strategyName}</h1>
+        <div className="cockpit-sidebar-stack">
+          <div className="cockpit-sidebar-section cockpit-brand">
+            <div className="cockpit-brand-mark">◫</div>
+            <div>
+              <p className="cockpit-brand-kicker">量化交易控制台</p>
+              <h1 className="cockpit-brand-title">{snapshot.strategyName}</h1>
+            </div>
           </div>
-        </div>
 
-        <nav className="cockpit-nav">
-          {sidebarItems.map((item) => (
-            <a
-              key={item.id}
-              href={buildPathRoute(item.id)}
-              className={`cockpit-nav-item ${item.id === currentPage ? "is-active" : ""}`}
-              onClick={(event) => handleSidebarItemClick(event, item.id)}
-              aria-current={item.id === currentPage ? "page" : undefined}
-            >
-              <span className="cockpit-nav-icon">{item.icon}</span>
-              <span className="cockpit-nav-copy">
-                <span>{item.label}</span>
-                <span className="cockpit-nav-meta">{item.description}</span>
-              </span>
-            </a>
-          ))}
-        </nav>
-
-        <section className="cockpit-sidebar-panel">
-          <div className="flex items-center justify-between">
-            <p className="panel-kicker">系统状态</p>
-            <span className="panel-chip">实时</span>
-          </div>
-          <div className="mt-5 space-y-3">
-            {systemStatusItems.map((item) => (
-              <div key={item.label} className="flex items-center justify-between text-sm">
-                <span className="text-slate-400">{item.label}</span>
-                <span className="flex items-center gap-2 font-medium text-slate-100">
-                  <span className={`h-2.5 w-2.5 rounded-full ${item.tone === "ok" ? "bg-emerald-400" : "bg-amber-400"}`} />
-                  {item.value}
+          <nav className="cockpit-sidebar-section cockpit-nav">
+            {sidebarItems.map((item) => (
+              <a
+                key={item.id}
+                href={buildPathRoute(item.id)}
+                className={`cockpit-nav-item ${item.id === currentPage ? "is-active" : ""}`}
+                onClick={(event) => handleSidebarItemClick(event, item.id)}
+                aria-current={item.id === currentPage ? "page" : undefined}
+              >
+                <span className="cockpit-nav-icon">{item.icon}</span>
+                <span className="cockpit-nav-copy">
+                  <span>{item.label}</span>
+                  <span className="cockpit-nav-meta">{item.description}</span>
                 </span>
-              </div>
+              </a>
             ))}
-          </div>
-          <div className="mt-6 rounded-2xl border border-white/8 bg-white/[0.03] p-4">
-            <p className="text-xs uppercase tracking-[0.22em] text-slate-500">运行摘要</p>
-            <p className="mt-3 text-sm text-slate-300">
-              当前页 {activePage.label} · 风险 {getRiskLevelLabel(snapshot.metrics.riskLevel)} · 持仓 {snapshot.metrics.openPositions}
-            </p>
-            <p className="mt-2 text-xs text-slate-500">
-              最近更新 {formatDateTime(snapshot.updatedAt)} · 轮询 {POLL_MS / 1000}s
-            </p>
-          </div>
-        </section>
+          </nav>
+
+          <section className="cockpit-sidebar-section cockpit-sidebar-panel">
+            <div className="flex items-center justify-between">
+              <p className="panel-kicker">系统状态</p>
+              <span className="panel-chip">实时</span>
+            </div>
+            <div className="mt-4 space-y-3">
+              {systemStatusItems.map((item) => (
+                <div key={item.label} className="flex items-center justify-between text-sm">
+                  <span className="text-slate-400">{item.label}</span>
+                  <span className="flex items-center gap-2 font-medium text-slate-100">
+                    <span className={`h-2.5 w-2.5 rounded-full ${item.tone === "ok" ? "bg-up" : "bg-amber-400"}`} />
+                    {item.value}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div className="mt-5 surface-2 p-4">
+              <p className="text-xs uppercase tracking-[0.22em] text-slate-500">运行摘要</p>
+              <p className="mt-2 text-sm text-slate-300">
+                当前页 {activePage.label} · 风险 {getRiskLevelLabel(snapshot.metrics.riskLevel)} · 持仓 {snapshot.metrics.openPositions}
+              </p>
+              <p className="mt-2 text-xs text-slate-500">
+                最近更新 {formatDateTime(snapshot.updatedAt)} · 轮询 {POLL_MS / 1000}s
+              </p>
+            </div>
+          </section>
+        </div>
       </aside>
 
       <main className="cockpit-main">
@@ -1281,26 +1279,10 @@ export default function App() {
         <section className="page-banner">
           <div className="page-banner-grid">
             <div className="page-banner-copy">
-              <p className="panel-kicker">{activePageInfo.kicker}</p>
               <h2 className="page-banner-title">{activePageInfo.title}</h2>
-              <p className="page-banner-subtitle">{activePageInfo.description}</p>
               <div className="page-banner-meta">
-                <span className="panel-pill">{activePage.label}</span>
                 <span className="panel-pill">{snapshot.marketChart.symbol}</span>
                 <span className="panel-pill">{getDataSourceLabel(snapshot.dataSource)}</span>
-              </div>
-            </div>
-
-            <div className="page-banner-stats">
-              <div className="page-banner-stat">
-                <p>策略状态</p>
-                <strong>{getStrategyStatusLabel(snapshot.status)}</strong>
-                <span>当前信号 {getSignalDirectionLabel(snapshot.signal.direction)}</span>
-              </div>
-              <div className="page-banner-stat">
-                <p>最近同步</p>
-                <strong>{formatDateTime(snapshot.updatedAt)}</strong>
-                <span>{snapshot.exchange} · 轮询 {POLL_MS / 1000}s</span>
               </div>
             </div>
           </div>
@@ -1309,25 +1291,6 @@ export default function App() {
         <div className="mt-6">
           {renderPageContent()}
         </div>
-
-        <footer className="mt-6 grid gap-4 xl:grid-cols-4">
-          <div className="cockpit-footer-stat">
-            <p>当前信号</p>
-            <strong>{getSignalDirectionLabel(snapshot.signal.direction)}</strong>
-          </div>
-          <div className="cockpit-footer-stat">
-            <p>风险等级</p>
-            <strong>{getRiskLevelLabel(snapshot.metrics.riskLevel)}</strong>
-          </div>
-          <div className="cockpit-footer-stat">
-            <p>名义敞口</p>
-            <strong>{positionMetricText.helper.replace("当前名义敞口 ", "").replace("总名义敞口 ", "")}</strong>
-          </div>
-          <div className="cockpit-footer-stat">
-            <p>账户模式</p>
-            <strong>{snapshot.metrics.openPositions > 0 ? positionMetricText.change : "空仓待命"}</strong>
-          </div>
-        </footer>
       </main>
     </div>
   );

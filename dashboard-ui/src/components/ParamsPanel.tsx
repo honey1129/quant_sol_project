@@ -25,10 +25,7 @@ export function ParamsPanel({
   return (
     <section className="terminal-panel">
       <div className="flex items-start justify-between gap-4">
-        <div>
-          <p className="panel-kicker">系统设置</p>
-          <h2 className="panel-title">策略参数面板</h2>
-        </div>
+        <h2 className="panel-title">策略参数面板</h2>
         <div className="text-right text-xs text-slate-500">
           <p>支持在线调整</p>
           <p>{savedAt ? `上次保存 ${formatClock(savedAt)} UTC+8` : "尚未保存"}</p>

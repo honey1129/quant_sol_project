@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { formatNumber } from "../lib/format";
 import type { MarketChartSnapshot } from "../types";
+import { SegmentedControl } from "./SegmentedControl";
 
 interface MarketChartPanelProps {
   marketChart: MarketChartSnapshot;
@@ -286,6 +287,10 @@ function formatAxisTimestamp(timestamp: string, timeframe: MarketTimeframeLabel)
 
 export function MarketChartPanel({ marketChart }: MarketChartPanelProps) {
   const previousSourceTimeframeRef = useRef(marketChart.timeframe);
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const [stageWidth, setStageWidth] = useState(760);
+  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+  const [hoverY, setHoverY] = useState<number | null>(null);
   const [selectedTimeframe, setSelectedTimeframe] = useState<MarketTimeframeLabel>(() =>
     pickClosestTimeframeLabel(marketChart.timeframe),
   );
@@ -298,6 +303,23 @@ export function MarketChartPanel({ marketChart }: MarketChartPanelProps) {
     previousSourceTimeframeRef.current = marketChart.timeframe;
   }, [marketChart.timeframe]);
 
+  useEffect(() => {
+    const node = stageRef.current;
+    if (!node || typeof ResizeObserver === "undefined") {
+      return;
+    }
+    const update = () => {
+      const next = node.getBoundingClientRect().width;
+      if (next > 0) {
+        setStageWidth(Math.round(next));
+      }
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+
   const chartView = buildChartCandles(marketChart.candles, marketChart.timeframe, selectedTimeframe);
   const candles = chartView.candles.length > 0 ? chartView.candles : marketChart.candles.slice(-1);
   const closes = candles.map((candle) => candle.close);
@@ -306,7 +328,7 @@ export function MarketChartPanel({ marketChart }: MarketChartPanelProps) {
   const maxPrice = Math.max(...highs);
   const minPrice = Math.min(...lows);
   const maxVolume = Math.max(...candles.map((candle) => candle.volume), 1);
-  const width = 760;
+  const width = Math.max(360, stageWidth - 32); // subtract market-stage padding (p-4 = 16px each side)
   const height = 360;
   const topPad = 28;
   const bottomPad = 44;
@@ -347,27 +369,16 @@ export function MarketChartPanel({ marketChart }: MarketChartPanelProps) {
     <section className="terminal-panel">
       <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
         <div>
-          <p className="panel-kicker">市场主图</p>
           <h2 className="panel-title">{marketChart.symbol} · {selectedTimeframe} · {marketChart.venue}</h2>
-          <p className="panel-subtitle">
-            结合近端价格结构、均线和成交量节奏，快速判断当前信号是否有趋势地基支撑。
-          </p>
           <p className="market-toolbar-note">{chartView.note}</p>
         </div>
 
-        <div className="market-toolbar">
-          {MARKET_TIMEFRAME_OPTIONS.map((item) => (
-            <button
-              key={item.label}
-              type="button"
-              className={`market-toolbar-pill ${item.label === selectedTimeframe ? "is-active" : ""}`}
-              aria-pressed={item.label === selectedTimeframe}
-              onClick={() => setSelectedTimeframe(item.label)}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
+        <SegmentedControl
+          value={selectedTimeframe}
+          options={MARKET_TIMEFRAME_OPTIONS.map((item) => ({ value: item.label, label: item.label }))}
+          onChange={(value) => setSelectedTimeframe(value as MarketTimeframeLabel)}
+          ariaLabel="K线周期"
+        />
       </div>
 
       <div className="market-headline">
@@ -385,16 +396,44 @@ export function MarketChartPanel({ marketChart }: MarketChartPanelProps) {
         </div>
       </div>
 
-      <div className="market-stage">
-        <svg viewBox={`0 0 ${width} ${height}`} className="h-full w-full" role="img" aria-label={`${marketChart.symbol} market chart`}>
+      <div ref={stageRef} className="market-stage relative">
+        <svg
+          viewBox={`0 0 ${width} ${height}`}
+          width={width}
+          height={height}
+          preserveAspectRatio="xMidYMid meet"
+          className="block"
+          role="img"
+          aria-label={`${marketChart.symbol} market chart`}
+          onMouseMove={(event) => {
+            const rect = event.currentTarget.getBoundingClientRect();
+            const scaleX = width / rect.width;
+            const scaleY = height / rect.height;
+            const localX = (event.clientX - rect.left) * scaleX;
+            const localY = (event.clientY - rect.top) * scaleY;
+            if (localX < leftPad || localX > width - rightPad || candles.length === 0) {
+              setHoveredIndex(null);
+              setHoverY(null);
+              return;
+            }
+            const rawIndex = Math.round((localX - leftPad) / Math.max(step, 1e-6));
+            const idx = Math.max(0, Math.min(candles.length - 1, rawIndex));
+            setHoveredIndex(idx);
+            setHoverY(localY);
+          }}
+          onMouseLeave={() => {
+            setHoveredIndex(null);
+            setHoverY(null);
+          }}
+        >
           <defs>
             <linearGradient id="marketVolumeUp" x1="0" x2="0" y1="0" y2="1">
-              <stop offset="0%" stopColor="#2ed29a" stopOpacity="0.9" />
-              <stop offset="100%" stopColor="#2ed29a" stopOpacity="0.25" />
+              <stop offset="0%" stopColor="var(--color-up)" stopOpacity="0.9" />
+              <stop offset="100%" stopColor="var(--color-up)" stopOpacity="0.25" />
             </linearGradient>
             <linearGradient id="marketVolumeDown" x1="0" x2="0" y1="0" y2="1">
-              <stop offset="0%" stopColor="#ff6b7a" stopOpacity="0.85" />
-              <stop offset="100%" stopColor="#ff6b7a" stopOpacity="0.24" />
+              <stop offset="0%" stopColor="var(--color-down)" stopOpacity="0.85" />
+              <stop offset="100%" stopColor="var(--color-down)" stopOpacity="0.24" />
             </linearGradient>
           </defs>
 
@@ -408,7 +447,7 @@ export function MarketChartPanel({ marketChart }: MarketChartPanelProps) {
                 stroke="rgba(129,148,188,0.12)"
                 strokeDasharray="5 5"
               />
-              <text x={width - rightPad + 18} y={label.y + 4} fill="#7f90ae" fontSize="11">
+              <text x={width - rightPad + 18} y={label.y + 4} fill="#a1adc4" fontSize="11">
                 {formatNumber(label.value, 2)}
               </text>
             </g>
@@ -423,7 +462,8 @@ export function MarketChartPanel({ marketChart }: MarketChartPanelProps) {
             const bodyY = Math.min(openY, closeY);
             const bodyHeight = Math.max(2, Math.abs(closeY - openY));
             const isUp = candle.close >= candle.open;
-            const bodyColor = isUp ? "#2fd093" : "#ff6b7a";
+            const bodyColor = isUp ? "var(--color-up)" : "var(--color-down)";
+            const bodyFill = isUp ? "rgba(47, 208, 147, 0.95)" : "rgba(255, 107, 122, 0.95)";
 
             return (
               <g key={candle.timestamp}>
@@ -434,7 +474,7 @@ export function MarketChartPanel({ marketChart }: MarketChartPanelProps) {
                   width={candleWidth}
                   height={bodyHeight}
                   rx="2"
-                  fill={isUp ? "rgba(47, 208, 147, 0.95)" : "rgba(255, 107, 122, 0.95)"}
+                  fill={bodyFill}
                 />
                 <rect
                   x={x - candleWidth / 2}
@@ -452,22 +492,115 @@ export function MarketChartPanel({ marketChart }: MarketChartPanelProps) {
           <path d={maPath(ma14)} fill="none" stroke="#ec4899" strokeWidth="1.9" />
           <path d={maPath(ma21)} fill="none" stroke="#3b82f6" strokeWidth="1.9" />
 
-          {candles.filter((_, index) => index % 6 === 0 || index === candles.length - 1).map((candle, index) => {
-            const candleIndex = candles.findIndex((item) => item.timestamp === candle.timestamp);
-            return (
+          {(() => {
+            const tickStep = Math.max(1, Math.ceil(candles.length / 7));
+            return candles
+              .map((candle, index) => ({ candle, index }))
+              .filter(({ index }) => index % tickStep === 0 || index === candles.length - 1)
+              .map(({ candle, index }) => (
+                <text
+                  key={`${candle.timestamp}-${index}`}
+                  x={xForIndex(index)}
+                  y={height - 12}
+                  textAnchor="middle"
+                  fill="#a1adc4"
+                  fontSize="11"
+                >
+                  {formatAxisTimestamp(candle.timestamp, selectedTimeframe)}
+                </text>
+              ));
+          })()}
+
+          {hoveredIndex !== null && candles[hoveredIndex] ? (
+            <g pointerEvents="none">
+              <line
+                x1={xForIndex(hoveredIndex)}
+                y1={topPad}
+                x2={xForIndex(hoveredIndex)}
+                y2={volumeTop + volumeHeight}
+                stroke="rgba(170,180,200,0.45)"
+                strokeDasharray="3 4"
+                strokeWidth="1"
+              />
+              {hoverY !== null && hoverY >= topPad && hoverY <= topPad + priceHeight ? (
+                <>
+                  <line
+                    x1={leftPad}
+                    y1={hoverY}
+                    x2={width - rightPad}
+                    y2={hoverY}
+                    stroke="rgba(170,180,200,0.45)"
+                    strokeDasharray="3 4"
+                    strokeWidth="1"
+                  />
+                  <rect
+                    x={width - rightPad + 2}
+                    y={hoverY - 9}
+                    width={56}
+                    height={18}
+                    rx={3}
+                    fill="#10192a"
+                    stroke="rgba(170,180,200,0.4)"
+                  />
+                  <text
+                    x={width - rightPad + 30}
+                    y={hoverY + 4}
+                    fontSize="11"
+                    fill="#e2e8f0"
+                    textAnchor="middle"
+                  >
+                    {formatNumber(maxPrice - ((hoverY - topPad) / priceHeight) * priceRange, 2)}
+                  </text>
+                </>
+              ) : null}
+              <rect
+                x={Math.min(width - 80, Math.max(leftPad, xForIndex(hoveredIndex) - 38))}
+                y={height - 22}
+                width={76}
+                height={18}
+                rx={3}
+                fill="#10192a"
+                stroke="rgba(170,180,200,0.4)"
+              />
               <text
-                key={`${candle.timestamp}-${index}`}
-                x={xForIndex(candleIndex)}
-                y={height - 12}
-                textAnchor="middle"
-                fill="#7f90ae"
+                x={Math.min(width - 42, Math.max(leftPad + 38, xForIndex(hoveredIndex)))}
+                y={height - 9}
                 fontSize="11"
+                fill="#e2e8f0"
+                textAnchor="middle"
               >
-                {formatAxisTimestamp(candle.timestamp, selectedTimeframe)}
+                {formatAxisTimestamp(candles[hoveredIndex].timestamp, selectedTimeframe)}
               </text>
-            );
-          })}
+            </g>
+          ) : null}
         </svg>
+
+        {hoveredIndex !== null && candles[hoveredIndex] ? (
+          <div
+            className="pointer-events-none absolute top-3 left-3 surface-1 px-3 py-2 text-xs font-mono leading-5 text-slate-200"
+            style={{ minWidth: 168 }}
+          >
+            {(() => {
+              const c = candles[hoveredIndex];
+              const isUp = c.close >= c.open;
+              return (
+                <>
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">
+                    {formatAxisTimestamp(c.timestamp, selectedTimeframe)}
+                  </div>
+                  <div className="mt-1 grid grid-cols-2 gap-x-3">
+                    <span className="text-slate-500">O</span><span className="text-right">{formatNumber(c.open, 2)}</span>
+                    <span className="text-slate-500">H</span><span className="text-right">{formatNumber(c.high, 2)}</span>
+                    <span className="text-slate-500">L</span><span className="text-right">{formatNumber(c.low, 2)}</span>
+                    <span className="text-slate-500">C</span>
+                    <span className={`text-right ${isUp ? "text-up" : "text-down"}`}>{formatNumber(c.close, 2)}</span>
+                    <span className="text-slate-500">Vol</span><span className="text-right">{formatNumber(c.volume, 0)}</span>
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+        ) : null}
       </div>
     </section>
   );

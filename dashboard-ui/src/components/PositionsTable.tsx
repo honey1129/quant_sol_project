@@ -11,10 +11,7 @@ export function PositionsTable({ positions }: PositionsTableProps) {
   return (
     <section className="terminal-panel">
       <div className="mb-5 flex items-center justify-between">
-        <div>
-          <p className="panel-kicker">当前持仓</p>
-          <h2 className="panel-title">持仓明细</h2>
-        </div>
+        <h2 className="panel-title">持仓明细</h2>
         <span className="panel-chip">{positions.length} 笔</span>
       </div>
 
@@ -27,9 +24,14 @@ export function PositionsTable({ positions }: PositionsTableProps) {
           <table className="dashboard-table">
             <thead>
               <tr>
-                {["交易对", "方向", "仓位(USDT)", "开仓价", "现价", "浮盈亏", "杠杆", "时长"].map((head) => (
-                  <th key={head}>{head}</th>
-                ))}
+                <th>交易对</th>
+                <th>方向</th>
+                <th className="text-right">仓位(USDT)</th>
+                <th className="text-right">开仓价</th>
+                <th className="text-right">现价</th>
+                <th className="text-right">浮盈亏</th>
+                <th className="text-right">杠杆</th>
+                <th className="text-right">时长</th>
               </tr>
             </thead>
             <tbody>
@@ -39,14 +41,14 @@ export function PositionsTable({ positions }: PositionsTableProps) {
                   <td>
                     <StatusBadge label={getSignalDirectionLabel(position.direction)} tone={position.direction === "Long" ? "emerald" : "rose"} />
                   </td>
-                  <td>{position.positionSize}</td>
-                  <td className="font-mono">{formatOptionalCurrency(position.entryPrice)}</td>
-                  <td className="font-mono">{formatOptionalCurrency(position.currentPrice)}</td>
-                  <td className={position.unrealizedPnl !== null && position.unrealizedPnl >= 0 ? "text-emerald-300" : "text-rose-300"}>
+                  <td className="text-right font-mono">{position.positionSize}</td>
+                  <td className="text-right font-mono">{formatOptionalCurrency(position.entryPrice)}</td>
+                  <td className="text-right font-mono">{formatOptionalCurrency(position.currentPrice)}</td>
+                  <td className={`text-right font-mono ${position.unrealizedPnl !== null && position.unrealizedPnl >= 0 ? "text-up" : "text-down"}`}>
                     {formatOptionalCurrency(position.unrealizedPnl)}
                   </td>
-                  <td>{position.leverage}</td>
-                  <td>{position.holdingTime}</td>
+                  <td className="text-right font-mono">{position.leverage}</td>
+                  <td className="text-right text-slate-300">{position.holdingTime}</td>
                 </tr>
               ))}
             </tbody>
