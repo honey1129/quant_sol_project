@@ -26,6 +26,13 @@ def order_is_acknowledged(order):
     return state in {"live", "partially_filled", "filled"}
 
 
+def order_is_filled(order):
+    if not order:
+        return False
+    state = str(order.get("state", "") or "").lower()
+    return state in {"filled", "partially_filled"}
+
+
 class OKXClient:
     def __init__(self):
         self.account_api = Account.AccountAPI(config.OKX_API_KEY, config.OKX_SECRET, config.OKX_PASSWORD, use_server_time=True, flag=config.USE_SERVER)
@@ -64,6 +71,24 @@ class OKXClient:
             return None
         data = result.get("data", [])
         return data[0] if data else None
+
+    def wait_until_filled(self, cl_ord_id, timeout_sec=5.0, poll_interval_sec=0.3):
+        if not cl_ord_id:
+            return None
+        deadline = time.monotonic() + float(timeout_sec)
+        last_order = None
+        while True:
+            order = self.get_order_by_client_id(cl_ord_id)
+            if order is not None:
+                last_order = order
+                if order_is_filled(order):
+                    return order
+                state = str(order.get("state", "") or "").lower()
+                if state in {"canceled", "rejected", "failed", "mmp_canceled"}:
+                    return None
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(poll_interval_sec)
 
     def cancel_pending_orders(self):
         pending_orders = self.list_pending_orders()
@@ -387,43 +412,61 @@ class OKXClient:
         return df[['funding_time', 'funding_rate']]
 
     ### 封装开仓/平仓逻辑(按usdt开仓)
-    def place_order_with_leverage(self, side, posSide, usd_amount, leverage,reduce_only=False, max_retry=3, sleep_sec=1):
+    def place_order_with_leverage(self, side, posSide, usd_amount, leverage, reduce_only=False, max_retry=3, sleep_sec=1, fill_timeout_sec=5.0):
         if not isinstance(usd_amount, (int, float)):
             try:
                 usd_amount = float(usd_amount)
             except Exception:
                 raise Exception(f"❌ usd_amount 类型异常: 传入了无法转换的值 '{usd_amount}'")
         cl_ord_id = build_client_order_id(config.SYMBOL, side, posSide, reduce_only)
+        cached_size = None
         for attempt in range(max_retry):
+            # 重试时先查既有订单：避免重复下单（幂等保护）
+            existing_order = self.get_order_by_client_id(cl_ord_id)
+            if order_is_filled(existing_order):
+                log_info(f"✅ 订单已成交（查询确认）: clOrdId={cl_ord_id}, state={existing_order.get('state')}")
+                return True
+            if order_is_acknowledged(existing_order):
+                final_order = self.wait_until_filled(cl_ord_id, fill_timeout_sec)
+                if final_order is not None:
+                    log_info(f"✅ 订单已受理后成交: clOrdId={cl_ord_id}")
+                    return True
+
             try:
-                market_price = self.get_price()
+                # 使用缓存 size 保证幂等（重试时 size 与首次相同）
+                if cached_size is None:
+                    market_price = self.get_price()
 
-                # ✅ 资金安全校验 (账户可用保证金检查)
-                if not reduce_only:
-                    account_info = self.get_account_balance()
-                    available_usdt = float(account_info['data'][0]['availEq'])
-                    required_margin = usd_amount  # cross模式下，本金即为保证金需求
+                    # ✅ 资金安全校验 (账户可用保证金检查)
+                    if not reduce_only:
+                        account_info = self.get_account_balance()
+                        available_usdt = float(account_info['data'][0]['availEq'])
+                        required_margin = usd_amount  # cross模式下，本金即为保证金需求
 
-                    if required_margin > available_usdt:
-                        log_error(f"❌ 保证金不足: 需 {required_margin} USDT，可用 {available_usdt} USDT，取消下单")
-                        return False
+                        if required_margin > available_usdt:
+                            log_error(f"❌ 保证金不足: 需 {required_margin} USDT，可用 {available_usdt} USDT，取消下单")
+                            return False
 
-                # ✅ 直接读取写死的合约参数
-                lot_size = config.LOT_SIZE
-                tick_size = config.TICK_SIZE
+                    # ✅ 直接读取写死的合约参数
+                    lot_size = config.LOT_SIZE
+                    tick_size = config.TICK_SIZE
 
-                # ✅ 合法计算下单数量（注意保险性精度控制）
-                order_value = usd_amount * leverage
-                raw_size = order_value / market_price
-                size = math.floor(raw_size / lot_size) * lot_size
-                size = round(size, 6)
+                    # ✅ 合法计算下单数量（注意保险性精度控制）
+                    order_value = usd_amount * leverage
+                    raw_size = order_value / market_price
+                    size = math.floor(raw_size / lot_size) * lot_size
+                    size = round(size, 6)
 
-                if size < lot_size:
-                    if reduce_only:
-                        log_info(f"🟡 平仓 size={size} 小于最小下单单位 {lot_size}，自动跳过")
-                        return False
-                    else:
-                        raise Exception(f"⚠ 下单失败: 开仓 size={size} 小于最小下单单位 {lot_size}")
+                    if size < lot_size:
+                        if reduce_only:
+                            log_info(f"🟡 平仓 size={size} 小于最小下单单位 {lot_size}，自动跳过")
+                            return False
+                        else:
+                            raise Exception(f"⚠ 下单失败: 开仓 size={size} 小于最小下单单位 {lot_size}")
+
+                    cached_size = size
+                else:
+                    size = cached_size
 
                 # ✅ 发单
                 result = self.trade_api.place_order(
@@ -440,13 +483,23 @@ class OKXClient:
                 if result['code'] == "0":
                     order_id = result['data'][0]['ordId']
                     log_info(
-                        f"✅ 下单成功: {side} {posSide} 杠杆: {leverage}x, 本金: {usd_amount} USD, 下单数量: {size} {config.SYMBOL}, 订单ID: {order_id}, clOrdId: {cl_ord_id}")
-                    return True
+                        f"✅ 下单已提交: {side} {posSide} 杠杆: {leverage}x, 本金: {usd_amount} USD, 下单数量: {size} {config.SYMBOL}, 订单ID: {order_id}, clOrdId: {cl_ord_id}")
+                    final_order = self.wait_until_filled(cl_ord_id, fill_timeout_sec)
+                    if final_order is not None:
+                        log_info(f"✅ 下单已成交: ordId={order_id}, state={final_order.get('state')}")
+                        return True
+                    log_error(f"⚠ 下单提交后 {fill_timeout_sec}s 内未确认成交，进入下一轮校验: clOrdId={cl_ord_id}")
+                    time.sleep(sleep_sec)
                 else:
                     existing_order = self.get_order_by_client_id(cl_ord_id)
-                    if order_is_acknowledged(existing_order):
-                        log_info(f"✅ 下单响应异常但订单已受理: clOrdId={cl_ord_id}, state={existing_order.get('state')}")
+                    if order_is_filled(existing_order):
+                        log_info(f"✅ 下单响应异常但订单已成交: clOrdId={cl_ord_id}")
                         return True
+                    if order_is_acknowledged(existing_order):
+                        final_order = self.wait_until_filled(cl_ord_id, fill_timeout_sec)
+                        if final_order is not None:
+                            log_info(f"✅ 下单响应异常但订单已成交: clOrdId={cl_ord_id}")
+                            return True
                     # ✅ 保险：防止无 data 崩溃
                     error_data = result.get('data', [{}])[0]
                     error_code = error_data.get('sCode', '')
@@ -456,9 +509,14 @@ class OKXClient:
 
             except Exception as e:
                 existing_order = self.get_order_by_client_id(cl_ord_id)
-                if order_is_acknowledged(existing_order):
-                    log_info(f"✅ 下单异常但订单已受理: clOrdId={cl_ord_id}, state={existing_order.get('state')}")
+                if order_is_filled(existing_order):
+                    log_info(f"✅ 下单异常但订单已成交: clOrdId={cl_ord_id}")
                     return True
+                if order_is_acknowledged(existing_order):
+                    final_order = self.wait_until_filled(cl_ord_id, fill_timeout_sec)
+                    if final_order is not None:
+                        log_info(f"✅ 下单异常但订单已成交: clOrdId={cl_ord_id}")
+                        return True
                 log_error(f"⚠ 下单异常({attempt + 1}): {e}")
                 time.sleep(sleep_sec)
 
@@ -490,9 +548,9 @@ class OKXClient:
         return self.place_order_with_leverage("buy", "short", usd_amount, leverage, reduce_only=True)
 
     ### 封装开仓/平仓逻辑(按size开仓)
-    def place_order_with_size(self, side, posSide, size, leverage, reduce_only=False, max_retry=3, sleep_sec=1):
+    def place_order_with_size(self, side, posSide, size, leverage, reduce_only=False, max_retry=3, sleep_sec=1, fill_timeout_sec=5.0):
         """
-        按“sz=size”直接下单，避免 usd_amount->size 二次floor，确保与回测 delta_qty 精确对齐。
+        按"sz=size"直接下单，避免 usd_amount->size 二次floor，确保与回测 delta_qty 精确对齐。
         """
         if not isinstance(size, (int, float)):
             try:
@@ -513,6 +571,17 @@ class OKXClient:
                 raise Exception(f"⚠ 下单失败: 开仓 size={size} 小于最小下单单位 {lot_size}")
 
         for attempt in range(max_retry):
+            # 重试时先查既有订单：避免重复下单（幂等保护）
+            existing_order = self.get_order_by_client_id(cl_ord_id)
+            if order_is_filled(existing_order):
+                log_info(f"✅ 订单已成交（查询确认，sz模式）: clOrdId={cl_ord_id}, state={existing_order.get('state')}")
+                return True
+            if order_is_acknowledged(existing_order):
+                final_order = self.wait_until_filled(cl_ord_id, fill_timeout_sec)
+                if final_order is not None:
+                    log_info(f"✅ 订单已受理后成交(sz模式): clOrdId={cl_ord_id}")
+                    return True
+
             try:
                 if not reduce_only:
                     market_price = self.get_price()
@@ -540,13 +609,23 @@ class OKXClient:
                 if result['code'] == "0":
                     order_id = result['data'][0]['ordId']
                     log_info(
-                        f"✅ 下单成功(sz模式): {side} {posSide} {leverage}x, sz={size}, reduceOnly={reduce_only}, ordId={order_id}, clOrdId={cl_ord_id}")
-                    return True
+                        f"✅ 下单已提交(sz模式): {side} {posSide} {leverage}x, sz={size}, reduceOnly={reduce_only}, ordId={order_id}, clOrdId={cl_ord_id}")
+                    final_order = self.wait_until_filled(cl_ord_id, fill_timeout_sec)
+                    if final_order is not None:
+                        log_info(f"✅ 下单已成交(sz模式): ordId={order_id}, state={final_order.get('state')}")
+                        return True
+                    log_error(f"⚠ 下单提交后 {fill_timeout_sec}s 内未确认成交(sz模式)，进入下一轮校验: clOrdId={cl_ord_id}")
+                    time.sleep(sleep_sec)
                 else:
                     existing_order = self.get_order_by_client_id(cl_ord_id)
-                    if order_is_acknowledged(existing_order):
-                        log_info(f"✅ 下单响应异常但订单已受理(sz模式): clOrdId={cl_ord_id}, state={existing_order.get('state')}")
+                    if order_is_filled(existing_order):
+                        log_info(f"✅ 下单响应异常但订单已成交(sz模式): clOrdId={cl_ord_id}")
                         return True
+                    if order_is_acknowledged(existing_order):
+                        final_order = self.wait_until_filled(cl_ord_id, fill_timeout_sec)
+                        if final_order is not None:
+                            log_info(f"✅ 下单响应异常但订单已成交(sz模式): clOrdId={cl_ord_id}")
+                            return True
                     error_data = result.get('data', [{}])[0]
                     error_code = error_data.get('sCode', '')
                     error_msg = error_data.get('sMsg', '')
@@ -555,9 +634,14 @@ class OKXClient:
 
             except Exception as e:
                 existing_order = self.get_order_by_client_id(cl_ord_id)
-                if order_is_acknowledged(existing_order):
-                    log_info(f"✅ 下单异常但订单已受理(sz模式): clOrdId={cl_ord_id}, state={existing_order.get('state')}")
+                if order_is_filled(existing_order):
+                    log_info(f"✅ 下单异常但订单已成交(sz模式): clOrdId={cl_ord_id}")
                     return True
+                if order_is_acknowledged(existing_order):
+                    final_order = self.wait_until_filled(cl_ord_id, fill_timeout_sec)
+                    if final_order is not None:
+                        log_info(f"✅ 下单异常但订单已成交(sz模式): clOrdId={cl_ord_id}")
+                        return True
                 log_error(f"⚠ 下单异常(sz模式)({attempt + 1}): {e}")
                 time.sleep(sleep_sec)
 

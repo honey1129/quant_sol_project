@@ -137,17 +137,24 @@ class StrategyCore:
 
     def _build_close_action(self, *, pos, reason, target_ratio=0.0, target_position=0.0):
         delta_qty = -float(pos)
-        self.position = 0.0
-        self.entry_price = 0.0
-        self.hold_bars = 0
-        self.reset_risk_thresholds()
         return {
             "action": "CLOSE",
             "delta_qty": delta_qty,
             "target_ratio": float(target_ratio),
             "target_position": float(target_position),
             "reason": reason,
+            "next_position": 0.0,
+            "next_entry_price": 0.0,
+            "next_hold_bars": 0,
+            "next_reset_risk": True,
         }
+
+    def apply_decision(self, decision):
+        self.position = float(decision["next_position"])
+        self.entry_price = float(decision["next_entry_price"])
+        self.hold_bars = int(decision["next_hold_bars"])
+        if decision.get("next_reset_risk"):
+            self.reset_risk_thresholds()
 
     def _resolve_directional_target_ratio(
         self,
@@ -244,15 +251,16 @@ class StrategyCore:
         # ======================
         if pos == 0:
             if abs(target_position * price) >= self.min_adjust_amount and target_position != 0:
-                self.position = target_position
-                self.entry_price = price
-                self.hold_bars = 0
                 return {
                     "action": "OPEN",
                     "delta_qty": target_position,
                     "target_ratio": target_ratio,
                     "target_position": target_position,
                     "reason": "OpenFromFlat",
+                    "next_position": float(target_position),
+                    "next_entry_price": float(price),
+                    "next_hold_bars": 0,
+                    "next_reset_risk": False,
                 }
             return {
                 "action": "HOLD",
@@ -260,6 +268,10 @@ class StrategyCore:
                 "target_ratio": target_ratio,
                 "target_position": target_position,
                 "reason": "FlatNoSignal",
+                "next_position": 0.0,
+                "next_entry_price": 0.0,
+                "next_hold_bars": 0,
+                "next_reset_risk": True,
             }
 
         # ======================
@@ -276,14 +288,18 @@ class StrategyCore:
         # ======================
         # 5) 持仓 -> 最小持有期
         # ======================
-        self.hold_bars += 1
-        if self.hold_bars < self.min_hold_bars:
+        next_hold_bars = self.hold_bars + 1
+        if next_hold_bars < self.min_hold_bars:
             return {
                 "action": "HOLD",
                 "delta_qty": 0.0,
                 "target_ratio": target_ratio,
                 "target_position": target_position,
-                "reason": f"MinHold({self.hold_bars}/{self.min_hold_bars})",
+                "reason": f"MinHold({next_hold_bars}/{self.min_hold_bars})",
+                "next_position": float(pos),
+                "next_entry_price": float(self.entry_price),
+                "next_hold_bars": next_hold_bars,
+                "next_reset_risk": False,
             }
 
         # ======================
@@ -310,18 +326,25 @@ class StrategyCore:
                         added_qty = abs(delta)
                         total_qty = existing_qty + added_qty
                         if total_qty > 0:
-                            self.entry_price = (
+                            next_entry_price = (
                                 (existing_qty * self.entry_price) +
                                 (added_qty * price)
                             ) / total_qty
+                        else:
+                            next_entry_price = self.entry_price
+                    else:
+                        next_entry_price = self.entry_price
 
-                    self.position = new_position
                     return {
                         "action": "REBALANCE",
                         "delta_qty": delta,
                         "target_ratio": target_ratio,
                         "target_position": target_position,
                         "reason": "SameDirRebalance",
+                        "next_position": float(new_position),
+                        "next_entry_price": float(next_entry_price),
+                        "next_hold_bars": next_hold_bars,
+                        "next_reset_risk": False,
                     }
 
             return {
@@ -330,6 +353,10 @@ class StrategyCore:
                 "target_ratio": target_ratio,
                 "target_position": target_position,
                 "reason": "SameDirNoRebalance",
+                "next_position": float(pos),
+                "next_entry_price": float(self.entry_price),
+                "next_hold_bars": next_hold_bars,
+                "next_reset_risk": False,
             }
 
         # ======================
@@ -345,6 +372,10 @@ class StrategyCore:
                     f"WeakReverseSignal(gap={signal_prob_gap:.3f},"
                     f"dominant={dominant_prob:.3f},ratio={abs(target_ratio):.3f})"
                 ),
+                "next_position": float(pos),
+                "next_entry_price": float(self.entry_price),
+                "next_hold_bars": next_hold_bars,
+                "next_reset_risk": False,
             }
 
         return {
@@ -353,4 +384,8 @@ class StrategyCore:
             "target_ratio": target_ratio,
             "target_position": target_position,
             "reason": "NoSignalKeep",
+            "next_position": float(pos),
+            "next_entry_price": float(self.entry_price),
+            "next_hold_bars": next_hold_bars,
+            "next_reset_risk": False,
         }

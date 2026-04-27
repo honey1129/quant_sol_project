@@ -108,6 +108,7 @@ class StrategyCoreRebalanceTests(unittest.TestCase):
 
         self.assertEqual(out["action"], "CLOSE")
         self.assertEqual(out["reason"], "TP/SL")
+        core.apply_decision(out)
         take_profit, stop_loss = core.get_risk_thresholds()
         self.assertAlmostEqual(take_profit, 0.5)
         self.assertAlmostEqual(stop_loss, 0.5)
@@ -212,6 +213,76 @@ class StrategyCoreRebalanceTests(unittest.TestCase):
 
         self.assertEqual(out["action"], "CLOSE")
         self.assertEqual(out["reason"], "ReverseClose")
+
+    def test_open_does_not_mutate_core_state(self):
+        core = self.build_core(target_ratio=0.5)
+        core.set_state(position=0.0, entry_price=0.0, hold_bars=0)
+
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.9,
+            short_prob=0.1,
+            money_flow_ratio=1.0,
+            volatility=0.01,
+        )
+
+        self.assertEqual(out["action"], "OPEN")
+        self.assertNotEqual(out["next_position"], 0.0)
+        position, entry_price, hold_bars = core.get_state()
+        self.assertEqual(position, 0.0)
+        self.assertEqual(entry_price, 0.0)
+        self.assertEqual(hold_bars, 0)
+
+    def test_close_does_not_mutate_core_state(self):
+        core = self.build_core(
+            target_ratio=0.2,
+            signal_min_prob_diff=0.12,
+            reverse_signal_min_prob_diff=0.18,
+            reverse_min_target_ratio=0.1,
+        )
+        core.set_state(position=10.0, entry_price=100.0, hold_bars=5)
+
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.35,
+            short_prob=0.65,
+            money_flow_ratio=1.0,
+            volatility=0.01,
+        )
+
+        self.assertEqual(out["action"], "CLOSE")
+        self.assertEqual(out["next_position"], 0.0)
+        position, entry_price, hold_bars = core.get_state()
+        self.assertEqual(position, 10.0)
+        self.assertEqual(entry_price, 100.0)
+        self.assertEqual(hold_bars, 5)
+
+    def test_apply_decision_writes_state(self):
+        core = self.build_core(
+            target_ratio=0.2,
+            signal_min_prob_diff=0.12,
+            reverse_signal_min_prob_diff=0.18,
+            reverse_min_target_ratio=0.1,
+        )
+        core.set_state(position=10.0, entry_price=100.0, hold_bars=5)
+
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.35,
+            short_prob=0.65,
+            money_flow_ratio=1.0,
+            volatility=0.01,
+        )
+        self.assertEqual(out["action"], "CLOSE")
+
+        core.apply_decision(out)
+        position, entry_price, hold_bars = core.get_state()
+        self.assertEqual(position, 0.0)
+        self.assertEqual(entry_price, 0.0)
+        self.assertEqual(hold_bars, 0)
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ import math
 import os
 from datetime import datetime, timezone
 
-from utils.utils import LOGS_DIR
+from utils.utils import LOGS_DIR, log_error
 
 
 RUNTIME_DASHBOARD_STATUS_PATH = os.path.join(LOGS_DIR, "runtime_dashboard_status.json")
@@ -34,13 +34,30 @@ def _safe_int(value, default=0):
         return int(default)
 
 
-def _read_json(path, default):
+def _backup_corrupt_file(path, original_error):
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    corrupt_path = f"{path}.corrupt-{ts}"
+    try:
+        os.replace(path, corrupt_path)
+        log_error(f"⚠ runtime_dashboard JSON 损坏，已备份到 {corrupt_path}: {original_error}")
+    except Exception as backup_exc:
+        log_error(
+            f"⚠ runtime_dashboard JSON 损坏且备份失败: path={path}, "
+            f"err={original_error}, backup_err={backup_exc}"
+        )
+
+
+def _read_json(path, default, *, backup_on_corrupt=False):
     if not os.path.exists(path):
         return copy.deepcopy(default)
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-    except Exception:
+    except Exception as exc:
+        if backup_on_corrupt:
+            _backup_corrupt_file(path, exc)
+        else:
+            log_error(f"⚠ runtime_dashboard JSON 损坏: path={path}, err={exc}")
         return copy.deepcopy(default)
 
 
@@ -57,16 +74,30 @@ def load_runtime_dashboard_status():
 
 
 def load_runtime_dashboard_history():
-    history = _read_json(RUNTIME_DASHBOARD_HISTORY_PATH, [])
+    history = _read_json(RUNTIME_DASHBOARD_HISTORY_PATH, [], backup_on_corrupt=True)
     return history if isinstance(history, list) else []
 
 
 def _load_or_initialize_baseline(total_eq):
-    baseline = _read_json(RUNTIME_DASHBOARD_BASELINE_PATH, {})
-    baseline_total_eq = _safe_float(baseline.get("baseline_total_eq"))
+    file_corrupt = False
+    baseline = {}
 
+    if os.path.exists(RUNTIME_DASHBOARD_BASELINE_PATH):
+        try:
+            with open(RUNTIME_DASHBOARD_BASELINE_PATH, "r", encoding="utf-8") as f:
+                baseline = json.load(f)
+        except Exception as exc:
+            file_corrupt = True
+            _backup_corrupt_file(RUNTIME_DASHBOARD_BASELINE_PATH, exc)
+            baseline = {}
+
+    baseline_total_eq = _safe_float(baseline.get("baseline_total_eq"))
     if baseline_total_eq is not None and baseline_total_eq > 0:
         return baseline_total_eq, baseline
+
+    # 损坏时拒绝静默重置：保留基线为空，等待人工修复
+    if file_corrupt:
+        return None, {}
 
     total_eq = _safe_float(total_eq)
     if total_eq is None or total_eq <= 0:

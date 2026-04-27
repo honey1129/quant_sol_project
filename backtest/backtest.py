@@ -428,16 +428,17 @@ class Backtester:
                 profit = (exec_price - entry_price) * pos_to_close
                 self.balance += profit
                 self._apply_trade_costs(pos_to_close, price, exec_price)
+                self.core.apply_decision(out)
 
                 act = "平仓" if out.get("reason") == "TP/SL" else "反向平仓"
                 self.trade_log.append((exec_row.name, act, exec_price, pos_to_close, self.balance))
 
             elif action == "OPEN":
-                new_pos, _, _ = self.core.get_state()
+                new_pos = float(out["next_position"])
                 side = self._get_trade_side(self.position, delta, action)
                 exec_price = self._apply_slippage(price, side, bar_low=bar_low, bar_high=bar_high)
                 self._apply_trade_costs(new_pos, price, exec_price)
-                self.core.set_state(new_pos, exec_price, self.core.get_state()[2])
+                self.core.set_state(new_pos, exec_price, int(out["next_hold_bars"]))
 
                 act = "开多" if new_pos > 0 else "开空"
                 self.trade_log.append((exec_row.name, act, exec_price, new_pos, self.balance))
@@ -445,7 +446,7 @@ class Backtester:
             elif action == "REBALANCE":
                 old_pos = self.position
                 old_entry = self.entry_price
-                new_pos, _, _ = self.core.get_state()
+                new_pos = float(out["next_position"])
                 side = self._get_trade_side(old_pos, delta, action)
                 exec_price = self._apply_slippage(price, side, bar_low=bar_low, bar_high=bar_high)
 
@@ -466,13 +467,16 @@ class Backtester:
                     ) / max(existing_qty + added_qty, 1e-9)
                 else:
                     new_entry = old_entry
-                self.core.set_state(new_pos, new_entry, self.core.get_state()[2])
+                self.core.set_state(new_pos, new_entry, int(out["next_hold_bars"]))
 
                 if new_pos > 0:
                     act = "加多" if delta > 0 else "减多"
                 else:
                     act = "减空" if delta > 0 else "加空"
                 self.trade_log.append((exec_row.name, act, exec_price, new_pos, self.balance))
+
+            else:
+                self.core.apply_decision(out)
 
             self.position, self.entry_price, self.hold_bars = self.core.get_state()
             self._maybe_execute_intrabar_tp_sl(exec_row, take_profit=take_profit, stop_loss=stop_loss)
