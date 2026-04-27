@@ -28,17 +28,35 @@ def should_emit_interval_log(last_emitted_at, now_ts, interval_sec):
 
 
 def load_last_bar_ts(state_path):
+    state = load_runtime_state(state_path)
+    return state.get("last_bar_ts")
+
+
+def load_runtime_state(state_path):
     if not os.path.exists(state_path):
-        return None
+        return {"last_bar_ts": None, "hold_bars": 0}
     try:
         with open(state_path, "r", encoding="utf-8") as f:
             payload = json.load(f)
-        raw_value = payload.get("last_bar_ts")
-        if not raw_value:
-            return None
-        return ensure_utc_timestamp(raw_value)
     except Exception:
-        return None
+        return {"last_bar_ts": None, "hold_bars": 0}
+
+    last_bar_ts = None
+    raw_value = payload.get("last_bar_ts")
+    if raw_value:
+        try:
+            last_bar_ts = ensure_utc_timestamp(raw_value)
+        except Exception:
+            last_bar_ts = None
+
+    try:
+        hold_bars = int(payload.get("hold_bars", 0) or 0)
+    except (TypeError, ValueError):
+        hold_bars = 0
+    if hold_bars < 0:
+        hold_bars = 0
+
+    return {"last_bar_ts": last_bar_ts, "hold_bars": hold_bars}
 
 
 def ensure_utc_timestamp(value):
@@ -49,10 +67,17 @@ def ensure_utc_timestamp(value):
 
 
 def persist_last_bar_ts(state_path, bar_ts):
-    if bar_ts is None:
+    persist_runtime_state(state_path, last_bar_ts=bar_ts, hold_bars=0)
+
+
+def persist_runtime_state(state_path, *, last_bar_ts, hold_bars):
+    if last_bar_ts is None:
         return
     os.makedirs(os.path.dirname(state_path), exist_ok=True)
-    payload = {"last_bar_ts": ensure_utc_timestamp(bar_ts).isoformat()}
+    payload = {
+        "last_bar_ts": ensure_utc_timestamp(last_bar_ts).isoformat(),
+        "hold_bars": int(hold_bars),
+    }
     tmp_path = f"{state_path}.tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=True)
@@ -88,9 +113,14 @@ class LiveTrader:
         self.MIN_ADJUST_AMOUNT = float(config.MIN_ADJUST_AMOUNT)
 
         # ===== 实盘状态 =====
-        self.hold_bars = 0
         self.state_path = LIVE_STATE_PATH
-        self.last_bar_ts = load_last_bar_ts(self.state_path) if bool(config.LIVE_PERSIST_LAST_BAR) else None
+        if bool(config.LIVE_PERSIST_LAST_BAR):
+            persisted = load_runtime_state(self.state_path)
+            self.last_bar_ts = persisted.get("last_bar_ts")
+            self.hold_bars = persisted.get("hold_bars", 0)
+        else:
+            self.last_bar_ts = None
+            self.hold_bars = 0
         self.loop_count = 0
         self.same_bar_skip_count = 0
         self.last_heartbeat_logged_at = None
@@ -184,7 +214,11 @@ class LiveTrader:
         # merge_multi_period_features 已经只保留确认收盘bar，并对高周期特征做了滞后一根对齐。
         row = merged_df.iloc[-1]
         bar_ts = ensure_utc_timestamp(merged_df.index[-1])
-        price = float(row["5m_close"])
+        try:
+            price = float(self.client.get_price())
+        except Exception as exc:
+            log_error(f"get_price 失败，回退使用 bar 收盘价: {exc}")
+            price = float(row["5m_close"])
         money_flow_ratio = float(row["money_flow_ratio"])
 
         if pd.notna(row.get("volatility_15")):
@@ -406,7 +440,7 @@ class LiveTrader:
     def _persist_last_bar_state(self, bar_ts):
         if not bool(config.LIVE_PERSIST_LAST_BAR):
             return
-        persist_last_bar_ts(self.state_path, bar_ts)
+        persist_runtime_state(self.state_path, last_bar_ts=bar_ts, hold_bars=int(self.hold_bars))
 
     def _maybe_log_same_bar_heartbeat(self, current_bar_ts):
         now_ts = time.monotonic()
@@ -458,7 +492,6 @@ class LiveTrader:
 
         self.same_bar_skip_count = 0
         self.last_bar_ts = bar_ts
-        self._persist_last_bar_state(bar_ts)
         self.last_heartbeat_logged_at = time.monotonic()
 
         if bool(config.LIVE_RECONCILE_PENDING_ORDERS):
@@ -528,6 +561,7 @@ class LiveTrader:
                 log_info(f"执行平仓: reason={out['reason']}")
             else:
                 log_error(f"平仓未成交，已重新同步仓位: reason={out['reason']}")
+            self._persist_last_bar_state(bar_ts)
             return
 
         elif action == "OPEN":
@@ -554,6 +588,7 @@ class LiveTrader:
                 log_info(f"执行开仓: target_ratio={out['target_ratio']:.3f}, qty={abs(delta):.6f}")
             else:
                 log_error(f"开仓未成交，已重新同步仓位: target_ratio={out['target_ratio']:.3f}, qty={abs(delta):.6f}")
+            self._persist_last_bar_state(bar_ts)
             return
 
         elif action == "REBALANCE":
@@ -580,10 +615,12 @@ class LiveTrader:
                 log_info(f"执行调仓: delta_qty={delta:.6f}, reason={out['reason']}")
             else:
                 log_error(f"调仓未成交，已重新同步仓位: delta_qty={delta:.6f}, reason={out['reason']}")
+            self._persist_last_bar_state(bar_ts)
             return
 
         elif action == "HOLD":
-            _, _, self.hold_bars = self.core.get_state()
+            self.hold_bars = int(out.get("next_hold_bars", self.hold_bars))
+            self.core.set_state(pos_qty, entry_price, self.hold_bars)
             self._write_dashboard_snapshot(
                 runtime_status="running",
                 latest_closed_bar_ts=bar_ts,
@@ -594,6 +631,7 @@ class LiveTrader:
                 decision=decision,
             )
             log_info("无明显信号或目标为0：保持仓位不变")
+            self._persist_last_bar_state(bar_ts)
             return
 
 
