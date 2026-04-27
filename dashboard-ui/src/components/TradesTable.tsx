@@ -21,10 +21,7 @@ export function TradesTable({ trades }: TradesTableProps) {
   return (
     <section className="terminal-panel">
       <div className="mb-5 flex items-center justify-between">
-        <div>
-          <p className="panel-kicker">最近成交</p>
-          <h2 className="panel-title">执行记录</h2>
-        </div>
+        <h2 className="panel-title">执行记录</h2>
         <span className="panel-chip">{trades.length} 笔</span>
       </div>
 
@@ -37,22 +34,27 @@ export function TradesTable({ trades }: TradesTableProps) {
           <table className="dashboard-table">
             <thead>
               <tr>
-                {["时间", "标的", "方向", "开仓", "平仓", "盈亏", "原因", "状态"].map((head) => (
-                  <th key={head}>{head}</th>
-                ))}
+                <th>时间</th>
+                <th>标的</th>
+                <th>方向</th>
+                <th className="text-right">开仓</th>
+                <th className="text-right">平仓</th>
+                <th className="text-right">盈亏</th>
+                <th>原因</th>
+                <th>状态</th>
               </tr>
             </thead>
             <tbody>
               {trades.map((trade, index) => (
                 <tr key={`${trade.symbol}-${index}`}>
-                  <td className="font-mono">{formatDateTime(trade.time)}</td>
+                  <td className="font-mono text-slate-300">{formatDateTime(trade.time)}</td>
                   <td className="font-semibold text-slate-50">{trade.symbol}</td>
                   <td>
                     <StatusBadge label={getSignalDirectionLabel(trade.side)} tone={trade.side === "Long" ? "emerald" : "rose"} />
                   </td>
-                  <td className="font-mono">{formatOptionalCurrency(trade.entry)}</td>
-                  <td className="font-mono">{formatOptionalCurrency(trade.exit)}</td>
-                  <td className={trade.pnl !== null && trade.pnl >= 0 ? "text-emerald-300" : "text-rose-300"}>
+                  <td className="text-right font-mono">{formatOptionalCurrency(trade.entry)}</td>
+                  <td className="text-right font-mono">{formatOptionalCurrency(trade.exit)}</td>
+                  <td className={`text-right font-mono ${trade.pnl !== null && trade.pnl >= 0 ? "text-up" : "text-down"}`}>
                     {formatOptionalCurrency(trade.pnl)}
                   </td>
                   <td className="max-w-[280px] text-slate-400">{trade.reason}</td>

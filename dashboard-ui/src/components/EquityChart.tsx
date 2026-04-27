@@ -25,14 +25,8 @@ export function EquityChart({ data, range, onRangeChange }: EquityChartProps) {
 
   return (
     <section className="terminal-panel">
-      <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
-        <div>
-          <p className="panel-kicker">策略累计收益曲线</p>
-          <h2 className="panel-title">资金曲线与基准对比</h2>
-          <p className="panel-subtitle">
-            统一观察账户权益、标准化基准与近期拐点，快速识别 Alpha 是否在扩张。
-          </p>
-        </div>
+      <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+        <h2 className="panel-title">资金曲线与基准对比</h2>
         <div className="flex flex-col items-start gap-3 xl:items-end">
           <RangeTabs value={range} onChange={onRangeChange} />
           <p className="text-xs text-slate-500">
@@ -58,17 +52,17 @@ export function EquityChart({ data, range, onRangeChange }: EquityChartProps) {
             <XAxis
               dataKey="timestamp"
               tickFormatter={(value) => formatAxisTime(value, compactAxis)}
-              stroke="#61708d"
+              stroke="#a1adc4"
               minTickGap={28}
             />
-            <YAxis tickFormatter={(value) => formatCompact(Number(value))} stroke="#61708d" width={86} />
+            <YAxis tickFormatter={(value) => formatCompact(Number(value))} stroke="#a1adc4" width={86} />
             <Tooltip
               contentStyle={{
                 background: "rgba(10, 18, 34, 0.96)",
                 border: "1px solid rgba(120, 144, 188, 0.22)",
-                borderRadius: 18,
+                borderRadius: 12,
                 color: "#d9e7ff",
-                boxShadow: "0 18px 48px rgba(1, 6, 17, 0.38)",
+                boxShadow: "0 8px 24px rgba(0, 0, 0, 0.25)",
               }}
               labelFormatter={(value) => formatDateTime(String(value))}
               formatter={(value: number, name: string) => [formatCurrency(Number(value)), name]}

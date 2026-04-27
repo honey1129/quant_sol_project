@@ -27,10 +27,7 @@ export function SignalPanel({ signal, now }: SignalPanelProps) {
   return (
     <section className="terminal-panel">
       <div className="flex items-start justify-between gap-4">
-        <div>
-          <p className="panel-kicker">AI 信号评分</p>
-          <h2 className="panel-title">策略信号概览</h2>
-        </div>
+        <h2 className="panel-title">策略信号概览</h2>
         <StatusBadge label={getSignalDirectionLabel(signal.direction)} tone={getSignalTone(signal.direction)} pulse />
       </div>
 

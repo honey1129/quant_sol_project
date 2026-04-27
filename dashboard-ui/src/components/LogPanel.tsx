@@ -1,59 +1,40 @@
 import type { LogEntry } from "../types";
 import { formatDateTime } from "../lib/format";
 import { getLogLevelLabel } from "../lib/uiText";
-import { StatusBadge } from "./StatusBadge";
 
 interface LogPanelProps {
   logs: LogEntry[];
 }
 
-function toneFromLevel(level: LogEntry["level"]) {
-  if (level === "SUCCESS") {
-    return "emerald";
-  }
-  if (level === "WARN") {
-    return "amber";
-  }
-  if (level === "ERROR") {
-    return "rose";
-  }
-  return "sky";
-}
+const LEVEL_TONE: Record<LogEntry["level"], string> = {
+  INFO: "text-sky-300",
+  SUCCESS: "text-up",
+  WARN: "text-amber-300",
+  ERROR: "text-down",
+};
 
 export function LogPanel({ logs }: LogPanelProps) {
   return (
     <section className="terminal-panel">
-      <div className="mb-5 flex items-center justify-between">
-        <div>
-          <p className="panel-kicker">运行日志</p>
-          <h2 className="panel-title">实时系统日志</h2>
-        </div>
+      <div className="mb-4 flex items-center justify-between">
+        <h2 className="panel-title">实时系统日志</h2>
         <span className="panel-chip">{logs.length} 条</span>
       </div>
 
       {logs.length === 0 ? (
-        <div className="empty-state-panel">
-          暂无最近运行日志。
-        </div>
+        <div className="empty-state-panel">暂无最近运行日志。</div>
       ) : (
-        <div className="grid gap-3 xl:grid-cols-2">
+        <ul className="divide-y divide-white/5 font-mono text-[13px] leading-6">
           {logs.map((log) => (
-            <article
-              key={log.id}
-              className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 transition hover:border-white/15 hover:bg-white/[0.05]"
-            >
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <div className="flex items-center gap-3">
-                    <StatusBadge label={getLogLevelLabel(log.level)} tone={toneFromLevel(log.level)} />
-                    <span className="font-mono text-xs text-slate-500">{formatDateTime(log.time)}</span>
-                  </div>
-                  <p className="mt-3 text-sm leading-6 text-slate-200">{log.message}</p>
-                </div>
-              </div>
-            </article>
+            <li key={log.id} className="flex items-start gap-3 py-2">
+              <span className="shrink-0 text-xs text-slate-400">{formatDateTime(log.time)}</span>
+              <span className={`shrink-0 w-12 text-xs font-semibold uppercase tracking-wider ${LEVEL_TONE[log.level] ?? "text-slate-300"}`}>
+                {getLogLevelLabel(log.level)}
+              </span>
+              <span className="min-w-0 flex-1 break-words text-slate-200">{log.message}</span>
+            </li>
           ))}
-        </div>
+        </ul>
       )}
     </section>
   );
