@@ -441,11 +441,18 @@
   }
 
   .market-toolbar-pill {
-    @apply rounded-xl px-3 py-1.5 text-xs font-semibold text-slate-500 transition;
+    @apply rounded-xl px-3 py-1.5 text-xs font-semibold text-slate-500 transition hover:text-white;
+    background: transparent;
+    border: 0;
+    cursor: pointer;
   }
 
   .market-toolbar-pill.is-active {
     @apply bg-[#163a72] text-white shadow-[0_10px_22px_rgba(47,124,255,0.24)];
+  }
+
+  .market-toolbar-note {
+    @apply mt-2 text-xs text-slate-500;
   }
 
   .market-headline {

@@ -1,9 +1,46 @@
-import { formatDateTime, formatNumber } from "../lib/format";
+import { useEffect, useRef, useState } from "react";
+import { formatNumber } from "../lib/format";
 import type { MarketChartSnapshot } from "../types";
 
 interface MarketChartPanelProps {
   marketChart: MarketChartSnapshot;
 }
+
+type MarketTimeframeLabel = "1分" | "15分" | "1小时" | "4小时" | "1日";
+
+const MARKET_TIMEFRAME_OPTIONS: Array<{
+  label: MarketTimeframeLabel;
+  minutes: number;
+  maxCandles: number;
+}> = [
+  { label: "1分", minutes: 1, maxCandles: 90 },
+  { label: "15分", minutes: 15, maxCandles: 72 },
+  { label: "1小时", minutes: 60, maxCandles: 48 },
+  { label: "4小时", minutes: 240, maxCandles: 48 },
+  { label: "1日", minutes: 1440, maxCandles: 30 },
+];
+
+const axisTimeFormatters = {
+  intraday: new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "Asia/Shanghai",
+  }),
+  swing: new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "Asia/Shanghai",
+  }),
+  daily: new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    timeZone: "Asia/Shanghai",
+  }),
+};
 
 function average(values: number[]) {
   if (values.length === 0) {
@@ -19,8 +56,250 @@ function movingAverage(values: number[], period: number) {
   });
 }
 
+function roundPrice(value: number) {
+  return Number(value.toFixed(2));
+}
+
+function roundVolume(value: number) {
+  return Math.max(0, Math.round(value));
+}
+
+function timeframeToMinutes(timeframe: string): number | null {
+  const normalized = timeframe.trim().toLowerCase();
+  switch (normalized) {
+    case "1分":
+    case "1分钟":
+    case "1m":
+      return 1;
+    case "5分":
+    case "5分钟":
+    case "5m":
+      return 5;
+    case "15分":
+    case "15分钟":
+    case "15m":
+      return 15;
+    case "1小时":
+    case "1h":
+      return 60;
+    case "4小时":
+    case "4h":
+      return 240;
+    case "1日":
+    case "1天":
+    case "1d":
+      return 1440;
+    default: {
+      const match = normalized.match(/^(\d+)(m|h|d)$/i);
+      if (!match) {
+        return null;
+      }
+      const count = Number(match[1]);
+      const unit = match[2].toLowerCase();
+      if (unit === "m") {
+        return count;
+      }
+      if (unit === "h") {
+        return count * 60;
+      }
+      return count * 1440;
+    }
+  }
+}
+
+function normalizeTimeframeLabel(timeframe: string): MarketTimeframeLabel | null {
+  const minutes = timeframeToMinutes(timeframe);
+  if (minutes === 1) {
+    return "1分";
+  }
+  if (minutes === 15) {
+    return "15分";
+  }
+  if (minutes === 60) {
+    return "1小时";
+  }
+  if (minutes === 240) {
+    return "4小时";
+  }
+  if (minutes === 1440) {
+    return "1日";
+  }
+  return null;
+}
+
+function pickClosestTimeframeLabel(timeframe: string): MarketTimeframeLabel {
+  const exactMatch = normalizeTimeframeLabel(timeframe);
+  if (exactMatch) {
+    return exactMatch;
+  }
+
+  const minutes = timeframeToMinutes(timeframe) ?? 60;
+  return MARKET_TIMEFRAME_OPTIONS.reduce((closest, option) => {
+    return Math.abs(option.minutes - minutes) < Math.abs(closest.minutes - minutes) ? option : closest;
+  }).label;
+}
+
+function inferBaseIntervalMinutes(candles: MarketChartSnapshot["candles"], timeframe: string): number {
+  const diffs = candles
+    .slice(1)
+    .map((candle, index) => Date.parse(candle.timestamp) - Date.parse(candles[index].timestamp))
+    .filter((diff) => Number.isFinite(diff) && diff > 0)
+    .sort((a, b) => a - b);
+
+  if (diffs.length > 0) {
+    return Math.max(1, Math.round(diffs[Math.floor(diffs.length / 2)] / 60000));
+  }
+
+  return timeframeToMinutes(timeframe) ?? 60;
+}
+
+function aggregateCandles(candles: MarketChartSnapshot["candles"], targetMinutes: number) {
+  const bucketMs = targetMinutes * 60 * 1000;
+  const aggregated: MarketChartSnapshot["candles"] = [];
+
+  candles.forEach((candle) => {
+    const timestampMs = Date.parse(candle.timestamp);
+    if (!Number.isFinite(timestampMs)) {
+      aggregated.push(candle);
+      return;
+    }
+
+    const bucketCloseMs = Math.ceil(timestampMs / bucketMs) * bucketMs;
+    const currentBucket = aggregated[aggregated.length - 1];
+
+    if (!currentBucket || Date.parse(currentBucket.timestamp) !== bucketCloseMs) {
+      aggregated.push({
+        ...candle,
+        timestamp: new Date(bucketCloseMs).toISOString(),
+      });
+      return;
+    }
+
+    currentBucket.high = Math.max(currentBucket.high, candle.high);
+    currentBucket.low = Math.min(currentBucket.low, candle.low);
+    currentBucket.close = candle.close;
+    currentBucket.volume = roundVolume(currentBucket.volume + candle.volume);
+  });
+
+  return aggregated;
+}
+
+function expandCandles(
+  candles: MarketChartSnapshot["candles"],
+  baseMinutes: number,
+  targetMinutes: number,
+) {
+  const splitCount = Math.max(1, Math.round(baseMinutes / targetMinutes));
+  if (splitCount === 1) {
+    return candles;
+  }
+
+  return candles.flatMap((candle) => {
+    const candleRange = Math.max(candle.high - candle.low, 0.02);
+    const wickPadding = Math.max(candleRange / (splitCount * 4), 0.01);
+    const volumePerSplit = candle.volume / splitCount;
+    const endTimeMs = Date.parse(candle.timestamp);
+    const peakIndex = candle.close >= candle.open
+      ? splitCount - 1
+      : Math.max(0, Math.floor(splitCount * 0.35));
+    const troughIndex = candle.close >= candle.open
+      ? Math.max(0, Math.floor(splitCount * 0.35))
+      : splitCount - 1;
+
+    return Array.from({ length: splitCount }, (_, index) => {
+      const startProgress = index / splitCount;
+      const endProgress = (index + 1) / splitCount;
+      let open = candle.open + (candle.close - candle.open) * startProgress;
+      let close = candle.open + (candle.close - candle.open) * endProgress;
+      let high = Math.max(open, close) + wickPadding;
+      let low = Math.max(0, Math.min(open, close) - wickPadding);
+
+      if (index === 0) {
+        open = candle.open;
+      }
+      if (index === splitCount - 1) {
+        close = candle.close;
+      }
+      if (index === peakIndex) {
+        high = Math.max(high, candle.high);
+      }
+      if (index === troughIndex) {
+        low = Math.min(low, candle.low);
+      }
+
+      const segmentTimeMs = Number.isFinite(endTimeMs)
+        ? endTimeMs - (splitCount - index - 1) * targetMinutes * 60 * 1000
+        : Number.NaN;
+
+      return {
+        timestamp: Number.isFinite(segmentTimeMs) ? new Date(segmentTimeMs).toISOString() : candle.timestamp,
+        open: roundPrice(open),
+        high: roundPrice(high),
+        low: roundPrice(low),
+        close: roundPrice(close),
+        volume: roundVolume(volumePerSplit),
+      };
+    });
+  });
+}
+
+function buildChartCandles(
+  candles: MarketChartSnapshot["candles"],
+  sourceTimeframe: string,
+  selectedTimeframe: MarketTimeframeLabel,
+) {
+  const option = MARKET_TIMEFRAME_OPTIONS.find((item) => item.label === selectedTimeframe)
+    ?? MARKET_TIMEFRAME_OPTIONS[2];
+  const sourceLabel = normalizeTimeframeLabel(sourceTimeframe) ?? sourceTimeframe;
+  const sourceMinutes = inferBaseIntervalMinutes(candles, sourceTimeframe);
+  let nextCandles = candles;
+  let note = `源数据周期 ${sourceLabel}`;
+
+  if (sourceMinutes < option.minutes) {
+    nextCandles = aggregateCandles(candles, option.minutes);
+    note = `由 ${sourceLabel} 源数据聚合为 ${selectedTimeframe} 视图`;
+  } else if (sourceMinutes > option.minutes) {
+    nextCandles = expandCandles(candles, sourceMinutes, option.minutes);
+    note = `基于 ${sourceLabel} 源数据近似拆分为 ${selectedTimeframe} 视图`;
+  }
+
+  return {
+    candles: nextCandles.slice(-option.maxCandles),
+    note,
+  };
+}
+
+function formatAxisTimestamp(timestamp: string, timeframe: MarketTimeframeLabel) {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) {
+    return "--";
+  }
+
+  if (timeframe === "1日") {
+    return axisTimeFormatters.daily.format(date).replace(/\//g, "-");
+  }
+  if (timeframe === "1小时" || timeframe === "4小时") {
+    return axisTimeFormatters.swing.format(date).replace(/\//g, "-");
+  }
+  return axisTimeFormatters.intraday.format(date);
+}
+
 export function MarketChartPanel({ marketChart }: MarketChartPanelProps) {
-  const candles = marketChart.candles.slice(-30);
+  const previousSourceTimeframeRef = useRef(marketChart.timeframe);
+  const [selectedTimeframe, setSelectedTimeframe] = useState<MarketTimeframeLabel>(() =>
+    pickClosestTimeframeLabel(marketChart.timeframe),
+  );
+
+  useEffect(() => {
+    const previousDefault = pickClosestTimeframeLabel(previousSourceTimeframeRef.current);
+    const nextDefault = pickClosestTimeframeLabel(marketChart.timeframe);
+
+    setSelectedTimeframe((current) => (current === previousDefault ? nextDefault : current));
+    previousSourceTimeframeRef.current = marketChart.timeframe;
+  }, [marketChart.timeframe]);
+
+  const chartView = buildChartCandles(marketChart.candles, marketChart.timeframe, selectedTimeframe);
+  const candles = chartView.candles.length > 0 ? chartView.candles : marketChart.candles.slice(-1);
   const closes = candles.map((candle) => candle.close);
   const highs = candles.map((candle) => candle.high);
   const lows = candles.map((candle) => candle.low);
@@ -69,17 +348,24 @@ export function MarketChartPanel({ marketChart }: MarketChartPanelProps) {
       <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
         <div>
           <p className="panel-kicker">市场主图</p>
-          <h2 className="panel-title">{marketChart.symbol} · {marketChart.timeframe} · {marketChart.venue}</h2>
+          <h2 className="panel-title">{marketChart.symbol} · {selectedTimeframe} · {marketChart.venue}</h2>
           <p className="panel-subtitle">
             结合近端价格结构、均线和成交量节奏，快速判断当前信号是否有趋势地基支撑。
           </p>
+          <p className="market-toolbar-note">{chartView.note}</p>
         </div>
 
         <div className="market-toolbar">
-          {["1分", "15分", "1小时", "4小时", "1日"].map((item) => (
-            <span key={item} className={`market-toolbar-pill ${item === marketChart.timeframe ? "is-active" : ""}`}>
-              {item}
-            </span>
+          {MARKET_TIMEFRAME_OPTIONS.map((item) => (
+            <button
+              key={item.label}
+              type="button"
+              className={`market-toolbar-pill ${item.label === selectedTimeframe ? "is-active" : ""}`}
+              aria-pressed={item.label === selectedTimeframe}
+              onClick={() => setSelectedTimeframe(item.label)}
+            >
+              {item.label}
+            </button>
           ))}
         </div>
       </div>
@@ -177,7 +463,7 @@ export function MarketChartPanel({ marketChart }: MarketChartPanelProps) {
                 fill="#7f90ae"
                 fontSize="11"
               >
-                {formatDateTime(candle.timestamp)}
+                {formatAxisTimestamp(candle.timestamp, selectedTimeframe)}
               </text>
             );
           })}
