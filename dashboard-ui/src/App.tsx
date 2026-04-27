@@ -1,4 +1,4 @@
-import { startTransition, useEffect, useRef, useState } from "react";
+import { startTransition, useEffect, useRef, useState, type MouseEvent } from "react";
 import { dashboardSnapshot as mockSnapshot } from "./data/mockData";
 import { DrawdownChart } from "./components/DrawdownChart";
 import { LogPanel } from "./components/LogPanel";
@@ -67,6 +67,16 @@ type SidebarItem = {
 };
 
 const DEFAULT_PAGE: NavPageId = "overview";
+const pageRouteMap: Record<NavPageId, string> = {
+  overview: "/",
+  strategy: "/strategy",
+  market: "/market",
+  backtest: "/backtest",
+  live: "/live",
+  risk: "/risk",
+  account: "/account",
+  settings: "/settings",
+};
 
 function getInitialTheme(): ThemeMode {
   if (typeof window === "undefined") {
@@ -136,9 +146,21 @@ function describePositionState(
   };
 }
 
-function parseHashRoute(hash: string): NavPageId {
-  const route = hash.replace(/^#\/?/, "").trim();
+function normalizePathname(pathname: string): string {
+  const normalized = pathname.trim().replace(/\/+$/, "");
+  if (!normalized) {
+    return "/";
+  }
+
+  return normalized.startsWith("/") ? normalized : `/${normalized}`;
+}
+
+function parseHashRoute(hash: string): NavPageId | null {
+  const route = hash.replace(/^#\/?/, "").trim().toLowerCase();
   switch (route) {
+    case "":
+    case "overview":
+      return "overview";
     case "strategy":
     case "market":
     case "backtest":
@@ -148,19 +170,44 @@ function parseHashRoute(hash: string): NavPageId {
     case "settings":
       return route;
     default:
-      return DEFAULT_PAGE;
+      return null;
   }
 }
 
-function buildHashRoute(page: NavPageId): string {
-  return `#/${page}`;
+function parsePathRoute(pathname: string): NavPageId | null {
+  switch (normalizePathname(pathname).toLowerCase()) {
+    case "/":
+    case "/overview":
+      return "overview";
+    case "/strategy":
+      return "strategy";
+    case "/market":
+      return "market";
+    case "/backtest":
+      return "backtest";
+    case "/live":
+      return "live";
+    case "/risk":
+      return "risk";
+    case "/account":
+      return "account";
+    case "/settings":
+      return "settings";
+    default:
+      return null;
+  }
+}
+
+function buildPathRoute(page: NavPageId): string {
+  return pageRouteMap[page];
 }
 
 function getInitialPage(): NavPageId {
   if (typeof window === "undefined") {
     return DEFAULT_PAGE;
   }
-  return parseHashRoute(window.location.hash);
+
+  return parseHashRoute(window.location.hash) ?? parsePathRoute(window.location.pathname) ?? DEFAULT_PAGE;
 }
 
 const sidebarItems: SidebarItem[] = [
@@ -291,17 +338,28 @@ export default function App() {
     }
 
     const syncRoute = () => {
-      setCurrentPage(parseHashRoute(window.location.hash));
+      const legacyHashPage = parseHashRoute(window.location.hash);
+      if (legacyHashPage) {
+        window.history.replaceState(null, "", `${buildPathRoute(legacyHashPage)}${window.location.search}`);
+        setCurrentPage(legacyHashPage);
+        return;
+      }
+
+      const nextPage = parsePathRoute(window.location.pathname);
+      if (nextPage) {
+        setCurrentPage(nextPage);
+        return;
+      }
+
+      window.history.replaceState(null, "", `${buildPathRoute(DEFAULT_PAGE)}${window.location.search}`);
+      setCurrentPage(DEFAULT_PAGE);
     };
 
-    if (!window.location.hash) {
-      window.location.hash = buildHashRoute(DEFAULT_PAGE);
-    } else {
-      syncRoute();
-    }
-
+    syncRoute();
+    window.addEventListener("popstate", syncRoute);
     window.addEventListener("hashchange", syncRoute);
     return () => {
+      window.removeEventListener("popstate", syncRoute);
       window.removeEventListener("hashchange", syncRoute);
     };
   }, []);
@@ -928,13 +986,24 @@ export default function App() {
       return;
     }
 
-    const nextHash = buildHashRoute(page);
-    if (window.location.hash !== nextHash) {
-      window.location.hash = nextHash;
-      return;
+    const nextPath = buildPathRoute(page);
+    const currentPath = normalizePathname(window.location.pathname);
+    const targetPath = normalizePathname(nextPath);
+
+    if (currentPath !== targetPath || window.location.hash) {
+      window.history.pushState(null, "", `${nextPath}${window.location.search}`);
     }
 
     setCurrentPage(page);
+  }
+
+  function handleSidebarItemClick(event: MouseEvent<HTMLAnchorElement>, page: NavPageId) {
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+      return;
+    }
+
+    event.preventDefault();
+    navigateToPage(page);
   }
 
   function renderMetricGrid(cards: DashboardMetric[], columnsClassName: string) {
@@ -1146,11 +1215,11 @@ export default function App() {
 
         <nav className="cockpit-nav">
           {sidebarItems.map((item) => (
-            <button
+            <a
               key={item.id}
-              type="button"
+              href={buildPathRoute(item.id)}
               className={`cockpit-nav-item ${item.id === currentPage ? "is-active" : ""}`}
-              onClick={() => navigateToPage(item.id)}
+              onClick={(event) => handleSidebarItemClick(event, item.id)}
               aria-current={item.id === currentPage ? "page" : undefined}
             >
               <span className="cockpit-nav-icon">{item.icon}</span>
@@ -1158,7 +1227,7 @@ export default function App() {
                 <span>{item.label}</span>
                 <span className="cockpit-nav-meta">{item.description}</span>
               </span>
-            </button>
+            </a>
           ))}
         </nav>
 
