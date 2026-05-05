@@ -7,7 +7,7 @@
 - 更真实的回测撮合：盯市净值、手续费、滑点、资金费、bar 内 TP/SL
 - 基于 ATR / 波动率的自适应止盈止损
 - 测试盘保护：强制模拟盘、自动校验持仓模式、自动设置杠杆、启动前清挂单
-- 实盘状态保护：`clOrdId` 幂等下单、`last_bar_ts` 持久化，避免重启后重复处理同一根 K 线
+- 实盘状态保护：`clOrdId` 幂等下单、`last_bar_ts` / 冷却状态持久化，避免重启后重复处理同一根 K 线或立刻连续交易
 
 推荐使用顺序：
 
@@ -86,6 +86,7 @@ quant_sol_project/
 - 启动前可自动清理挂单
 - 每次只处理上一根已收盘 bar
 - 重启后恢复 `logs/live_trading_state.json` 中的最近处理 bar 时间戳
+- 重启后恢复 `cooldown_bars_remaining`，交易后冷却不会因为进程重启而丢失
 
 `core.okx_api` 中还补了幂等保护：
 
@@ -156,6 +157,118 @@ cp .env.example .env
 USE_SERVER=1
 LIVE_REQUIRE_SIMULATED_TRADING=1
 TELEGRAM_ENABLED=0
+```
+
+### 推荐线上测试盘 `.env`
+
+下面这份参数偏保守，目标是降低日志中暴露出的高频 rebalance、手续费磨损和过度自信信号问题。线上已有 `.env` 时，可以按需覆盖同名字段；`OKX_API_KEY`、`OKX_SECRET`、`OKX_PASSWORD`、`TELEGRAM_BOT_TOKEN` 等密钥不要提交到 Git。
+
+```env
+# 是否使用模拟盘 (0为实盘，1为模拟盘)
+USE_SERVER=1
+
+# 交易参数
+SYMBOL=SOL-USDT-SWAP
+LEVERAGE=3
+POSITION_SIZE=50
+
+# 多周期
+INTERVALS=5m,15m,1H
+WINDOWS=5m:5000,15m:5000,1H:2000
+
+# 风控参数
+TAKE_PROFIT=0.028
+STOP_LOSS=0.012
+
+# 策略阈值
+THRESHOLD_LONG=0.65
+THRESHOLD_SHORT=0.62
+
+# 合约配置
+LOT_SIZE=0.01
+TICK_SIZE=0.001
+
+# 模型路径
+MODEL_PATH=models/model_okx.pkl
+
+# 信号平滑参数
+SMOOTH_ALPHA=0.3
+
+# 模型文件路径
+MODEL_PATHS=lgb_v1:models/lgb_model.pkl,xgb_v1:models/xgb_model.pkl,rf_v1:models/rf_model.pkl
+
+# 模型权重
+MODEL_WEIGHTS=lgb_v1:0.5,xgb_v1:0.3,rf_v1:0.2
+
+# 仓位边界
+POSITION_MIN=0.08
+POSITION_MAX=0.30
+BASE_POSITION_RATIO=0.12
+MAX_POSITION_RATIO=0.30
+MIN_ADJUST_AMOUNT=75
+ADJUST_UNIT=75
+TRADE_COOLDOWN_BARS=6
+ADD_THRESHOLD=0.25
+MAX_REBALANCE_RATIO=0.25
+SIGNAL_MIN_PROB_DIFF=0.20
+MIN_SIGNAL_TARGET_RATIO=0.08
+REVERSE_SIGNAL_MIN_PROB_DIFF=0.28
+REVERSE_MIN_TARGET_RATIO=0.12
+
+# Kelly 盈亏比
+KELLY_REWARD_RISK=2.8
+
+# 动态风险预算目标波动
+TARGET_VOL=0.02
+MIN_HOLD_BARS=8
+TRAILING_EXIT=0.02
+
+MAX_POSITION=0.30
+INITIAL_BALANCE=1000
+
+# 手续费/滑点感知
+FEE_RATE=0.0005
+ESTIMATED_SLIPPAGE_BPS=5.0
+BACKTEST_SLIPPAGE_BPS=5.0
+COST_BUFFER_MULTIPLIER=2.0
+MIN_EXPECTED_NET_EDGE=0.001
+
+# TP/SL
+ADAPTIVE_TP_SL_ENABLED=true
+ATR_TAKE_PROFIT_MULTIPLIER=6.0
+ATR_STOP_LOSS_MULTIPLIER=2.4
+VOLATILITY_TAKE_PROFIT_MULTIPLIER=8.0
+VOLATILITY_STOP_LOSS_MULTIPLIER=2.8
+ADAPTIVE_TAKE_PROFIT_MIN=0.012
+ADAPTIVE_TAKE_PROFIT_MAX=0.05
+ADAPTIVE_STOP_LOSS_MIN=0.0065
+ADAPTIVE_STOP_LOSS_MAX=0.022
+MIN_TAKE_PROFIT_TO_STOP_LOSS_RATIO=2.2
+MIN_TAKE_PROFIT_COST_MULTIPLIER=6.0
+
+# Telegram 通知
+TELEGRAM_BOT_TOKEN=这里填你的token
+TELEGRAM_CHAT_ID=这里填你的chat_id
+
+TRAILING_STOP=0.03
+MAX_HOLD_BARS=96
+
+POLL_SEC=10
+```
+
+参数含义重点：
+
+- `THRESHOLD_LONG=0.65`：日志里多头表现弱于空头，所以先提高多头开仓门槛。
+- `TRADE_COOLDOWN_BARS=6`：交易后冷却 6 根 5m bar，减少连续调仓。
+- `ADD_THRESHOLD=0.25` / `MIN_ADJUST_AMOUNT=75`：目标仓位变化不够大时不 rebalance，避免小额手续费磨损。
+- `ESTIMATED_SLIPPAGE_BPS=5.0` / `MIN_EXPECTED_NET_EDGE=0.001`：只有扣掉估算手续费和滑点后仍有净边际，策略才允许开仓。
+- `POSITION_MAX=0.30` / `LEVERAGE=3`：先降低最大暴露，等测试盘稳定后再逐步放开。
+
+改完线上 `.env` 后，需要重启 PM2 进程才会生效：
+
+```bash
+pm2 restart quant_okx_paper
+pm2 restart quant_okx_dashboard
 ```
 
 ## 常用命令
