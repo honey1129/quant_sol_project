@@ -112,6 +112,27 @@ quant_sol_project/
 - 图表：净收益曲线、账户权益曲线、价格曲线、仓位曲线
 - 最近策略事件流：新 bar、心跳、开平仓、调仓、异常
 
+### 5. 真实成交审计 / 每日复盘
+
+实盘监控现在会在成功成交后记录 OKX 返回的订单与成交明细，并自动刷新当天日报：
+
+- 原始成交 JSONL：`logs/live_fills.jsonl`
+- 每日报告 JSON：`logs/daily_reports/YYYY-MM-DD.json`
+- 每日报告 Markdown：`logs/daily_reports/YYYY-MM-DD.md`
+- 最新日报快捷入口：`logs/daily_report_latest.md`
+
+每条成交记录会包含：
+
+- OKX 订单号、`clOrdId`、订单状态、方向、仓位方向
+- 实际成交均价、成交数量、名义金额
+- 交易所返回手续费；如果交易所订单没有返回手续费，则按 `FEE_RATE` 估算并标记来源
+- 相对策略参考价的滑点
+- 开平仓 / 调仓原因、信号快照、策略决策快照
+- 交易前后权益、仓位、均价
+- 对平仓和减仓交易计算毛实现 PnL 与扣费后净实现 PnL
+
+每日复盘会按动作、原因、多空方向分别归因，方便判断当天亏损来自模型方向、TP/SL、反向平仓、rebalance、手续费还是滑点。
+
 ## 环境准备
 
 ### Python
@@ -516,9 +537,27 @@ bash run/strategy_status_summary.sh
 bash run/strategy_status_summary.sh --follow
 ```
 
+### 9. 手动生成每日成交复盘
+
+实盘成交后会自动刷新当天日报；如果你想手动重建某一天的报告，可以运行：
+
+```bash
+PYTHONPATH=. .venv/bin/python -m run.daily_trade_report --date 2026-05-05
+```
+
+不传 `--date` 时默认生成今天的报告：
+
+```bash
+PYTHONPATH=. .venv/bin/python -m run.daily_trade_report
+```
+
 ## 日志与状态文件
 
 - `logs/live_trading.log`: 交易监控主日志
+- `logs/live_fills.jsonl`: 真实成交结构化记录
+- `logs/daily_reports/YYYY-MM-DD.md`: 每日成交复盘 Markdown
+- `logs/daily_reports/YYYY-MM-DD.json`: 每日成交复盘 JSON
+- `logs/daily_report_latest.md`: 最新每日复盘快捷入口
 - `logs/scheduler.log`: 调度器日志
 - `logs/live_trading_state.json`: 最近处理 bar 的持久化状态
 - `logs/runtime_dashboard_status.json`: 当前 dashboard 状态快照
@@ -536,7 +575,8 @@ python -m unittest \
   tests.test_backtest_intrabar \
   tests.test_strategy_core \
   tests.test_live_runtime_state \
-  tests.test_runtime_dashboard
+  tests.test_runtime_dashboard \
+  tests.test_trade_audit
 ```
 
 这些测试主要覆盖：
@@ -546,6 +586,7 @@ python -m unittest \
 - 自适应止盈止损阈值
 - `clOrdId` 辅助逻辑
 - `last_bar_ts` 持久化与恢复
+- 真实成交记录与每日复盘汇总
 
 ## 风险说明
 

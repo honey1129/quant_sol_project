@@ -12,6 +12,7 @@ from core.strategy_core import StrategyCore
 from utils.utils import log_info, log_error, BASE_DIR
 from utils.utils import DISPLAY_TIMEZONE
 from utils.runtime_dashboard import write_runtime_dashboard_snapshot
+from utils.trade_audit import build_trade_record, append_trade_record, write_daily_report
 from config import config
 from core.okx_api import OKXClient
 from core.position_manager import PositionManager
@@ -402,8 +403,52 @@ class LiveTrader:
             return False
 
         log_error("检测到同时多空持仓，进入恢复流程，只做清仓对账，不执行新信号。")
+        account_before = self._get_account_snapshot()
         close_long_ok = self.client.close_long_sz(long_size, config.LEVERAGE)
         close_short_ok = self.client.close_short_sz(short_size, config.LEVERAGE)
+        account_after = self._get_account_snapshot()
+        latest_long_pos, latest_short_pos = self._get_position_sides()
+
+        if isinstance(close_long_ok, dict):
+            self._record_trade_execution(
+                order_result=close_long_ok,
+                action="CLOSE",
+                reason="DualSidePosition",
+                delta_qty=-abs(long_size),
+                reference_price=price,
+                bar_ts=bar_ts,
+                signal_snapshot=signal_snapshot,
+                decision={
+                    "action": "RECONCILE_POSITIONS",
+                    "reason": "DualSidePosition",
+                },
+                account_before=account_before,
+                pos_qty_before=abs(long_size),
+                entry_price_before=float(long_pos.get("entry_price", 0) or 0),
+                account_after=account_after,
+                pos_qty_after=0.0,
+                entry_price_after=0.0,
+            )
+        if isinstance(close_short_ok, dict):
+            self._record_trade_execution(
+                order_result=close_short_ok,
+                action="CLOSE",
+                reason="DualSidePosition",
+                delta_qty=abs(short_size),
+                reference_price=price,
+                bar_ts=bar_ts,
+                signal_snapshot=signal_snapshot,
+                decision={
+                    "action": "RECONCILE_POSITIONS",
+                    "reason": "DualSidePosition",
+                },
+                account_before=account_before,
+                pos_qty_before=-abs(short_size),
+                entry_price_before=float(short_pos.get("entry_price", 0) or 0),
+                account_after=account_after,
+                pos_qty_after=0.0,
+                entry_price_after=0.0,
+            )
 
         self.last_execution = {
             "action": "RECONCILE_POSITIONS",
@@ -412,8 +457,7 @@ class LiveTrader:
             "timestamp": normalize_ts(bar_ts),
         }
 
-        account_snapshot = self._get_account_snapshot()
-        latest_long_pos, latest_short_pos = self._get_position_sides()
+        account_snapshot = account_after
         self._write_dashboard_snapshot(
             runtime_status="running",
             latest_closed_bar_ts=bar_ts,
@@ -472,6 +516,74 @@ class LiveTrader:
             hold_bars=int(self.hold_bars),
             cooldown_bars_remaining=int(self.cooldown_bars_remaining),
         )
+
+    def _record_trade_execution(
+        self,
+        *,
+        order_result,
+        action,
+        reason,
+        delta_qty,
+        reference_price,
+        bar_ts,
+        signal_snapshot,
+        decision,
+        account_before,
+        pos_qty_before,
+        entry_price_before,
+        account_after,
+        pos_qty_after,
+        entry_price_after,
+    ):
+        if not isinstance(order_result, dict):
+            return None
+
+        record = build_trade_record(
+            order_result,
+            bar_ts=bar_ts,
+            action=action,
+            reason=reason,
+            delta_qty=delta_qty,
+            reference_price=reference_price,
+            pos_qty_before=pos_qty_before,
+            entry_price_before=entry_price_before,
+            pos_qty_after=pos_qty_after,
+            entry_price_after=entry_price_after,
+            account_before=account_before,
+            account_after=account_after,
+            signal_snapshot=signal_snapshot,
+            decision=decision,
+        )
+        append_trade_record(record)
+        try:
+            summary, json_path, md_path = write_daily_report(record["trade_date"])
+            log_info(
+                f"成交已记录: date={record['trade_date']}, action={record['action']}, "
+                f"net_pnl={record['net_realized_pnl']:.2f}, fee={record['fee_abs']:.2f}, "
+                f"report={md_path}"
+            )
+            self.last_execution = {
+                "action": record["action"],
+                "reason": record["reason"],
+                "success": True,
+                "timestamp": record["executed_at"],
+                "fill_price": record["fill_price"],
+                "fee_abs": record["fee_abs"],
+                "net_realized_pnl": record["net_realized_pnl"],
+                "report_path": md_path,
+            }
+        except Exception as exc:
+            log_error(f"日报生成失败: {exc}")
+            self.last_execution = {
+                "action": record["action"],
+                "reason": record["reason"],
+                "success": True,
+                "timestamp": record["executed_at"],
+                "fill_price": record["fill_price"],
+                "fee_abs": record["fee_abs"],
+                "net_realized_pnl": record["net_realized_pnl"],
+            }
+        return record
 
     def _maybe_log_same_bar_heartbeat(self, current_bar_ts):
         now_ts = time.monotonic()
@@ -561,6 +673,9 @@ class LiveTrader:
 
         action = out["action"]
         delta = float(out["delta_qty"])
+        account_before_trade = dict(account_snapshot)
+        pos_qty_before_trade = float(pos_qty)
+        entry_price_before_trade = float(entry_price)
         decision = {
             "action": action,
             "reason": out.get("reason"),
@@ -581,12 +696,31 @@ class LiveTrader:
             self._sync_after_trade()
             account_snapshot = self._get_account_snapshot()
             pos_qty, entry_price = self._get_net_position()
-            self.last_execution = {
-                "action": "CLOSE",
-                "reason": out["reason"],
-                "success": bool(success),
-                "timestamp": normalize_ts(bar_ts),
-            }
+            trade_record = None
+            if success:
+                trade_record = self._record_trade_execution(
+                    order_result=success,
+                    action="CLOSE",
+                    reason=out["reason"],
+                    delta_qty=delta,
+                    reference_price=price,
+                    bar_ts=bar_ts,
+                    signal_snapshot=signal_snapshot,
+                    decision=decision,
+                    account_before=account_before_trade,
+                    pos_qty_before=pos_qty_before_trade,
+                    entry_price_before=entry_price_before_trade,
+                    account_after=account_snapshot,
+                    pos_qty_after=pos_qty,
+                    entry_price_after=entry_price,
+                )
+            if trade_record is None:
+                self.last_execution = {
+                    "action": "CLOSE",
+                    "reason": out["reason"],
+                    "success": bool(success),
+                    "timestamp": normalize_ts(bar_ts),
+                }
             self._write_dashboard_snapshot(
                 runtime_status="running",
                 latest_closed_bar_ts=bar_ts,
@@ -609,12 +743,31 @@ class LiveTrader:
             self._sync_after_trade()
             account_snapshot = self._get_account_snapshot()
             pos_qty, entry_price = self._get_net_position()
-            self.last_execution = {
-                "action": "OPEN",
-                "reason": out["reason"],
-                "success": bool(success),
-                "timestamp": normalize_ts(bar_ts),
-            }
+            trade_record = None
+            if success:
+                trade_record = self._record_trade_execution(
+                    order_result=success,
+                    action="OPEN",
+                    reason=out["reason"],
+                    delta_qty=delta,
+                    reference_price=price,
+                    bar_ts=bar_ts,
+                    signal_snapshot=signal_snapshot,
+                    decision=decision,
+                    account_before=account_before_trade,
+                    pos_qty_before=pos_qty_before_trade,
+                    entry_price_before=entry_price_before_trade,
+                    account_after=account_snapshot,
+                    pos_qty_after=pos_qty,
+                    entry_price_after=entry_price,
+                )
+            if trade_record is None:
+                self.last_execution = {
+                    "action": "OPEN",
+                    "reason": out["reason"],
+                    "success": bool(success),
+                    "timestamp": normalize_ts(bar_ts),
+                }
             self._write_dashboard_snapshot(
                 runtime_status="running",
                 latest_closed_bar_ts=bar_ts,
@@ -637,12 +790,31 @@ class LiveTrader:
             self._sync_after_trade()
             account_snapshot = self._get_account_snapshot()
             pos_qty, entry_price = self._get_net_position()
-            self.last_execution = {
-                "action": "REBALANCE",
-                "reason": out["reason"],
-                "success": bool(success),
-                "timestamp": normalize_ts(bar_ts),
-            }
+            trade_record = None
+            if success:
+                trade_record = self._record_trade_execution(
+                    order_result=success,
+                    action="REBALANCE",
+                    reason=out["reason"],
+                    delta_qty=delta,
+                    reference_price=price,
+                    bar_ts=bar_ts,
+                    signal_snapshot=signal_snapshot,
+                    decision=decision,
+                    account_before=account_before_trade,
+                    pos_qty_before=pos_qty_before_trade,
+                    entry_price_before=entry_price_before_trade,
+                    account_after=account_snapshot,
+                    pos_qty_after=pos_qty,
+                    entry_price_after=entry_price,
+                )
+            if trade_record is None:
+                self.last_execution = {
+                    "action": "REBALANCE",
+                    "reason": out["reason"],
+                    "success": bool(success),
+                    "timestamp": normalize_ts(bar_ts),
+                }
             self._write_dashboard_snapshot(
                 runtime_status="running",
                 latest_closed_bar_ts=bar_ts,

@@ -72,6 +72,41 @@ class OKXClient:
         data = result.get("data", [])
         return data[0] if data else None
 
+    def fetch_order_fills(self, ord_id):
+        if not ord_id:
+            return []
+        try:
+            result = self.trade_api.get_fills(
+                instType="SWAP",
+                instId=config.SYMBOL,
+                ordId=ord_id,
+            )
+        except Exception as exc:
+            log_error(f"查询订单成交明细失败: ordId={ord_id} -> {exc}")
+            return []
+
+        if result.get("code") != "0":
+            log_error(f"查询订单成交明细失败: ordId={ord_id}, result={result}")
+            return []
+        return result.get("data", []) or []
+
+    def _attach_order_fills(self, order):
+        if not order:
+            return order
+        if "_fills" in order:
+            return order
+        if not hasattr(self, "trade_api"):
+            enriched = dict(order)
+            enriched["_fills"] = []
+            return enriched
+        try:
+            fills = self.fetch_order_fills(order.get("ordId"))
+        except Exception:
+            fills = []
+        enriched = dict(order)
+        enriched["_fills"] = fills
+        return enriched
+
     def wait_until_filled(self, cl_ord_id, timeout_sec=5.0, poll_interval_sec=0.3):
         if not cl_ord_id:
             return None
@@ -82,7 +117,7 @@ class OKXClient:
             if order is not None:
                 last_order = order
                 if order_is_filled(order):
-                    return order
+                    return self._attach_order_fills(order)
                 state = str(order.get("state", "") or "").lower()
                 if state in {"canceled", "rejected", "failed", "mmp_canceled"}:
                     return None
@@ -424,13 +459,14 @@ class OKXClient:
             # 重试时先查既有订单：避免重复下单（幂等保护）
             existing_order = self.get_order_by_client_id(cl_ord_id)
             if order_is_filled(existing_order):
+                enriched = self._attach_order_fills(existing_order)
                 log_info(f"✅ 订单已成交（查询确认）: clOrdId={cl_ord_id}, state={existing_order.get('state')}")
-                return True
+                return enriched
             if order_is_acknowledged(existing_order):
                 final_order = self.wait_until_filled(cl_ord_id, fill_timeout_sec)
                 if final_order is not None:
                     log_info(f"✅ 订单已受理后成交: clOrdId={cl_ord_id}")
-                    return True
+                    return final_order
 
             try:
                 # 使用缓存 size 保证幂等（重试时 size 与首次相同）
@@ -487,19 +523,19 @@ class OKXClient:
                     final_order = self.wait_until_filled(cl_ord_id, fill_timeout_sec)
                     if final_order is not None:
                         log_info(f"✅ 下单已成交: ordId={order_id}, state={final_order.get('state')}")
-                        return True
+                        return final_order
                     log_error(f"⚠ 下单提交后 {fill_timeout_sec}s 内未确认成交，进入下一轮校验: clOrdId={cl_ord_id}")
                     time.sleep(sleep_sec)
                 else:
                     existing_order = self.get_order_by_client_id(cl_ord_id)
                     if order_is_filled(existing_order):
                         log_info(f"✅ 下单响应异常但订单已成交: clOrdId={cl_ord_id}")
-                        return True
+                        return self._attach_order_fills(existing_order)
                     if order_is_acknowledged(existing_order):
                         final_order = self.wait_until_filled(cl_ord_id, fill_timeout_sec)
                         if final_order is not None:
                             log_info(f"✅ 下单响应异常但订单已成交: clOrdId={cl_ord_id}")
-                            return True
+                            return final_order
                     # ✅ 保险：防止无 data 崩溃
                     error_data = result.get('data', [{}])[0]
                     error_code = error_data.get('sCode', '')
@@ -511,12 +547,12 @@ class OKXClient:
                 existing_order = self.get_order_by_client_id(cl_ord_id)
                 if order_is_filled(existing_order):
                     log_info(f"✅ 下单异常但订单已成交: clOrdId={cl_ord_id}")
-                    return True
+                    return self._attach_order_fills(existing_order)
                 if order_is_acknowledged(existing_order):
                     final_order = self.wait_until_filled(cl_ord_id, fill_timeout_sec)
                     if final_order is not None:
                         log_info(f"✅ 下单异常但订单已成交: clOrdId={cl_ord_id}")
-                        return True
+                        return final_order
                 log_error(f"⚠ 下单异常({attempt + 1}): {e}")
                 time.sleep(sleep_sec)
 
@@ -575,12 +611,12 @@ class OKXClient:
             existing_order = self.get_order_by_client_id(cl_ord_id)
             if order_is_filled(existing_order):
                 log_info(f"✅ 订单已成交（查询确认，sz模式）: clOrdId={cl_ord_id}, state={existing_order.get('state')}")
-                return True
+                return self._attach_order_fills(existing_order)
             if order_is_acknowledged(existing_order):
                 final_order = self.wait_until_filled(cl_ord_id, fill_timeout_sec)
                 if final_order is not None:
                     log_info(f"✅ 订单已受理后成交(sz模式): clOrdId={cl_ord_id}")
-                    return True
+                    return final_order
 
             try:
                 if not reduce_only:
@@ -613,19 +649,19 @@ class OKXClient:
                     final_order = self.wait_until_filled(cl_ord_id, fill_timeout_sec)
                     if final_order is not None:
                         log_info(f"✅ 下单已成交(sz模式): ordId={order_id}, state={final_order.get('state')}")
-                        return True
+                        return final_order
                     log_error(f"⚠ 下单提交后 {fill_timeout_sec}s 内未确认成交(sz模式)，进入下一轮校验: clOrdId={cl_ord_id}")
                     time.sleep(sleep_sec)
                 else:
                     existing_order = self.get_order_by_client_id(cl_ord_id)
                     if order_is_filled(existing_order):
                         log_info(f"✅ 下单响应异常但订单已成交(sz模式): clOrdId={cl_ord_id}")
-                        return True
+                        return self._attach_order_fills(existing_order)
                     if order_is_acknowledged(existing_order):
                         final_order = self.wait_until_filled(cl_ord_id, fill_timeout_sec)
                         if final_order is not None:
                             log_info(f"✅ 下单响应异常但订单已成交(sz模式): clOrdId={cl_ord_id}")
-                            return True
+                            return final_order
                     error_data = result.get('data', [{}])[0]
                     error_code = error_data.get('sCode', '')
                     error_msg = error_data.get('sMsg', '')
@@ -636,12 +672,12 @@ class OKXClient:
                 existing_order = self.get_order_by_client_id(cl_ord_id)
                 if order_is_filled(existing_order):
                     log_info(f"✅ 下单异常但订单已成交(sz模式): clOrdId={cl_ord_id}")
-                    return True
+                    return self._attach_order_fills(existing_order)
                 if order_is_acknowledged(existing_order):
                     final_order = self.wait_until_filled(cl_ord_id, fill_timeout_sec)
                     if final_order is not None:
                         log_info(f"✅ 下单异常但订单已成交(sz模式): clOrdId={cl_ord_id}")
-                        return True
+                        return final_order
                 log_error(f"⚠ 下单异常(sz模式)({attempt + 1}): {e}")
                 time.sleep(sleep_sec)
 
