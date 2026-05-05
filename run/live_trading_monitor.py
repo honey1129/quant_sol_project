@@ -34,12 +34,12 @@ def load_last_bar_ts(state_path):
 
 def load_runtime_state(state_path):
     if not os.path.exists(state_path):
-        return {"last_bar_ts": None, "hold_bars": 0}
+        return {"last_bar_ts": None, "hold_bars": 0, "cooldown_bars_remaining": 0}
     try:
         with open(state_path, "r", encoding="utf-8") as f:
             payload = json.load(f)
     except Exception:
-        return {"last_bar_ts": None, "hold_bars": 0}
+        return {"last_bar_ts": None, "hold_bars": 0, "cooldown_bars_remaining": 0}
 
     last_bar_ts = None
     raw_value = payload.get("last_bar_ts")
@@ -56,7 +56,18 @@ def load_runtime_state(state_path):
     if hold_bars < 0:
         hold_bars = 0
 
-    return {"last_bar_ts": last_bar_ts, "hold_bars": hold_bars}
+    try:
+        cooldown_bars_remaining = int(payload.get("cooldown_bars_remaining", 0) or 0)
+    except (TypeError, ValueError):
+        cooldown_bars_remaining = 0
+    if cooldown_bars_remaining < 0:
+        cooldown_bars_remaining = 0
+
+    return {
+        "last_bar_ts": last_bar_ts,
+        "hold_bars": hold_bars,
+        "cooldown_bars_remaining": cooldown_bars_remaining,
+    }
 
 
 def ensure_utc_timestamp(value):
@@ -67,16 +78,16 @@ def ensure_utc_timestamp(value):
 
 
 def persist_last_bar_ts(state_path, bar_ts):
-    persist_runtime_state(state_path, last_bar_ts=bar_ts, hold_bars=0)
+    persist_runtime_state(state_path, last_bar_ts=bar_ts, hold_bars=0, cooldown_bars_remaining=0)
 
-
-def persist_runtime_state(state_path, *, last_bar_ts, hold_bars):
+def persist_runtime_state(state_path, *, last_bar_ts, hold_bars, cooldown_bars_remaining=0):
     if last_bar_ts is None:
         return
     os.makedirs(os.path.dirname(state_path), exist_ok=True)
     payload = {
         "last_bar_ts": ensure_utc_timestamp(last_bar_ts).isoformat(),
         "hold_bars": int(hold_bars),
+        "cooldown_bars_remaining": max(0, int(cooldown_bars_remaining)),
     }
     tmp_path = f"{state_path}.tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
@@ -118,9 +129,11 @@ class LiveTrader:
             persisted = load_runtime_state(self.state_path)
             self.last_bar_ts = persisted.get("last_bar_ts")
             self.hold_bars = persisted.get("hold_bars", 0)
+            self.cooldown_bars_remaining = persisted.get("cooldown_bars_remaining", 0)
         else:
             self.last_bar_ts = None
             self.hold_bars = 0
+            self.cooldown_bars_remaining = 0
         self.loop_count = 0
         self.same_bar_skip_count = 0
         self.last_heartbeat_logged_at = None
@@ -165,6 +178,13 @@ class LiveTrader:
             reverse_signal_min_prob_diff=config.REVERSE_SIGNAL_MIN_PROB_DIFF,
             reverse_min_target_ratio=config.REVERSE_MIN_TARGET_RATIO,
             reward_risk=float(self.reward_risk),
+            fee_rate=float(config.FEE_RATE),
+            slippage_bps=float(config.ESTIMATED_SLIPPAGE_BPS),
+            cost_buffer_multiplier=float(config.COST_BUFFER_MULTIPLIER),
+            min_expected_net_edge=float(config.MIN_EXPECTED_NET_EDGE),
+            min_take_profit_to_stop_loss_ratio=float(config.MIN_TAKE_PROFIT_TO_STOP_LOSS_RATIO),
+            min_take_profit_cost_multiplier=float(config.MIN_TAKE_PROFIT_COST_MULTIPLIER),
+            trade_cooldown_bars=int(config.TRADE_COOLDOWN_BARS),
         )
 
         if self.last_bar_ts is not None:
@@ -326,6 +346,7 @@ class LiveTrader:
                 "same_bar_skip_count": int(self.same_bar_skip_count),
                 "poll_sec": int(config.POLL_SEC),
                 "heartbeat_interval_sec": float(self.heartbeat_log_interval_sec),
+                "cooldown_bars_remaining": int(getattr(self, "cooldown_bars_remaining", 0)),
                 "last_error": error_message,
             },
             "market": {
@@ -362,7 +383,12 @@ class LiveTrader:
             return
         if pos_qty2 == 0:
             self.hold_bars = 0
-        self.core.set_state(pos_qty2, entry_price2, self.hold_bars)
+        self.core.set_state(
+            pos_qty2,
+            entry_price2,
+            self.hold_bars,
+            cooldown_bars_remaining=self.cooldown_bars_remaining,
+        )
         _, _, self.hold_bars = self.core.get_state()
 
     def _get_position_sides(self):
@@ -440,7 +466,12 @@ class LiveTrader:
     def _persist_last_bar_state(self, bar_ts):
         if not bool(config.LIVE_PERSIST_LAST_BAR):
             return
-        persist_runtime_state(self.state_path, last_bar_ts=bar_ts, hold_bars=int(self.hold_bars))
+        persist_runtime_state(
+            self.state_path,
+            last_bar_ts=bar_ts,
+            hold_bars=int(self.hold_bars),
+            cooldown_bars_remaining=int(self.cooldown_bars_remaining),
+        )
 
     def _maybe_log_same_bar_heartbeat(self, current_bar_ts):
         now_ts = time.monotonic()
@@ -511,7 +542,12 @@ class LiveTrader:
 
         if pos_qty == 0:
             self.hold_bars = 0
-        self.core.set_state(pos_qty, entry_price, self.hold_bars)
+        self.core.set_state(
+            pos_qty,
+            entry_price,
+            self.hold_bars,
+            cooldown_bars_remaining=self.cooldown_bars_remaining,
+        )
 
         out = self.core.on_bar(
             price=price,
@@ -531,6 +567,7 @@ class LiveTrader:
             "target_ratio": float(out.get("target_ratio", 0.0) or 0.0),
             "target_position": float(out.get("target_position", 0.0) or 0.0),
             "delta_qty": delta,
+            "next_cooldown_bars": int(out.get("next_cooldown_bars", self.cooldown_bars_remaining)),
         }
 
         if action == "CLOSE":
@@ -539,6 +576,8 @@ class LiveTrader:
                 success = self.client.close_long_sz(abs(pos_qty), config.LEVERAGE)
             elif pos_qty < 0:
                 success = self.client.close_short_sz(abs(pos_qty), config.LEVERAGE)
+            if success:
+                self.cooldown_bars_remaining = int(out.get("next_cooldown_bars", self.cooldown_bars_remaining))
             self._sync_after_trade()
             account_snapshot = self._get_account_snapshot()
             pos_qty, entry_price = self._get_net_position()
@@ -566,6 +605,7 @@ class LiveTrader:
 
         elif action == "OPEN":
             success = self._execute_delta(pos_qty, delta)
+            self.cooldown_bars_remaining = int(out.get("next_cooldown_bars", self.cooldown_bars_remaining))
             self._sync_after_trade()
             account_snapshot = self._get_account_snapshot()
             pos_qty, entry_price = self._get_net_position()
@@ -593,6 +633,7 @@ class LiveTrader:
 
         elif action == "REBALANCE":
             success = self._execute_delta(pos_qty, delta)
+            self.cooldown_bars_remaining = int(out.get("next_cooldown_bars", self.cooldown_bars_remaining))
             self._sync_after_trade()
             account_snapshot = self._get_account_snapshot()
             pos_qty, entry_price = self._get_net_position()
@@ -620,7 +661,13 @@ class LiveTrader:
 
         elif action == "HOLD":
             self.hold_bars = int(out.get("next_hold_bars", self.hold_bars))
-            self.core.set_state(pos_qty, entry_price, self.hold_bars)
+            self.cooldown_bars_remaining = int(out.get("next_cooldown_bars", self.cooldown_bars_remaining))
+            self.core.set_state(
+                pos_qty,
+                entry_price,
+                self.hold_bars,
+                cooldown_bars_remaining=self.cooldown_bars_remaining,
+            )
             self._write_dashboard_snapshot(
                 runtime_status="running",
                 latest_closed_bar_ts=bar_ts,

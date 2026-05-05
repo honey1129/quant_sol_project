@@ -30,6 +30,13 @@ class StrategyCore:
         reverse_signal_min_prob_diff: float = 0.26,
         reverse_min_target_ratio: float = 0.12,
         reward_risk: float = 1.0,
+        fee_rate: float = 0.0005,
+        slippage_bps: float = 0.0,
+        cost_buffer_multiplier: float = 2.0,
+        min_expected_net_edge: float = 0.0,
+        min_take_profit_to_stop_loss_ratio: float = 2.2,
+        min_take_profit_cost_multiplier: float = 6.0,
+        trade_cooldown_bars: int = 0,
     ):
         self.pm = position_manager
 
@@ -57,10 +64,18 @@ class StrategyCore:
         self.reverse_min_target_ratio = float(reverse_min_target_ratio)
 
         self.reward_risk = float(reward_risk)
+        self.fee_rate = max(0.0, float(fee_rate))
+        self.slippage_bps = max(0.0, float(slippage_bps))
+        self.cost_buffer_multiplier = max(0.0, float(cost_buffer_multiplier))
+        self.min_expected_net_edge = float(min_expected_net_edge)
+        self.min_take_profit_to_stop_loss_ratio = max(0.0, float(min_take_profit_to_stop_loss_ratio))
+        self.min_take_profit_cost_multiplier = max(0.0, float(min_take_profit_cost_multiplier))
+        self.trade_cooldown_bars = max(0, int(trade_cooldown_bars))
 
         self.position = 0.0
         self.entry_price = 0.0
         self.hold_bars = 0
+        self.cooldown_bars_remaining = 0
         self.current_take_profit = self.take_profit
         self.current_stop_loss = self.stop_loss
 
@@ -70,6 +85,28 @@ class StrategyCore:
 
     def get_risk_thresholds(self):
         return self.current_take_profit, self.current_stop_loss
+
+    def get_cooldown_bars_remaining(self):
+        return self.cooldown_bars_remaining
+
+    def estimated_round_trip_cost_ratio(self):
+        slippage_ratio = self.slippage_bps / 10000.0
+        return 2.0 * (self.fee_rate + slippage_ratio)
+
+    def _expected_net_edge_ratio(self, dominant_prob, take_profit, stop_loss):
+        dominant_prob = float(np.clip(float(dominant_prob), 0.0, 1.0))
+        gross_edge = (
+            dominant_prob * float(take_profit) -
+            (1.0 - dominant_prob) * float(stop_loss)
+        )
+        cost_floor = self.estimated_round_trip_cost_ratio() * self.cost_buffer_multiplier
+        return gross_edge - cost_floor
+
+    def _next_hold_cooldown(self):
+        return max(0, int(self.cooldown_bars_remaining) - 1)
+
+    def _next_trade_cooldown(self):
+        return max(0, int(self.trade_cooldown_bars))
 
     def _clean_optional_ratio(self, value):
         if value is None:
@@ -103,15 +140,20 @@ class StrategyCore:
         take_profit = max(tp_candidates) if tp_candidates else self.take_profit
         stop_loss = max(sl_candidates) if sl_candidates else self.stop_loss
 
-        take_profit = float(np.clip(
-            take_profit,
-            self.adaptive_take_profit_min,
-            self.adaptive_take_profit_max,
-        ))
         stop_loss = float(np.clip(
             stop_loss,
             self.adaptive_stop_loss_min,
             self.adaptive_stop_loss_max,
+        ))
+        take_profit_floor = max(
+            self.adaptive_take_profit_min,
+            stop_loss * self.min_take_profit_to_stop_loss_ratio,
+            self.estimated_round_trip_cost_ratio() * self.min_take_profit_cost_multiplier,
+        )
+        take_profit = float(np.clip(
+            max(take_profit, take_profit_floor),
+            self.adaptive_take_profit_min,
+            self.adaptive_take_profit_max,
         ))
         return take_profit, stop_loss
 
@@ -124,11 +166,19 @@ class StrategyCore:
         self.current_stop_loss = stop_loss
         return take_profit, stop_loss
 
-    def set_state(self, position: float, entry_price: float, hold_bars: int = None):
+    def set_state(
+        self,
+        position: float,
+        entry_price: float,
+        hold_bars: int = None,
+        cooldown_bars_remaining: int = None,
+    ):
         self.position = float(position)
         self.entry_price = float(entry_price)
         if hold_bars is not None:
             self.hold_bars = int(hold_bars)
+        if cooldown_bars_remaining is not None:
+            self.cooldown_bars_remaining = max(0, int(cooldown_bars_remaining))
         if self.position == 0 or self.entry_price <= 0:
             self.reset_risk_thresholds()
 
@@ -146,6 +196,7 @@ class StrategyCore:
             "next_position": 0.0,
             "next_entry_price": 0.0,
             "next_hold_bars": 0,
+            "next_cooldown_bars": self._next_trade_cooldown(),
             "next_reset_risk": True,
         }
 
@@ -153,6 +204,8 @@ class StrategyCore:
         self.position = float(decision["next_position"])
         self.entry_price = float(decision["next_entry_price"])
         self.hold_bars = int(decision["next_hold_bars"])
+        if "next_cooldown_bars" in decision:
+            self.cooldown_bars_remaining = max(0, int(decision["next_cooldown_bars"]))
         if decision.get("next_reset_risk"):
             self.reset_risk_thresholds()
 
@@ -163,15 +216,32 @@ class StrategyCore:
         short_prob: float,
         money_flow_ratio: float,
         volatility: float,
+        take_profit: float,
+        stop_loss: float,
     ):
         long_prob = float(long_prob)
         short_prob = float(short_prob)
         prob_gap = abs(long_prob - short_prob)
+        blocked_reason = None
+
+        def passes_cost_gate(dominant_prob):
+            expected_net_edge = self._expected_net_edge_ratio(
+                dominant_prob,
+                take_profit,
+                stop_loss,
+            )
+            if expected_net_edge <= self.min_expected_net_edge:
+                return False, expected_net_edge
+            return True, expected_net_edge
 
         if long_prob >= short_prob:
             dominant_prob = long_prob
             if dominant_prob <= self.threshold_long or prob_gap < self.signal_min_prob_diff:
-                return 0.0, prob_gap, dominant_prob
+                return 0.0, prob_gap, dominant_prob, "WeakSignal", None
+
+            cost_ok, expected_net_edge = passes_cost_gate(dominant_prob)
+            if not cost_ok:
+                blocked_reason = f"CostGate(edge={expected_net_edge:.4%})"
 
             target_ratio = float(self.pm.calculate_target_ratio(
                 long_prob,
@@ -180,12 +250,18 @@ class StrategyCore:
                 self.reward_risk,
             ))
             if target_ratio < self.min_signal_target_ratio:
-                return 0.0, prob_gap, dominant_prob
-            return target_ratio, prob_gap, dominant_prob
+                return 0.0, prob_gap, dominant_prob, "SmallTarget", expected_net_edge
+            if blocked_reason is not None:
+                return 0.0, prob_gap, dominant_prob, blocked_reason, expected_net_edge
+            return target_ratio, prob_gap, dominant_prob, None, expected_net_edge
 
         dominant_prob = short_prob
         if dominant_prob <= self.threshold_short or prob_gap < self.signal_min_prob_diff:
-            return 0.0, prob_gap, dominant_prob
+            return 0.0, prob_gap, dominant_prob, "WeakSignal", None
+
+        cost_ok, expected_net_edge = passes_cost_gate(dominant_prob)
+        if not cost_ok:
+            blocked_reason = f"CostGate(edge={expected_net_edge:.4%})"
 
         target_ratio = float(self.pm.calculate_target_ratio(
             short_prob,
@@ -194,8 +270,10 @@ class StrategyCore:
             self.reward_risk,
         ))
         if target_ratio < self.min_signal_target_ratio:
-            return 0.0, prob_gap, dominant_prob
-        return -target_ratio, prob_gap, dominant_prob
+            return 0.0, prob_gap, dominant_prob, "SmallTarget", expected_net_edge
+        if blocked_reason is not None:
+            return 0.0, prob_gap, dominant_prob, blocked_reason, expected_net_edge
+        return -target_ratio, prob_gap, dominant_prob, None, expected_net_edge
 
     def on_bar(
         self,
@@ -218,6 +296,7 @@ class StrategyCore:
             volatility=volatility,
             atr_ratio=atr_ratio,
         )
+        cooldown_remaining = int(self.cooldown_bars_remaining)
 
         # ======================
         # 1) 持仓 -> 止盈止损
@@ -227,14 +306,30 @@ class StrategyCore:
             if pnl_pct >= take_profit or pnl_pct <= -stop_loss:
                 return self._build_close_action(pos=pos, reason="TP/SL")
 
+        if pos == 0 and cooldown_remaining > 0:
+            return {
+                "action": "HOLD",
+                "delta_qty": 0.0,
+                "target_ratio": 0.0,
+                "target_position": 0.0,
+                "reason": f"Cooldown({cooldown_remaining})",
+                "next_position": 0.0,
+                "next_entry_price": 0.0,
+                "next_hold_bars": 0,
+                "next_cooldown_bars": self._next_hold_cooldown(),
+                "next_reset_risk": True,
+            }
+
         # ======================
         # 2) 计算目标仓位档位
         # ======================
-        target_ratio, signal_prob_gap, dominant_prob = self._resolve_directional_target_ratio(
+        target_ratio, signal_prob_gap, dominant_prob, block_reason, expected_net_edge = self._resolve_directional_target_ratio(
             long_prob=long_prob,
             short_prob=short_prob,
             money_flow_ratio=money_flow_ratio,
             volatility=volatility,
+            take_profit=take_profit,
+            stop_loss=stop_loss,
         )
         target_position = target_ratio * equity / price
         same_direction = (pos > 0 and target_position > 0) or (pos < 0 and target_position < 0)
@@ -260,17 +355,22 @@ class StrategyCore:
                     "next_position": float(target_position),
                     "next_entry_price": float(price),
                     "next_hold_bars": 0,
+                    "next_cooldown_bars": self._next_trade_cooldown(),
                     "next_reset_risk": False,
                 }
+            flat_reason = "FlatNoSignal"
+            if block_reason is not None and expected_net_edge is not None:
+                flat_reason = f"{block_reason}"
             return {
                 "action": "HOLD",
                 "delta_qty": 0.0,
                 "target_ratio": target_ratio,
                 "target_position": target_position,
-                "reason": "FlatNoSignal",
+                "reason": flat_reason,
                 "next_position": 0.0,
                 "next_entry_price": 0.0,
                 "next_hold_bars": 0,
+                "next_cooldown_bars": self._next_hold_cooldown(),
                 "next_reset_risk": True,
             }
 
@@ -299,6 +399,7 @@ class StrategyCore:
                 "next_position": float(pos),
                 "next_entry_price": float(self.entry_price),
                 "next_hold_bars": next_hold_bars,
+                "next_cooldown_bars": self._next_hold_cooldown(),
                 "next_reset_risk": False,
             }
 
@@ -306,6 +407,20 @@ class StrategyCore:
         # 6) 同方向 -> 分段加 / 减仓
         # ======================
         if same_direction:
+            if cooldown_remaining > 0:
+                return {
+                    "action": "HOLD",
+                    "delta_qty": 0.0,
+                    "target_ratio": target_ratio,
+                    "target_position": target_position,
+                    "reason": f"Cooldown({cooldown_remaining})",
+                    "next_position": float(pos),
+                    "next_entry_price": float(self.entry_price),
+                    "next_hold_bars": next_hold_bars,
+                    "next_cooldown_bars": self._next_hold_cooldown(),
+                    "next_reset_risk": False,
+                }
+
             raw_delta = target_position - pos
             diff_ratio = raw_delta / max(abs(pos), 1e-9)
 
@@ -344,6 +459,7 @@ class StrategyCore:
                         "next_position": float(new_position),
                         "next_entry_price": float(next_entry_price),
                         "next_hold_bars": next_hold_bars,
+                        "next_cooldown_bars": self._next_trade_cooldown(),
                         "next_reset_risk": False,
                     }
 
@@ -356,12 +472,27 @@ class StrategyCore:
                 "next_position": float(pos),
                 "next_entry_price": float(self.entry_price),
                 "next_hold_bars": next_hold_bars,
+                "next_cooldown_bars": self._next_hold_cooldown(),
                 "next_reset_risk": False,
             }
 
         # ======================
         # 7) 反向弱信号 -> 持仓等待
         # ======================
+        if block_reason is not None:
+            return {
+                "action": "HOLD",
+                "delta_qty": 0.0,
+                "target_ratio": target_ratio,
+                "target_position": target_position,
+                "reason": block_reason,
+                "next_position": float(pos),
+                "next_entry_price": float(self.entry_price),
+                "next_hold_bars": next_hold_bars,
+                "next_cooldown_bars": self._next_hold_cooldown(),
+                "next_reset_risk": False,
+            }
+
         if abs(target_position) > 0:
             return {
                 "action": "HOLD",
@@ -370,11 +501,13 @@ class StrategyCore:
                 "target_position": target_position,
                 "reason": (
                     f"WeakReverseSignal(gap={signal_prob_gap:.3f},"
-                    f"dominant={dominant_prob:.3f},ratio={abs(target_ratio):.3f})"
+                    f"dominant={dominant_prob:.3f},ratio={abs(target_ratio):.3f},"
+                    f"edge={expected_net_edge:.4f})"
                 ),
                 "next_position": float(pos),
                 "next_entry_price": float(self.entry_price),
                 "next_hold_bars": next_hold_bars,
+                "next_cooldown_bars": self._next_hold_cooldown(),
                 "next_reset_risk": False,
             }
 
@@ -387,5 +520,6 @@ class StrategyCore:
             "next_position": float(pos),
             "next_entry_price": float(self.entry_price),
             "next_hold_bars": next_hold_bars,
+            "next_cooldown_bars": self._next_hold_cooldown(),
             "next_reset_risk": False,
         }

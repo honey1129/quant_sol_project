@@ -164,6 +164,13 @@ class Backtester:
             reverse_signal_min_prob_diff=config.REVERSE_SIGNAL_MIN_PROB_DIFF,
             reverse_min_target_ratio=config.REVERSE_MIN_TARGET_RATIO,
             reward_risk=float(self.reward_risk),
+            fee_rate=float(config.FEE_RATE),
+            slippage_bps=float(config.ESTIMATED_SLIPPAGE_BPS),
+            cost_buffer_multiplier=float(config.COST_BUFFER_MULTIPLIER),
+            min_expected_net_edge=float(config.MIN_EXPECTED_NET_EDGE),
+            min_take_profit_to_stop_loss_ratio=float(config.MIN_TAKE_PROFIT_TO_STOP_LOSS_RATIO),
+            min_take_profit_cost_multiplier=float(config.MIN_TAKE_PROFIT_COST_MULTIPLIER),
+            trade_cooldown_bars=int(config.TRADE_COOLDOWN_BARS),
         )
         if self.emit_diagnostics:
             self._log_intrabar_range_diagnostics()
@@ -362,7 +369,12 @@ class Backtester:
         self.position = 0.0
         self.entry_price = 0.0
         self.hold_bars = 0
-        self.core.set_state(0.0, 0.0, 0)
+        self.core.set_state(
+            0.0,
+            0.0,
+            0,
+            cooldown_bars_remaining=int(config.TRADE_COOLDOWN_BARS),
+        )
         return True
 
 
@@ -438,7 +450,12 @@ class Backtester:
                 side = self._get_trade_side(self.position, delta, action)
                 exec_price = self._apply_slippage(price, side, bar_low=bar_low, bar_high=bar_high)
                 self._apply_trade_costs(new_pos, price, exec_price)
-                self.core.set_state(new_pos, exec_price, int(out["next_hold_bars"]))
+                self.core.set_state(
+                    new_pos,
+                    exec_price,
+                    int(out["next_hold_bars"]),
+                    cooldown_bars_remaining=int(out.get("next_cooldown_bars", 0)),
+                )
 
                 act = "开多" if new_pos > 0 else "开空"
                 self.trade_log.append((exec_row.name, act, exec_price, new_pos, self.balance))
@@ -467,7 +484,12 @@ class Backtester:
                     ) / max(existing_qty + added_qty, 1e-9)
                 else:
                     new_entry = old_entry
-                self.core.set_state(new_pos, new_entry, int(out["next_hold_bars"]))
+                self.core.set_state(
+                    new_pos,
+                    new_entry,
+                    int(out["next_hold_bars"]),
+                    cooldown_bars_remaining=int(out.get("next_cooldown_bars", 0)),
+                )
 
                 if new_pos > 0:
                     act = "加多" if delta > 0 else "减多"

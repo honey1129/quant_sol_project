@@ -278,16 +278,6 @@
     @apply text-sm font-semibold text-white;
   }
 
-  .top-theme-button {
-    @apply rounded-2xl border border-white/10 px-4 py-2 text-sm font-semibold text-slate-100 transition;
-    background: #10203a;
-  }
-
-  .top-theme-button:hover {
-    border-color: rgba(47, 124, 255, 0.4);
-    background: #13294f;
-  }
-
   .panel-kicker {
     @apply text-[11px] uppercase tracking-[0.26em] text-[#6cbcff];
   }

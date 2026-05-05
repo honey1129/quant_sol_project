@@ -1,6 +1,6 @@
 import { formatDateTime } from "../lib/format";
-import { getDataSourceLabel, getStrategyStatusLabel, getThemeLabel } from "../lib/uiText";
-import type { DataSource, ExchangeName, StrategyStatus, ThemeMode } from "../types";
+import { getDataSourceLabel, getStrategyStatusLabel } from "../lib/uiText";
+import type { DataSource, ExchangeName, StrategyStatus } from "../types";
 
 interface TopNavProps {
   productName: string;
@@ -10,8 +10,6 @@ interface TopNavProps {
   updatedAt: string;
   dataSource: DataSource;
   now: Date;
-  theme: ThemeMode;
-  onThemeToggle: () => void;
 }
 
 export function TopNav({
@@ -22,8 +20,6 @@ export function TopNav({
   updatedAt,
   dataSource,
   now,
-  theme,
-  onThemeToggle,
 }: TopNavProps) {
   const nowLabel = new Intl.DateTimeFormat("zh-CN", {
     year: "numeric",
@@ -75,9 +71,6 @@ export function TopNav({
           <span className="text-slate-400">更新</span>
           <strong>{formatDateTime(updatedAt)}</strong>
         </div>
-        <button type="button" onClick={onThemeToggle} className="top-theme-button">
-          {getThemeLabel(theme)}
-        </button>
       </div>
     </header>
   );

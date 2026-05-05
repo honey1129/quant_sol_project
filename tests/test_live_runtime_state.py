@@ -37,11 +37,12 @@ class LiveRuntimeStateTests(unittest.TestCase):
             state_path = os.path.join(tmpdir, "live_state.json")
             ts = pd.Timestamp("2026-04-23 10:15:00", tz="UTC")
 
-            persist_runtime_state(state_path, last_bar_ts=ts, hold_bars=7)
+            persist_runtime_state(state_path, last_bar_ts=ts, hold_bars=7, cooldown_bars_remaining=3)
             state = load_runtime_state(state_path)
 
             self.assertEqual(state["last_bar_ts"], ts)
             self.assertEqual(state["hold_bars"], 7)
+            self.assertEqual(state["cooldown_bars_remaining"], 3)
 
     def test_load_runtime_state_legacy_payload_without_hold_bars(self):
         import json
@@ -54,6 +55,7 @@ class LiveRuntimeStateTests(unittest.TestCase):
 
             self.assertIsNotNone(state["last_bar_ts"])
             self.assertEqual(state["hold_bars"], 0)
+            self.assertEqual(state["cooldown_bars_remaining"], 0)
 
     def test_load_runtime_state_missing_file_defaults_zero(self):
         with tempfile.TemporaryDirectory() as tmpdir:

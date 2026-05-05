@@ -4,7 +4,6 @@ import type {
   RiskLevel,
   RiskSnapshot,
   SignalDirection,
-  ThemeMode,
   TimeRange,
   TradeRow,
   StrategyStatus,
@@ -112,10 +111,6 @@ export function getDataSourceLabel(dataSource: DataSource): string {
     return "混合数据";
   }
   return "模拟回退";
-}
-
-export function getThemeLabel(theme: ThemeMode): string {
-  return theme === "dark" ? "深色" : "浅色";
 }
 
 export function getTimeRangeLabel(range: TimeRange): string {

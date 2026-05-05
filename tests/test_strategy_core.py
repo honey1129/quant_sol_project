@@ -38,8 +38,8 @@ class StrategyCoreRebalanceTests(unittest.TestCase):
             StubPositionManager(target_ratio),
             threshold_long=0.55,
             threshold_short=0.55,
-            take_profit=0.5,
-            stop_loss=0.5,
+            take_profit=kwargs.pop("take_profit", 0.5),
+            stop_loss=kwargs.pop("stop_loss", 0.5),
             adaptive_tp_sl_enabled=kwargs.pop("adaptive_tp_sl_enabled", False),
             min_hold_bars=kwargs.pop("min_hold_bars", 0),
             add_threshold=kwargs.pop("add_threshold", 0.0),
@@ -283,6 +283,88 @@ class StrategyCoreRebalanceTests(unittest.TestCase):
         self.assertEqual(position, 0.0)
         self.assertEqual(entry_price, 0.0)
         self.assertEqual(hold_bars, 0)
+
+    def test_cost_gate_blocks_low_net_edge_open(self):
+        core = self.build_core(
+            target_ratio=0.3,
+            take_profit=0.01,
+            stop_loss=0.01,
+            fee_rate=0.002,
+            cost_buffer_multiplier=2.0,
+        )
+        core.set_state(position=0.0, entry_price=0.0, hold_bars=0)
+
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.65,
+            short_prob=0.35,
+            money_flow_ratio=1.0,
+            volatility=0.01,
+        )
+
+        self.assertEqual(out["action"], "HOLD")
+        self.assertTrue(out["reason"].startswith("CostGate"))
+
+    def test_flat_cooldown_blocks_new_open_and_counts_down(self):
+        core = self.build_core(target_ratio=0.5, trade_cooldown_bars=3)
+        core.set_state(
+            position=0.0,
+            entry_price=0.0,
+            hold_bars=0,
+            cooldown_bars_remaining=2,
+        )
+
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.9,
+            short_prob=0.1,
+            money_flow_ratio=1.0,
+            volatility=0.01,
+        )
+
+        self.assertEqual(out["action"], "HOLD")
+        self.assertEqual(out["reason"], "Cooldown(2)")
+        self.assertEqual(out["next_cooldown_bars"], 1)
+
+    def test_same_direction_cooldown_blocks_rebalance(self):
+        core = self.build_core(target_ratio=0.5, trade_cooldown_bars=3)
+        core.set_state(
+            position=1.0,
+            entry_price=100.0,
+            hold_bars=0,
+            cooldown_bars_remaining=2,
+        )
+
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.9,
+            short_prob=0.1,
+            money_flow_ratio=1.0,
+            volatility=0.01,
+        )
+
+        self.assertEqual(out["action"], "HOLD")
+        self.assertEqual(out["reason"], "Cooldown(2)")
+
+    def test_apply_open_decision_sets_trade_cooldown(self):
+        core = self.build_core(target_ratio=0.5, trade_cooldown_bars=3)
+        core.set_state(position=0.0, entry_price=0.0, hold_bars=0)
+
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.9,
+            short_prob=0.1,
+            money_flow_ratio=1.0,
+            volatility=0.01,
+        )
+
+        self.assertEqual(out["action"], "OPEN")
+        core.apply_decision(out)
+        self.assertEqual(core.get_cooldown_bars_remaining(), 3)
 
 
 if __name__ == "__main__":

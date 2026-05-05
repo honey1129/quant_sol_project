@@ -27,7 +27,6 @@ import type {
   ApiStrategyRestartResponse,
   LogEntry,
   StrategyParams,
-  ThemeMode,
   TimeRange,
 } from "./types";
 
@@ -77,14 +76,6 @@ const pageRouteMap: Record<NavPageId, string> = {
   account: "/account",
   settings: "/settings",
 };
-
-function getInitialTheme(): ThemeMode {
-  if (typeof window === "undefined") {
-    return "dark";
-  }
-  const savedTheme = window.localStorage.getItem("quant-alpha-theme");
-  return savedTheme === "light" ? "light" : "dark";
-}
 
 function filterSeriesByRange(range: TimeRange, series = mockSnapshot.equityCurve) {
   if (range === "All") {
@@ -298,7 +289,6 @@ function SummaryPanel({
 }
 
 export default function App() {
-  const [theme, setTheme] = useState<ThemeMode>(getInitialTheme);
   const [now, setNow] = useState<Date>(new Date());
   const [currentPage, setCurrentPage] = useState<NavPageId>(getInitialPage);
   const [snapshot, setSnapshot] = useState(mockSnapshot);
@@ -310,11 +300,6 @@ export default function App() {
   const [restartingStrategy, setRestartingStrategy] = useState(false);
   const [localLogs, setLocalLogs] = useState<LogEntry[]>([]);
   const [error, setError] = useState("");
-
-  useEffect(() => {
-    document.documentElement.classList.toggle("dark", theme === "dark");
-    window.localStorage.setItem("quant-alpha-theme", theme);
-  }, [theme]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -1266,8 +1251,6 @@ export default function App() {
           updatedAt={snapshot.updatedAt}
           dataSource={snapshot.dataSource}
           now={now}
-          theme={theme}
-          onThemeToggle={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
         />
 
         {error ? (

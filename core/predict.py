@@ -41,6 +41,13 @@ class MultiPeriodSignalPredictor:
             reverse_signal_min_prob_diff=config.REVERSE_SIGNAL_MIN_PROB_DIFF,
             reverse_min_target_ratio=config.REVERSE_MIN_TARGET_RATIO,
             reward_risk=float(config.KELLY_REWARD_RISK),
+            fee_rate=float(config.FEE_RATE),
+            slippage_bps=float(config.ESTIMATED_SLIPPAGE_BPS),
+            cost_buffer_multiplier=float(config.COST_BUFFER_MULTIPLIER),
+            min_expected_net_edge=float(config.MIN_EXPECTED_NET_EDGE),
+            min_take_profit_to_stop_loss_ratio=float(config.MIN_TAKE_PROFIT_TO_STOP_LOSS_RATIO),
+            min_take_profit_cost_multiplier=float(config.MIN_TAKE_PROFIT_COST_MULTIPLIER),
+            trade_cooldown_bars=int(config.TRADE_COOLDOWN_BARS),
         )
 
     def get_latest_signal(self):
