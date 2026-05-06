@@ -113,6 +113,8 @@ def print_recommendation(results):
     if delta["final_equity"] > 0 and delta["max_drawdown_pct"] >= -0.1:
         print("TREND_FILTER_ENABLED=1")
         for key, value in best["overrides"].items():
+            if key == "TREND_FILTER_ENABLED":
+                continue
             print(f"{key}={value}")
         print("reason=best_filter_improves_equity_without_material_drawdown_penalty")
     else:
