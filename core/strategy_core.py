@@ -2,6 +2,8 @@
 import math
 import numpy as np
 
+from core.trend_filter import trend_allows_direction
+
 class StrategyCore:
 
     def __init__(
@@ -37,6 +39,7 @@ class StrategyCore:
         min_take_profit_to_stop_loss_ratio: float = 2.2,
         min_take_profit_cost_multiplier: float = 6.0,
         trade_cooldown_bars: int = 0,
+        trend_filter_enabled: bool = False,
     ):
         self.pm = position_manager
 
@@ -71,6 +74,7 @@ class StrategyCore:
         self.min_take_profit_to_stop_loss_ratio = max(0.0, float(min_take_profit_to_stop_loss_ratio))
         self.min_take_profit_cost_multiplier = max(0.0, float(min_take_profit_cost_multiplier))
         self.trade_cooldown_bars = max(0, int(trade_cooldown_bars))
+        self.trend_filter_enabled = bool(trend_filter_enabled)
 
         self.position = 0.0
         self.entry_price = 0.0
@@ -209,6 +213,15 @@ class StrategyCore:
         if decision.get("next_reset_risk"):
             self.reset_risk_thresholds()
 
+    def _trend_block_reason(self, direction, trend_bias):
+        if (
+            self.trend_filter_enabled
+            and direction is not None
+            and not trend_allows_direction(direction, trend_bias)
+        ):
+            return f"TrendFilter({trend_bias or 'neutral'})"
+        return None
+
     def _resolve_directional_target_ratio(
         self,
         *,
@@ -218,6 +231,8 @@ class StrategyCore:
         volatility: float,
         take_profit: float,
         stop_loss: float,
+        trend_bias: str = None,
+        apply_trend_filter: bool = True,
     ):
         long_prob = float(long_prob)
         short_prob = float(short_prob)
@@ -235,6 +250,7 @@ class StrategyCore:
             return True, expected_net_edge
 
         if long_prob >= short_prob:
+            direction = "long"
             dominant_prob = long_prob
             if dominant_prob <= self.threshold_long or prob_gap < self.signal_min_prob_diff:
                 return 0.0, prob_gap, dominant_prob, "WeakSignal", None
@@ -242,6 +258,11 @@ class StrategyCore:
             cost_ok, expected_net_edge = passes_cost_gate(dominant_prob)
             if not cost_ok:
                 blocked_reason = f"CostGate(edge={expected_net_edge:.4%})"
+            if (
+                blocked_reason is None
+                and apply_trend_filter
+            ):
+                blocked_reason = self._trend_block_reason(direction, trend_bias)
 
             target_ratio = float(self.pm.calculate_target_ratio(
                 long_prob,
@@ -255,6 +276,7 @@ class StrategyCore:
                 return 0.0, prob_gap, dominant_prob, blocked_reason, expected_net_edge
             return target_ratio, prob_gap, dominant_prob, None, expected_net_edge
 
+        direction = "short"
         dominant_prob = short_prob
         if dominant_prob <= self.threshold_short or prob_gap < self.signal_min_prob_diff:
             return 0.0, prob_gap, dominant_prob, "WeakSignal", None
@@ -262,6 +284,11 @@ class StrategyCore:
         cost_ok, expected_net_edge = passes_cost_gate(dominant_prob)
         if not cost_ok:
             blocked_reason = f"CostGate(edge={expected_net_edge:.4%})"
+        if (
+            blocked_reason is None
+            and apply_trend_filter
+        ):
+            blocked_reason = self._trend_block_reason(direction, trend_bias)
 
         target_ratio = float(self.pm.calculate_target_ratio(
             short_prob,
@@ -285,6 +312,7 @@ class StrategyCore:
         money_flow_ratio: float,
         volatility: float,
         atr_ratio: float = None,
+        trend_bias: str = None,
     ):
         """
         单根 5m bar 决策一次（与回测一致）
@@ -330,8 +358,16 @@ class StrategyCore:
             volatility=volatility,
             take_profit=take_profit,
             stop_loss=stop_loss,
+            trend_bias=trend_bias,
+            apply_trend_filter=False,
         )
         target_position = target_ratio * equity / price
+        target_direction = None
+        if target_ratio > 0:
+            target_direction = "long"
+        elif target_ratio < 0:
+            target_direction = "short"
+        trend_block_reason = self._trend_block_reason(target_direction, trend_bias)
         same_direction = (pos > 0 and target_position > 0) or (pos < 0 and target_position < 0)
         reverse_signal_is_strong = (
             pos != 0 and
@@ -345,6 +381,23 @@ class StrategyCore:
         # 3) 空仓 -> 只允许开仓
         # ======================
         if pos == 0:
+            if (
+                trend_block_reason is not None
+                and target_position != 0
+                and abs(target_position * price) >= self.min_adjust_amount
+            ):
+                return {
+                    "action": "HOLD",
+                    "delta_qty": 0.0,
+                    "target_ratio": 0.0,
+                    "target_position": 0.0,
+                    "reason": trend_block_reason,
+                    "next_position": 0.0,
+                    "next_entry_price": 0.0,
+                    "next_hold_bars": 0,
+                    "next_cooldown_bars": self._next_hold_cooldown(),
+                    "next_reset_risk": True,
+                }
             if abs(target_position * price) >= self.min_adjust_amount and target_position != 0:
                 return {
                     "action": "OPEN",
@@ -422,6 +475,23 @@ class StrategyCore:
                 }
 
             raw_delta = target_position - pos
+            if (
+                trend_block_reason is not None
+                and np.sign(raw_delta) == np.sign(pos)
+                and abs(raw_delta * price) >= self.min_adjust_amount
+            ):
+                return {
+                    "action": "HOLD",
+                    "delta_qty": 0.0,
+                    "target_ratio": target_ratio,
+                    "target_position": target_position,
+                    "reason": trend_block_reason,
+                    "next_position": float(pos),
+                    "next_entry_price": float(self.entry_price),
+                    "next_hold_bars": next_hold_bars,
+                    "next_cooldown_bars": self._next_hold_cooldown(),
+                    "next_reset_risk": False,
+                }
             diff_ratio = raw_delta / max(abs(pos), 1e-9)
 
             if abs(diff_ratio) >= self.add_threshold:

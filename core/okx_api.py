@@ -33,6 +33,56 @@ def order_is_filled(order):
     return state in {"filled", "partially_filled"}
 
 
+def floor_size_to_lot(size, lot_size):
+    size = float(size)
+    lot_size = float(lot_size)
+    if lot_size <= 0:
+        raise ValueError("lot_size must be positive")
+    return round(math.floor(size / lot_size) * lot_size, 6)
+
+
+def cap_size_by_available_margin(
+    size,
+    market_price,
+    leverage,
+    available_usdt,
+    lot_size,
+    *,
+    usage_ratio=0.85,
+    min_free_margin_usdt=0.0,
+):
+    size = floor_size_to_lot(size, lot_size)
+    market_price = float(market_price)
+    leverage = float(leverage)
+    available_usdt = float(available_usdt)
+    lot_size = float(lot_size)
+    usage_ratio = max(0.0, min(float(usage_ratio), 1.0))
+    min_free_margin_usdt = max(0.0, float(min_free_margin_usdt))
+
+    if size <= 0 or market_price <= 0 or leverage <= 0:
+        return 0.0, 0.0, 0.0, False
+
+    usable_margin = max(0.0, available_usdt - min_free_margin_usdt) * usage_ratio
+    required_margin = size * market_price / leverage
+    if required_margin <= usable_margin:
+        return size, required_margin, usable_margin, False
+
+    capped_size = floor_size_to_lot(usable_margin * leverage / market_price, lot_size)
+    capped_required_margin = capped_size * market_price / leverage if capped_size > 0 else 0.0
+    return capped_size, capped_required_margin, usable_margin, True
+
+
+def is_insufficient_margin_error(result):
+    if not isinstance(result, dict):
+        return False
+    for item in result.get("data", []) or []:
+        code = str(item.get("sCode", "") or "")
+        message = str(item.get("sMsg", "") or "").lower()
+        if code == "51008" or "insufficient" in message and "margin" in message:
+            return True
+    return False
+
+
 class OKXClient:
     def __init__(self):
         self.account_api = Account.AccountAPI(config.OKX_API_KEY, config.OKX_SECRET, config.OKX_PASSWORD, use_server_time=True, flag=config.USE_SERVER)
@@ -477,10 +527,20 @@ class OKXClient:
                     if not reduce_only:
                         account_info = self.get_account_balance()
                         available_usdt = float(account_info['data'][0]['availEq'])
-                        required_margin = usd_amount  # cross模式下，本金即为保证金需求
+                        usable_margin = max(
+                            0.0,
+                            available_usdt - float(config.LIVE_MIN_FREE_MARGIN_USDT),
+                        ) * max(0.0, min(float(config.LIVE_MARGIN_USAGE_RATIO), 1.0))
 
-                        if required_margin > available_usdt:
-                            log_error(f"❌ 保证金不足: 需 {required_margin} USDT，可用 {available_usdt} USDT，取消下单")
+                        if usd_amount > usable_margin:
+                            log_info(
+                                f"保证金约束: requested_margin={usd_amount:.2f} USDT, "
+                                f"capped_margin={usable_margin:.2f} USDT, avail={available_usdt:.2f} USDT"
+                            )
+                            usd_amount = usable_margin
+
+                        if usd_amount <= 0:
+                            log_error(f"❌ 保证金不足: 可用 {available_usdt:.2f} USDT，取消下单")
                             return False
 
                     # ✅ 直接读取写死的合约参数
@@ -541,6 +601,8 @@ class OKXClient:
                     error_code = error_data.get('sCode', '')
                     error_msg = error_data.get('sMsg', '')
                     log_error(f"❌ 下单失败: 错误码 {error_code}, 原因: {error_msg}")
+                    if is_insufficient_margin_error(result):
+                        return False
                     time.sleep(sleep_sec)
 
             except Exception as e:
@@ -595,8 +657,7 @@ class OKXClient:
                 raise Exception(f"❌ size 类型异常: '{size}'")
 
         lot_size = float(config.LOT_SIZE)
-        size = math.floor(size / lot_size) * lot_size
-        size = round(size, 6)
+        size = floor_size_to_lot(size, lot_size)
         cl_ord_id = build_client_order_id(config.SYMBOL, side, posSide, reduce_only)
 
         if size < lot_size:
@@ -622,13 +683,32 @@ class OKXClient:
                 if not reduce_only:
                     market_price = self.get_price()
 
-                    # 保证金检查：估算 required_margin = 名义价值 / leverage = size*price/leverage
+                    # 保证金检查：估算 required_margin = 名义价值 / leverage = size*price/leverage。
+                    # 若目标 size 超过可用保证金，按可用额度截断，避免同一类信号反复失败重试。
                     account_info = self.get_account_balance()
                     available_usdt = float(account_info['data'][0]['availEq'])
-                    required_margin = (size * market_price) / float(leverage)
+                    capped_size, required_margin, usable_margin, was_capped = cap_size_by_available_margin(
+                        size,
+                        market_price,
+                        leverage,
+                        available_usdt,
+                        lot_size,
+                        usage_ratio=config.LIVE_MARGIN_USAGE_RATIO,
+                        min_free_margin_usdt=config.LIVE_MIN_FREE_MARGIN_USDT,
+                    )
 
-                    if required_margin > available_usdt:
-                        log_error(f"❌ 保证金不足: 需 {required_margin:.2f} USDT，可用 {available_usdt:.2f} USDT，取消下单")
+                    if was_capped:
+                        log_info(
+                            f"保证金约束: requested_sz={size}, capped_sz={capped_size}, "
+                            f"usable_margin={usable_margin:.2f} USDT, avail={available_usdt:.2f} USDT"
+                        )
+                        size = capped_size
+
+                    if size < lot_size:
+                        log_error(
+                            f"❌ 保证金不足: 截断后 size={size} 小于最小下单单位 {lot_size}, "
+                            f"usable_margin={usable_margin:.2f} USDT, 可用 {available_usdt:.2f} USDT，取消下单"
+                        )
                         return False
 
                 result = self.trade_api.place_order(
@@ -666,6 +746,8 @@ class OKXClient:
                     error_code = error_data.get('sCode', '')
                     error_msg = error_data.get('sMsg', '')
                     log_error(f"❌ 下单失败(sz模式): 错误码 {error_code}, 原因: {error_msg}")
+                    if is_insufficient_margin_error(result):
+                        return False
                     time.sleep(sleep_sec)
 
             except Exception as e:

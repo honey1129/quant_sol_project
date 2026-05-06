@@ -39,9 +39,9 @@ class TradeAuditTests(unittest.TestCase):
             entry_price_before=100.0,
             pos_qty_after=0.0,
             entry_price_after=0.0,
-            account_before={"total_eq": 1000},
-            account_after={"total_eq": 1010},
-            signal_snapshot={"long_prob": 0.6},
+            account_before={"total_eq": 1000, "avail_eq": 900, "sizing_eq": 950},
+            account_after={"total_eq": 1010, "avail_eq": 910, "sizing_eq": 960},
+            signal_snapshot={"long_prob": 0.6, "trend_bias": "long", "trend_gap": 0.01},
             decision={"action": "CLOSE"},
         )
 
@@ -51,6 +51,9 @@ class TradeAuditTests(unittest.TestCase):
         self.assertAlmostEqual(record["fee_abs"], 0.105)
         self.assertAlmostEqual(record["net_realized_pnl"], 9.895)
         self.assertEqual(record["trade_date"], "2026-05-05")
+        self.assertAlmostEqual(record["avail_eq_before"], 900.0)
+        self.assertAlmostEqual(record["sizing_eq_after"], 960.0)
+        self.assertEqual(record["risk_context"]["trend_bias"], "long")
 
     def test_append_and_load_records_round_trip(self):
         with tempfile.TemporaryDirectory() as tmpdir:

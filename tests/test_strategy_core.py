@@ -192,6 +192,29 @@ class StrategyCoreRebalanceTests(unittest.TestCase):
         self.assertEqual(out["action"], "CLOSE")
         self.assertEqual(out["reason"], "ReverseClose")
 
+    def test_strong_reverse_signal_bypasses_trend_filter(self):
+        core = self.build_core(
+            target_ratio=0.2,
+            signal_min_prob_diff=0.12,
+            reverse_signal_min_prob_diff=0.18,
+            reverse_min_target_ratio=0.1,
+            trend_filter_enabled=True,
+        )
+        core.set_state(position=10.0, entry_price=100.0, hold_bars=0)
+
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.35,
+            short_prob=0.65,
+            money_flow_ratio=1.0,
+            volatility=0.01,
+            trend_bias="long",
+        )
+
+        self.assertEqual(out["action"], "CLOSE")
+        self.assertEqual(out["reason"], "ReverseClose")
+
     def test_strong_reverse_signal_bypasses_min_hold(self):
         core = self.build_core(
             target_ratio=0.2,
@@ -365,6 +388,74 @@ class StrategyCoreRebalanceTests(unittest.TestCase):
         self.assertEqual(out["action"], "OPEN")
         core.apply_decision(out)
         self.assertEqual(core.get_cooldown_bars_remaining(), 3)
+
+    def test_trend_filter_blocks_countertrend_open(self):
+        core = self.build_core(target_ratio=0.3, trend_filter_enabled=True)
+        core.set_state(position=0.0, entry_price=0.0, hold_bars=0)
+
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.8,
+            short_prob=0.2,
+            money_flow_ratio=1.0,
+            volatility=0.01,
+            trend_bias="short",
+        )
+
+        self.assertEqual(out["action"], "HOLD")
+        self.assertEqual(out["reason"], "TrendFilter(short)")
+
+    def test_trend_filter_blocks_countertrend_add(self):
+        core = self.build_core(target_ratio=1.5, trend_filter_enabled=True)
+        core.set_state(position=10.0, entry_price=100.0, hold_bars=0)
+
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.8,
+            short_prob=0.2,
+            money_flow_ratio=1.0,
+            volatility=0.01,
+            trend_bias="short",
+        )
+
+        self.assertEqual(out["action"], "HOLD")
+        self.assertEqual(out["reason"], "TrendFilter(short)")
+
+    def test_trend_filter_allows_countertrend_position_reduction(self):
+        core = self.build_core(target_ratio=0.5, trend_filter_enabled=True)
+        core.set_state(position=10.0, entry_price=100.0, hold_bars=0)
+
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.8,
+            short_prob=0.2,
+            money_flow_ratio=1.0,
+            volatility=0.01,
+            trend_bias="short",
+        )
+
+        self.assertEqual(out["action"], "REBALANCE")
+        self.assertAlmostEqual(out["delta_qty"], -5.0)
+
+    def test_trend_filter_allows_aligned_open(self):
+        core = self.build_core(target_ratio=0.3, trend_filter_enabled=True)
+        core.set_state(position=0.0, entry_price=0.0, hold_bars=0)
+
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.8,
+            short_prob=0.2,
+            money_flow_ratio=1.0,
+            volatility=0.01,
+            trend_bias="long",
+        )
+
+        self.assertEqual(out["action"], "OPEN")
+        self.assertGreater(out["delta_qty"], 0)
 
 
 if __name__ == "__main__":

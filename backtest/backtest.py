@@ -5,6 +5,7 @@ import joblib
 import traceback
 import math
 from core.strategy_core import StrategyCore
+from core.trend_filter import derive_trend_context
 import time
 import numpy as np
 import pandas as pd
@@ -171,6 +172,7 @@ class Backtester:
             min_take_profit_to_stop_loss_ratio=float(config.MIN_TAKE_PROFIT_TO_STOP_LOSS_RATIO),
             min_take_profit_cost_multiplier=float(config.MIN_TAKE_PROFIT_COST_MULTIPLIER),
             trade_cooldown_bars=int(config.TRADE_COOLDOWN_BARS),
+            trend_filter_enabled=bool(config.TREND_FILTER_ENABLED),
         )
         if self.emit_diagnostics:
             self._log_intrabar_range_diagnostics()
@@ -410,6 +412,13 @@ class Backtester:
             volatility = float(volatility)
             if pd.notna(atr_value) and close_price > 0:
                 atr_ratio = float(atr_value) / close_price
+            trend_context = derive_trend_context(
+                signal_row,
+                interval=config.TREND_FILTER_INTERVAL,
+                fast_col=config.TREND_FILTER_FAST_COL,
+                slow_col=config.TREND_FILTER_SLOW_COL,
+                min_gap=config.TREND_FILTER_MIN_GAP,
+            )
 
             self._apply_funding_until(exec_row.name)
 
@@ -425,6 +434,7 @@ class Backtester:
                 money_flow_ratio=money_flow_ratio,
                 volatility=volatility,
                 atr_ratio=atr_ratio,
+                trend_bias=trend_context.get("trend_bias"),
             )
 
             action = out["action"]

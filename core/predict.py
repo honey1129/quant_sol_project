@@ -9,6 +9,7 @@ from core.ml_feature_engineering import merge_multi_period_features, add_advance
 from core.okx_api import OKXClient
 from core.position_manager import PositionManager
 from core.strategy_core import StrategyCore
+from core.trend_filter import derive_trend_context
 from utils.utils import BASE_DIR
 
 class MultiPeriodSignalPredictor:
@@ -48,6 +49,7 @@ class MultiPeriodSignalPredictor:
             min_take_profit_to_stop_loss_ratio=float(config.MIN_TAKE_PROFIT_TO_STOP_LOSS_RATIO),
             min_take_profit_cost_multiplier=float(config.MIN_TAKE_PROFIT_COST_MULTIPLIER),
             trade_cooldown_bars=int(config.TRADE_COOLDOWN_BARS),
+            trend_filter_enabled=bool(config.TREND_FILTER_ENABLED),
         )
 
     def get_latest_signal(self):
@@ -83,8 +85,18 @@ class MultiPeriodSignalPredictor:
         atr_ratio = None
         if pd.notna(atr_value) and price > 0:
             atr_ratio = float(atr_value) / price
+        trend_context = derive_trend_context(
+            merged_df.iloc[-1],
+            interval=config.TREND_FILTER_INTERVAL,
+            fast_col=config.TREND_FILTER_FAST_COL,
+            slow_col=config.TREND_FILTER_SLOW_COL,
+            min_gap=config.TREND_FILTER_MIN_GAP,
+        )
 
-        print(f"实时预测概率 => 多头: {long_prob:.3f} | 空头: {short_prob:.3f}")
+        print(
+            f"实时预测概率 => 多头: {long_prob:.3f} | 空头: {short_prob:.3f} | "
+            f"趋势: {trend_context.get('trend_bias')}"
+        )
 
         # 统一复用空仓状态下的真实策略开仓判定，避免和交易引擎口径不一致。
         self.core.set_state(position=0.0, entry_price=0.0, hold_bars=0)
@@ -96,6 +108,7 @@ class MultiPeriodSignalPredictor:
             money_flow_ratio=money_flow_ratio,
             volatility=volatility,
             atr_ratio=atr_ratio,
+            trend_bias=trend_context.get("trend_bias"),
         )
 
         if out["action"] == "OPEN" and out["delta_qty"] > 0:

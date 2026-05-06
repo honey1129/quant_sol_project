@@ -231,6 +231,10 @@ def build_trade_record(
 
     before_eq = safe_optional_float((account_before or {}).get("total_eq"))
     after_eq = safe_optional_float((account_after or {}).get("total_eq"))
+    before_avail_eq = safe_optional_float((account_before or {}).get("avail_eq"))
+    after_avail_eq = safe_optional_float((account_after or {}).get("avail_eq"))
+    before_sizing_eq = safe_optional_float((account_before or {}).get("sizing_eq"))
+    after_sizing_eq = safe_optional_float((account_after or {}).get("sizing_eq"))
     equity_delta = None
     if before_eq is not None and after_eq is not None:
         equity_delta = after_eq - before_eq
@@ -271,6 +275,20 @@ def build_trade_record(
         "equity_before": before_eq,
         "equity_after": after_eq,
         "equity_delta": equity_delta,
+        "avail_eq_before": before_avail_eq,
+        "avail_eq_after": after_avail_eq,
+        "sizing_eq_before": before_sizing_eq,
+        "sizing_eq_after": after_sizing_eq,
+        "risk_context": {
+            "leverage": safe_optional_float(getattr(config, "LEVERAGE", None)),
+            "live_margin_usage_ratio": safe_optional_float(getattr(config, "LIVE_MARGIN_USAGE_RATIO", None)),
+            "live_min_free_margin_usdt": safe_optional_float(getattr(config, "LIVE_MIN_FREE_MARGIN_USDT", None)),
+            "trend_filter_enabled": bool(getattr(config, "TREND_FILTER_ENABLED", False)),
+            "trend_bias": (signal_snapshot or {}).get("trend_bias"),
+            "trend_gap": (signal_snapshot or {}).get("trend_gap"),
+            "take_profit": safe_optional_float(getattr(config, "TAKE_PROFIT", None)),
+            "stop_loss": safe_optional_float(getattr(config, "STOP_LOSS", None)),
+        },
         "signal": signal_snapshot or {},
         "decision": decision or {},
         "raw_order": order,

@@ -9,6 +9,7 @@ import pandas as pd
 from core import ml_feature_engineering, signal_engine
 from core.reward_risk import RewardRiskEstimator
 from core.strategy_core import StrategyCore
+from core.trend_filter import derive_trend_context
 from utils.utils import log_info, log_error, BASE_DIR
 from utils.utils import DISPLAY_TIMEZONE
 from utils.runtime_dashboard import write_runtime_dashboard_snapshot
@@ -186,6 +187,7 @@ class LiveTrader:
             min_take_profit_to_stop_loss_ratio=float(config.MIN_TAKE_PROFIT_TO_STOP_LOSS_RATIO),
             min_take_profit_cost_multiplier=float(config.MIN_TAKE_PROFIT_COST_MULTIPLIER),
             trade_cooldown_bars=int(config.TRADE_COOLDOWN_BARS),
+            trend_filter_enabled=bool(config.TREND_FILTER_ENABLED),
         )
 
         if self.last_bar_ts is not None:
@@ -254,14 +256,35 @@ class LiveTrader:
         if pd.notna(atr_value) and price > 0:
             atr_ratio = float(atr_value) / price
 
-        return bar_ts, price, long_prob, short_prob, money_flow_ratio, volatility, atr_ratio
+        trend_context = derive_trend_context(
+            row,
+            interval=config.TREND_FILTER_INTERVAL,
+            fast_col=config.TREND_FILTER_FAST_COL,
+            slow_col=config.TREND_FILTER_SLOW_COL,
+            min_gap=config.TREND_FILTER_MIN_GAP,
+        )
+
+        return bar_ts, price, long_prob, short_prob, money_flow_ratio, volatility, atr_ratio, trend_context
 
     def _get_equity(self) -> float:
         account = self._get_account_snapshot()
-        total_eq = float(account.get("total_eq", 0) or 0)
-        if total_eq > 0:
-            return total_eq
-        return float(account.get("avail_eq", 0) or 0)
+        return self._get_sizing_equity(account)
+
+    def _get_sizing_equity(self, account_snapshot) -> float:
+        total_eq = float(account_snapshot.get("total_eq", 0) or 0)
+        avail_eq = float(account_snapshot.get("avail_eq", 0) or 0)
+        if not bool(config.LIVE_USE_AVAILABLE_MARGIN_FOR_SIZING):
+            return total_eq if total_eq > 0 else avail_eq
+
+        usable_margin = max(0.0, avail_eq - float(config.LIVE_MIN_FREE_MARGIN_USDT))
+        usable_margin *= max(0.0, min(float(config.LIVE_MARGIN_USAGE_RATIO), 1.0))
+        margin_backed_equity = usable_margin * float(config.LEVERAGE)
+
+        if total_eq > 0 and margin_backed_equity > 0:
+            return min(total_eq, margin_backed_equity)
+        if margin_backed_equity > 0:
+            return margin_backed_equity
+        return total_eq if total_eq > 0 else avail_eq
 
     def _get_account_snapshot(self):
         account_balance = self.client.get_account_balance()
@@ -271,6 +294,7 @@ class LiveTrader:
             "avail_eq": float(balance.get("availEq", 0) or 0),
             "currency": "USDT",
         }
+        snapshot["sizing_eq"] = self._get_sizing_equity(snapshot)
         self.last_dashboard_account = snapshot
         return snapshot
 
@@ -602,13 +626,14 @@ class LiveTrader:
 
     def run_once_on_new_bar(self):
         self.loop_count += 1
-        bar_ts, price, long_prob, short_prob, money_flow_ratio, volatility, atr_ratio = self._get_latest_features()
+        bar_ts, price, long_prob, short_prob, money_flow_ratio, volatility, atr_ratio, trend_context = self._get_latest_features()
         signal_snapshot = {
             "long_prob": float(long_prob),
             "short_prob": float(short_prob),
             "money_flow_ratio": float(money_flow_ratio),
             "volatility": float(volatility),
             "atr_ratio": None if atr_ratio is None else float(atr_ratio),
+            **trend_context,
         }
 
         if self._reconcile_dual_side_position(
@@ -642,7 +667,8 @@ class LiveTrader:
 
         log_info(
             f"新bar={format_display_ts(bar_ts)} price={price:.4f} long={long_prob:.3f} short={short_prob:.3f} "
-            f"mf={money_flow_ratio:.3f} vol={volatility:.6f} atr_ratio={0.0 if atr_ratio is None else atr_ratio:.4%}"
+            f"mf={money_flow_ratio:.3f} vol={volatility:.6f} atr_ratio={0.0 if atr_ratio is None else atr_ratio:.4%} "
+            f"trend={trend_context.get('trend_bias', 'neutral')} trend_gap={trend_context.get('trend_gap')}"
         )
 
         pos_qty, entry_price = self._get_net_position()
@@ -650,7 +676,7 @@ class LiveTrader:
             log_error("双边持仓仍未清理完成，本轮跳过信号执行。")
             return
         account_snapshot = self._get_account_snapshot()
-        equity = float(account_snapshot.get("total_eq", 0) or account_snapshot.get("avail_eq", 0) or 0)
+        equity = self._get_sizing_equity(account_snapshot)
 
         if pos_qty == 0:
             self.hold_bars = 0
@@ -669,6 +695,7 @@ class LiveTrader:
             money_flow_ratio=money_flow_ratio,
             volatility=volatility,
             atr_ratio=atr_ratio,
+            trend_bias=trend_context.get("trend_bias"),
         )
 
         action = out["action"]
@@ -683,6 +710,8 @@ class LiveTrader:
             "target_position": float(out.get("target_position", 0.0) or 0.0),
             "delta_qty": delta,
             "next_cooldown_bars": int(out.get("next_cooldown_bars", self.cooldown_bars_remaining)),
+            "trend_bias": trend_context.get("trend_bias"),
+            "trend_gap": trend_context.get("trend_gap"),
         }
 
         if action == "CLOSE":
