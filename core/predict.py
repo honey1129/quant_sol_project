@@ -41,6 +41,8 @@ class MultiPeriodSignalPredictor:
             min_signal_target_ratio=config.MIN_SIGNAL_TARGET_RATIO,
             reverse_signal_min_prob_diff=config.REVERSE_SIGNAL_MIN_PROB_DIFF,
             reverse_min_target_ratio=config.REVERSE_MIN_TARGET_RATIO,
+            reverse_exit_consecutive_bars=config.REVERSE_EXIT_CONSECUTIVE_BARS,
+            reverse_exit_min_prob_diff=config.REVERSE_EXIT_MIN_PROB_DIFF,
             reward_risk=float(config.KELLY_REWARD_RISK),
             fee_rate=float(config.FEE_RATE),
             slippage_bps=float(config.ESTIMATED_SLIPPAGE_BPS),

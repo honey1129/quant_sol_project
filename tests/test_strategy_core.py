@@ -171,6 +171,77 @@ class StrategyCoreRebalanceTests(unittest.TestCase):
         self.assertEqual(out["action"], "HOLD")
         self.assertTrue(out["reason"].startswith("WeakReverseSignal"))
 
+    def test_consecutive_reverse_signal_closes_even_when_target_ratio_is_small(self):
+        core = self.build_core(
+            target_ratio=0.04,
+            signal_min_prob_diff=0.12,
+            reverse_signal_min_prob_diff=0.18,
+            reverse_min_target_ratio=0.1,
+            reverse_exit_consecutive_bars=2,
+            reverse_exit_min_prob_diff=0.18,
+            min_hold_bars=10,
+        )
+        core.set_state(position=10.0, entry_price=100.0, hold_bars=0)
+
+        first = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.35,
+            short_prob=0.65,
+            money_flow_ratio=1.0,
+            volatility=0.01,
+        )
+
+        self.assertEqual(first["action"], "HOLD")
+        self.assertEqual(first["next_reverse_signal_bars"], 1)
+        core.apply_decision(first)
+
+        second = core.on_bar(
+            price=99.8,
+            equity=1000.0,
+            long_prob=0.34,
+            short_prob=0.66,
+            money_flow_ratio=1.0,
+            volatility=0.01,
+        )
+
+        self.assertEqual(second["action"], "CLOSE")
+        self.assertEqual(second["reason"], "ConsecutiveReverseClose(2/2)")
+
+    def test_consecutive_reverse_signal_resets_on_aligned_signal(self):
+        core = self.build_core(
+            target_ratio=0.04,
+            signal_min_prob_diff=0.12,
+            reverse_signal_min_prob_diff=0.18,
+            reverse_min_target_ratio=0.1,
+            reverse_exit_consecutive_bars=2,
+            reverse_exit_min_prob_diff=0.18,
+        )
+        core.set_state(position=10.0, entry_price=100.0, hold_bars=0)
+
+        first = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.35,
+            short_prob=0.65,
+            money_flow_ratio=1.0,
+            volatility=0.01,
+        )
+        self.assertEqual(first["next_reverse_signal_bars"], 1)
+        core.apply_decision(first)
+
+        aligned = core.on_bar(
+            price=100.1,
+            equity=1000.0,
+            long_prob=0.70,
+            short_prob=0.30,
+            money_flow_ratio=1.0,
+            volatility=0.01,
+        )
+
+        self.assertEqual(aligned["action"], "HOLD")
+        self.assertEqual(aligned["next_reverse_signal_bars"], 0)
+
     def test_existing_position_closes_on_strong_reverse_signal(self):
         core = self.build_core(
             target_ratio=0.2,

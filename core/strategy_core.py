@@ -31,6 +31,8 @@ class StrategyCore:
         min_signal_target_ratio: float = 0.08,
         reverse_signal_min_prob_diff: float = 0.26,
         reverse_min_target_ratio: float = 0.12,
+        reverse_exit_consecutive_bars: int = 0,
+        reverse_exit_min_prob_diff: float = None,
         reward_risk: float = 1.0,
         fee_rate: float = 0.0005,
         slippage_bps: float = 0.0,
@@ -65,6 +67,12 @@ class StrategyCore:
         self.min_signal_target_ratio = float(min_signal_target_ratio)
         self.reverse_signal_min_prob_diff = float(reverse_signal_min_prob_diff)
         self.reverse_min_target_ratio = float(reverse_min_target_ratio)
+        self.reverse_exit_consecutive_bars = max(0, int(reverse_exit_consecutive_bars))
+        self.reverse_exit_min_prob_diff = (
+            self.reverse_signal_min_prob_diff
+            if reverse_exit_min_prob_diff is None
+            else float(reverse_exit_min_prob_diff)
+        )
 
         self.reward_risk = float(reward_risk)
         self.fee_rate = max(0.0, float(fee_rate))
@@ -80,6 +88,7 @@ class StrategyCore:
         self.entry_price = 0.0
         self.hold_bars = 0
         self.cooldown_bars_remaining = 0
+        self.reverse_signal_bars = 0
         self.current_take_profit = self.take_profit
         self.current_stop_loss = self.stop_loss
 
@@ -92,6 +101,9 @@ class StrategyCore:
 
     def get_cooldown_bars_remaining(self):
         return self.cooldown_bars_remaining
+
+    def get_reverse_signal_bars(self):
+        return self.reverse_signal_bars
 
     def estimated_round_trip_cost_ratio(self):
         slippage_ratio = self.slippage_bps / 10000.0
@@ -176,6 +188,7 @@ class StrategyCore:
         entry_price: float,
         hold_bars: int = None,
         cooldown_bars_remaining: int = None,
+        reverse_signal_bars: int = None,
     ):
         self.position = float(position)
         self.entry_price = float(entry_price)
@@ -183,7 +196,10 @@ class StrategyCore:
             self.hold_bars = int(hold_bars)
         if cooldown_bars_remaining is not None:
             self.cooldown_bars_remaining = max(0, int(cooldown_bars_remaining))
+        if reverse_signal_bars is not None:
+            self.reverse_signal_bars = max(0, int(reverse_signal_bars))
         if self.position == 0 or self.entry_price <= 0:
+            self.reverse_signal_bars = 0
             self.reset_risk_thresholds()
 
     def get_state(self):
@@ -201,6 +217,7 @@ class StrategyCore:
             "next_entry_price": 0.0,
             "next_hold_bars": 0,
             "next_cooldown_bars": self._next_trade_cooldown(),
+            "next_reverse_signal_bars": 0,
             "next_reset_risk": True,
         }
 
@@ -210,6 +227,10 @@ class StrategyCore:
         self.hold_bars = int(decision["next_hold_bars"])
         if "next_cooldown_bars" in decision:
             self.cooldown_bars_remaining = max(0, int(decision["next_cooldown_bars"]))
+        if "next_reverse_signal_bars" in decision:
+            self.reverse_signal_bars = max(0, int(decision["next_reverse_signal_bars"]))
+        elif self.position == 0:
+            self.reverse_signal_bars = 0
         if decision.get("next_reset_risk"):
             self.reset_risk_thresholds()
 
@@ -221,6 +242,21 @@ class StrategyCore:
         ):
             return f"TrendFilter({trend_bias or 'neutral'})"
         return None
+
+    def _dominant_signal_direction(self, long_prob, short_prob, *, min_prob_diff=None):
+        long_prob = float(long_prob)
+        short_prob = float(short_prob)
+        prob_gap = abs(long_prob - short_prob)
+        min_prob_diff = self.signal_min_prob_diff if min_prob_diff is None else float(min_prob_diff)
+
+        if long_prob >= short_prob:
+            if long_prob <= self.threshold_long or prob_gap < min_prob_diff:
+                return None, prob_gap, long_prob
+            return "long", prob_gap, long_prob
+
+        if short_prob <= self.threshold_short or prob_gap < min_prob_diff:
+            return None, prob_gap, short_prob
+        return "short", prob_gap, short_prob
 
     def _resolve_directional_target_ratio(
         self,
@@ -325,6 +361,7 @@ class StrategyCore:
             atr_ratio=atr_ratio,
         )
         cooldown_remaining = int(self.cooldown_bars_remaining)
+        reverse_signal_bars = int(self.reverse_signal_bars)
 
         # ======================
         # 1) 持仓 -> 止盈止损
@@ -345,6 +382,7 @@ class StrategyCore:
                 "next_entry_price": 0.0,
                 "next_hold_bars": 0,
                 "next_cooldown_bars": self._next_hold_cooldown(),
+                "next_reverse_signal_bars": 0,
                 "next_reset_risk": True,
             }
 
@@ -368,13 +406,29 @@ class StrategyCore:
         elif target_ratio < 0:
             target_direction = "short"
         trend_block_reason = self._trend_block_reason(target_direction, trend_bias)
+        raw_signal_direction, raw_signal_prob_gap, raw_dominant_prob = self._dominant_signal_direction(
+            long_prob,
+            short_prob,
+            min_prob_diff=self.reverse_exit_min_prob_diff,
+        )
         same_direction = (pos > 0 and target_position > 0) or (pos < 0 and target_position < 0)
+        raw_reverse_signal = (
+            (pos > 0 and raw_signal_direction == "short") or
+            (pos < 0 and raw_signal_direction == "long")
+        )
+        next_reverse_signal_bars = reverse_signal_bars + 1 if raw_reverse_signal else 0
         reverse_signal_is_strong = (
             pos != 0 and
             not same_direction and
             abs(target_position) > 0 and
             signal_prob_gap >= self.reverse_signal_min_prob_diff and
             abs(target_ratio) >= self.reverse_min_target_ratio
+        )
+        consecutive_reverse_exit = (
+            pos != 0 and
+            self.reverse_exit_consecutive_bars > 0 and
+            raw_reverse_signal and
+            next_reverse_signal_bars >= self.reverse_exit_consecutive_bars
         )
 
         # ======================
@@ -396,6 +450,7 @@ class StrategyCore:
                     "next_entry_price": 0.0,
                     "next_hold_bars": 0,
                     "next_cooldown_bars": self._next_hold_cooldown(),
+                    "next_reverse_signal_bars": 0,
                     "next_reset_risk": True,
                 }
             if abs(target_position * price) >= self.min_adjust_amount and target_position != 0:
@@ -409,6 +464,7 @@ class StrategyCore:
                     "next_entry_price": float(price),
                     "next_hold_bars": 0,
                     "next_cooldown_bars": self._next_trade_cooldown(),
+                    "next_reverse_signal_bars": 0,
                     "next_reset_risk": False,
                 }
             flat_reason = "FlatNoSignal"
@@ -424,6 +480,7 @@ class StrategyCore:
                 "next_entry_price": 0.0,
                 "next_hold_bars": 0,
                 "next_cooldown_bars": self._next_hold_cooldown(),
+                "next_reverse_signal_bars": 0,
                 "next_reset_risk": True,
             }
 
@@ -434,6 +491,14 @@ class StrategyCore:
             return self._build_close_action(
                 pos=pos,
                 reason="ReverseClose",
+                target_ratio=target_ratio,
+                target_position=target_position,
+            )
+
+        if consecutive_reverse_exit:
+            return self._build_close_action(
+                pos=pos,
+                reason=f"ConsecutiveReverseClose({next_reverse_signal_bars}/{self.reverse_exit_consecutive_bars})",
                 target_ratio=target_ratio,
                 target_position=target_position,
             )
@@ -453,6 +518,7 @@ class StrategyCore:
                 "next_entry_price": float(self.entry_price),
                 "next_hold_bars": next_hold_bars,
                 "next_cooldown_bars": self._next_hold_cooldown(),
+                "next_reverse_signal_bars": next_reverse_signal_bars,
                 "next_reset_risk": False,
             }
 
@@ -471,6 +537,7 @@ class StrategyCore:
                     "next_entry_price": float(self.entry_price),
                     "next_hold_bars": next_hold_bars,
                     "next_cooldown_bars": self._next_hold_cooldown(),
+                    "next_reverse_signal_bars": next_reverse_signal_bars,
                     "next_reset_risk": False,
                 }
 
@@ -490,6 +557,7 @@ class StrategyCore:
                     "next_entry_price": float(self.entry_price),
                     "next_hold_bars": next_hold_bars,
                     "next_cooldown_bars": self._next_hold_cooldown(),
+                    "next_reverse_signal_bars": next_reverse_signal_bars,
                     "next_reset_risk": False,
                 }
             diff_ratio = raw_delta / max(abs(pos), 1e-9)
@@ -530,6 +598,7 @@ class StrategyCore:
                         "next_entry_price": float(next_entry_price),
                         "next_hold_bars": next_hold_bars,
                         "next_cooldown_bars": self._next_trade_cooldown(),
+                        "next_reverse_signal_bars": next_reverse_signal_bars,
                         "next_reset_risk": False,
                     }
 
@@ -543,6 +612,7 @@ class StrategyCore:
                 "next_entry_price": float(self.entry_price),
                 "next_hold_bars": next_hold_bars,
                 "next_cooldown_bars": self._next_hold_cooldown(),
+                "next_reverse_signal_bars": next_reverse_signal_bars,
                 "next_reset_risk": False,
             }
 
@@ -560,6 +630,7 @@ class StrategyCore:
                 "next_entry_price": float(self.entry_price),
                 "next_hold_bars": next_hold_bars,
                 "next_cooldown_bars": self._next_hold_cooldown(),
+                "next_reverse_signal_bars": next_reverse_signal_bars,
                 "next_reset_risk": False,
             }
 
@@ -572,12 +643,14 @@ class StrategyCore:
                 "reason": (
                     f"WeakReverseSignal(gap={signal_prob_gap:.3f},"
                     f"dominant={dominant_prob:.3f},ratio={abs(target_ratio):.3f},"
-                    f"edge={expected_net_edge:.4f})"
+                    f"edge={expected_net_edge:.4f},"
+                    f"reverse_bars={next_reverse_signal_bars}/{self.reverse_exit_consecutive_bars})"
                 ),
                 "next_position": float(pos),
                 "next_entry_price": float(self.entry_price),
                 "next_hold_bars": next_hold_bars,
                 "next_cooldown_bars": self._next_hold_cooldown(),
+                "next_reverse_signal_bars": next_reverse_signal_bars,
                 "next_reset_risk": False,
             }
 
@@ -591,5 +664,6 @@ class StrategyCore:
             "next_entry_price": float(self.entry_price),
             "next_hold_bars": next_hold_bars,
             "next_cooldown_bars": self._next_hold_cooldown(),
+            "next_reverse_signal_bars": next_reverse_signal_bars,
             "next_reset_risk": False,
         }
