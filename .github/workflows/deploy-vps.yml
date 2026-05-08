@@ -1,0 +1,78 @@
+name: Deploy VPS
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-vps
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure SSH
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$VPS_HOST"
+          test -n "$VPS_SSH_KEY"
+
+          mkdir -p ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+          port="${VPS_PORT:-22}"
+          ssh-keyscan -p "$port" "$VPS_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy to VPS
+        env:
+          REMOTE_HOST: ${{ secrets.VPS_HOST }}
+          REMOTE_USER: ${{ secrets.VPS_USER }}
+          REMOTE_PORT: ${{ secrets.VPS_PORT }}
+          REMOTE_DIR: ${{ secrets.VPS_PROJECT_DIR }}
+        run: |
+          set -euo pipefail
+
+          user="${REMOTE_USER:-root}"
+          port="${REMOTE_PORT:-22}"
+          remote_dir="${REMOTE_DIR:-/root/quant_sol_project}"
+          target="$user@$REMOTE_HOST"
+
+          rsync -az --delete \
+            -e "ssh -i ~/.ssh/deploy_key -p $port -o ServerAliveInterval=30 -o ServerAliveCountMax=3" \
+            --exclude '.git/' \
+            --exclude '.github/' \
+            --exclude '.venv/' \
+            --exclude 'venv/' \
+            --exclude 'env/' \
+            --exclude '__pycache__/' \
+            --exclude '*.pyc' \
+            --exclude '.DS_Store' \
+            --exclude '.idea/' \
+            --exclude '.vscode/' \
+            --exclude '.pytest_cache/' \
+            --exclude '.cache/' \
+            --exclude 'logs/' \
+            --exclude 'dashboard-ui/node_modules/' \
+            --exclude 'dashboard-ui/dist/' \
+            --exclude '.env' \
+            --exclude 'models/' \
+            ./ "$target:$remote_dir/"
+
+          ssh -i ~/.ssh/deploy_key -p "$port" \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=3 \
+            "$target" \
+            "REMOTE_DIR='$remote_dir' bash -lc 'cd \"\$REMOTE_DIR\" && bash run/deploy_paper_vps.sh'"

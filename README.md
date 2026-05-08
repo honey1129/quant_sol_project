@@ -465,6 +465,40 @@ bash run/deploy_remote_vps.sh --host 185.214.135.24 --sync-env --sync-models
 - `--skip-start`: 远端安装完但不启动 PM2
 - `--skip-deploy`: 只同步文件，不执行远端部署脚本
 
+### 1.2 使用 GitHub Actions 自动部署到 VPS
+
+仓库已包含 `.github/workflows/deploy-vps.yml`。当 `main` 分支有 push，或你在 GitHub 页面手动运行 `Deploy VPS` workflow 时，会自动通过 SSH 同步代码到 VPS，并执行：
+
+```bash
+bash run/deploy_paper_vps.sh
+```
+
+GitHub Actions 默认不会上传 `.env`、`models/`、`logs/`，避免把交易密钥和模型产物放进 GitHub。第一次使用前，需要先在 VPS 上准备好 `.env` 和 `models/`。
+
+在 GitHub 仓库页面进入 `Settings -> Secrets and variables -> Actions -> New repository secret`，添加：
+
+```text
+VPS_HOST=你的VPS IP或域名
+VPS_SSH_KEY=用于登录VPS的SSH私钥
+```
+
+可选：
+
+```text
+VPS_USER=root
+VPS_PORT=22
+VPS_PROJECT_DIR=/root/quant_sol_project
+```
+
+建议专门生成一把部署密钥，不要直接复用你的个人主密钥：
+
+```bash
+ssh-keygen -t ed25519 -C "github-actions-quant-sol" -f ~/.ssh/quant_sol_actions
+ssh-copy-id -i ~/.ssh/quant_sol_actions.pub root@你的VPS_IP
+```
+
+然后把 `~/.ssh/quant_sol_actions` 的内容填入 `VPS_SSH_KEY`。
+
 ### 2. 旧版基础引导脚本
 
 如果你只想先建 Python 环境，不立即启动服务，也可以继续用：
