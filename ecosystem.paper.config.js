@@ -8,7 +8,7 @@ module.exports = {
       name: "quant_okx_paper",
       cwd: projectRoot,
       script: path.join(projectRoot, ".venv/bin/python"),
-      args: "-m run.live_trading_monitor",
+      args: "-m run.scheduler",
       autorestart: true,
       max_restarts: 10,
       restart_delay: 5000,

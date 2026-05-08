@@ -71,8 +71,8 @@ class DashboardServerTests(unittest.TestCase):
         self.assertAlmostEqual(status["market"]["last_price"], 85.62)
         self.assertAlmostEqual(status["signal"]["long_prob"], 0.389)
         self.assertAlmostEqual(status["signal"]["short_prob"], 0.611)
-        self.assertEqual(status["bar"]["last_processed_bar_ts"], "2026-04-24T06:00:00+00:00")
-        self.assertEqual(status["bar"]["latest_closed_bar_ts"], "2026-04-24T06:05:00+00:00")
+        self.assertEqual(status["bar"]["last_processed_bar_ts"], "2026-04-23T22:00:00+00:00")
+        self.assertEqual(status["bar"]["latest_closed_bar_ts"], "2026-04-23T22:05:00+00:00")
 
     def test_parse_latest_backtest_summary_uses_latest_block(self):
         log_lines = [
