@@ -126,6 +126,8 @@ class Backtester:
         self.max_balance = self.balance
         self.max_drawdown = 0.0
         self.trade_log = []
+        self.closed_trade_pnls = []
+        self.last_closed_balance = self.balance
         self.funding_log = []
         self.fee_rate = config.FEE_RATE
         self.slippage_bps = float(config.BACKTEST_SLIPPAGE_BPS)
@@ -309,6 +311,12 @@ class Backtester:
         self.slippage_paid_total += slippage_cost
         return fee, slippage_cost
 
+    def _record_closed_trade_pnl(self):
+        net_pnl = float(self.balance) - float(self.last_closed_balance)
+        self.closed_trade_pnls.append(net_pnl)
+        self.last_closed_balance = float(self.balance)
+        return net_pnl
+
     def _apply_funding_until(self, ts):
         if self.funding_history.empty:
             return
@@ -362,6 +370,7 @@ class Backtester:
         profit = (exec_price - self.entry_price) * pos_to_close
         self.balance += profit
         self._apply_trade_costs(pos_to_close, reference_price, exec_price)
+        self._record_closed_trade_pnl()
 
         action = "止损" if hit["reason"] == "SL" else "止盈"
         if hit["reason"] == "SL":
@@ -453,6 +462,7 @@ class Backtester:
                 profit = (exec_price - entry_price) * pos_to_close
                 self.balance += profit
                 self._apply_trade_costs(pos_to_close, price, exec_price)
+                self._record_closed_trade_pnl()
                 self.core.apply_decision(out)
 
                 act = "平仓" if out.get("reason") == "TP/SL" else "反向平仓"
@@ -480,6 +490,8 @@ class Backtester:
                 side = self._get_trade_side(old_pos, delta, action)
                 exec_price = self._apply_slippage(price, side, bar_low=bar_low, bar_high=bar_high)
 
+                realized_profit = 0.0
+                reduced_qty = 0.0
                 if old_pos != 0 and np.sign(delta) != np.sign(old_pos):
                     reduced_qty = min(abs(delta), abs(old_pos))
                     closed_pos = math.copysign(reduced_qty, old_pos)
@@ -487,6 +499,8 @@ class Backtester:
                     self.balance += realized_profit
 
                 self._apply_trade_costs(delta, price, exec_price)
+                if reduced_qty > 0:
+                    self._record_closed_trade_pnl()
 
                 if abs(new_pos) > abs(old_pos):
                     existing_qty = abs(old_pos)
@@ -549,6 +563,22 @@ class Backtester:
     def _summary(self):
         pnl = self.final_equity - config.INITIAL_BALANCE
         drawdown = self.max_drawdown
+        wins = [value for value in self.closed_trade_pnls if value > 0]
+        losses = [value for value in self.closed_trade_pnls if value < 0]
+        closed_trade_count = len(self.closed_trade_pnls)
+        win_rate_pct = (len(wins) / closed_trade_count * 100.0) if closed_trade_count else 0.0
+        gross_profit = sum(wins)
+        gross_loss = -sum(losses)
+        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (float("inf") if gross_profit > 0 else 0.0)
+        avg_win = gross_profit / len(wins) if wins else 0.0
+        avg_loss = gross_loss / len(losses) if losses else 0.0
+        avg_win_loss_ratio = (avg_win / avg_loss) if avg_loss > 0 else (float("inf") if avg_win > 0 else 0.0)
+        avg_closed_trade_pnl = (
+            sum(self.closed_trade_pnls) / closed_trade_count
+            if closed_trade_count
+            else 0.0
+        )
+        net_pnl_after_costs = pnl
 
         log_info("回测完成 ✅")
         log_info(f"期末净值: {self.final_equity:.2f} USDT")
@@ -559,6 +589,12 @@ class Backtester:
         log_info(f"累计收益: {pnl:.2f} USDT ({pnl / config.INITIAL_BALANCE * 100:.2f}%)")
         log_info(f"最大回撤: {drawdown * 100:.2f}%")
         log_info(f"交易次数: {len(self.trade_log)}")
+        log_info(f"平仓交易数: {closed_trade_count}")
+        log_info(f"胜率: {win_rate_pct:.2f}%")
+        log_info(f"盈利因子: {profit_factor:.4f}")
+        log_info(f"平均盈亏比: {avg_win_loss_ratio:.4f}")
+        log_info(f"平均平仓净PnL: {avg_closed_trade_pnl:.2f} USDT")
+        log_info(f"手续费后收益: {net_pnl_after_costs:.2f} USDT ({net_pnl_after_costs / config.INITIAL_BALANCE * 100:.2f}%)")
         log_info(f"资金费事件数: {len(self.funding_log)}")
         log_info(f"止盈次数: {self.tp_exit_count}")
         log_info(f"止损次数: {self.sl_exit_count}")
@@ -567,7 +603,17 @@ class Backtester:
         log_info(f"资金费净额: {self.funding_pnl_total:.2f} USDT")
         log_info(f"交易记录示例: {self.trade_log[-5:]}")
         if self.enable_csv_dump:
-            self.dump_trade_log_to_csv(pnl, drawdown)
+            self.dump_trade_log_to_csv(pnl, drawdown, {
+                "closed_trade_count": closed_trade_count,
+                "win_rate_pct": win_rate_pct,
+                "profit_factor": profit_factor,
+                "avg_win": avg_win,
+                "avg_loss": avg_loss,
+                "avg_win_loss_ratio": avg_win_loss_ratio,
+                "avg_closed_trade_pnl": avg_closed_trade_pnl,
+                "net_pnl_after_costs": net_pnl_after_costs,
+                "net_return_pct_after_costs": net_pnl_after_costs / config.INITIAL_BALANCE * 100,
+            })
 
         return {
             "final_equity": float(self.final_equity),
@@ -576,6 +622,15 @@ class Backtester:
             "return_pct": float(pnl / config.INITIAL_BALANCE * 100),
             "max_drawdown_pct": float(drawdown * 100),
             "trade_count": int(len(self.trade_log)),
+            "closed_trade_count": int(closed_trade_count),
+            "win_rate_pct": float(win_rate_pct),
+            "profit_factor": float(profit_factor),
+            "avg_win": float(avg_win),
+            "avg_loss": float(avg_loss),
+            "avg_win_loss_ratio": float(avg_win_loss_ratio),
+            "avg_closed_trade_pnl": float(avg_closed_trade_pnl),
+            "net_pnl_after_costs": float(net_pnl_after_costs),
+            "net_return_pct_after_costs": float(net_pnl_after_costs / config.INITIAL_BALANCE * 100),
             "funding_event_count": int(len(self.funding_log)),
             "take_profit_count": int(self.tp_exit_count),
             "stop_loss_count": int(self.sl_exit_count),
@@ -586,7 +641,8 @@ class Backtester:
             "ending_entry_price": float(self.entry_price),
         }
 
-    def dump_trade_log_to_csv(self,pnl, drawdown):
+    def dump_trade_log_to_csv(self,pnl, drawdown, performance_metrics=None):
+        performance_metrics = performance_metrics or {}
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         backtest_log_path = os.path.join(LOGS_DIR, f"backtest_{self.interval}_{ts}.csv")
         with open(backtest_log_path, "w", newline="") as f:
@@ -615,6 +671,42 @@ class Backtester:
             writer.writerow([
                 "Trade Count",
                 len(self.trade_log)
+            ])
+            writer.writerow([
+                "Closed Trade Count",
+                performance_metrics.get("closed_trade_count", 0)
+            ])
+            writer.writerow([
+                "Win Rate (%)",
+                round(performance_metrics.get("win_rate_pct", 0.0), 2)
+            ])
+            writer.writerow([
+                "Profit Factor",
+                round(performance_metrics.get("profit_factor", 0.0), 4)
+            ])
+            writer.writerow([
+                "Average Win (USDT)",
+                round(performance_metrics.get("avg_win", 0.0), 2)
+            ])
+            writer.writerow([
+                "Average Loss (USDT)",
+                round(performance_metrics.get("avg_loss", 0.0), 2)
+            ])
+            writer.writerow([
+                "Average Win/Loss Ratio",
+                round(performance_metrics.get("avg_win_loss_ratio", 0.0), 4)
+            ])
+            writer.writerow([
+                "Average Closed Trade PnL (USDT)",
+                round(performance_metrics.get("avg_closed_trade_pnl", 0.0), 2)
+            ])
+            writer.writerow([
+                "Net PnL After Costs (USDT)",
+                round(performance_metrics.get("net_pnl_after_costs", pnl), 2)
+            ])
+            writer.writerow([
+                "Net Return After Costs (%)",
+                round(performance_metrics.get("net_return_pct_after_costs", pnl / config.INITIAL_BALANCE * 100), 2)
             ])
             writer.writerow([
                 "Funding Event Count",

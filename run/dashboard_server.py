@@ -679,7 +679,7 @@ def parse_latest_backtest_summary(log_lines):
         return {}
 
     summary = {}
-    relevant = log_lines[latest_idx: latest_idx + 12]
+    relevant = log_lines[latest_idx: latest_idx + 20]
     for line in relevant:
         message = strip_log_prefix(line)
         timestamp = None
@@ -701,6 +701,26 @@ def parse_latest_backtest_summary(log_lines):
         elif "交易次数" in message:
             trade_match = VALUE_WITH_UNIT_PATTERN.search(message)
             summary["trade_count"] = safe_int(trade_match.group(1), 0) if trade_match else None
+        elif "平仓交易数" in message:
+            closed_match = VALUE_WITH_UNIT_PATTERN.search(message)
+            summary["closed_trade_count"] = safe_int(closed_match.group(1), 0) if closed_match else None
+        elif "胜率" in message:
+            win_rate_match = VALUE_WITH_UNIT_PATTERN.search(message)
+            summary["win_rate_pct"] = safe_float(win_rate_match.group(1)) if win_rate_match else None
+        elif "盈利因子" in message:
+            profit_factor_match = VALUE_WITH_UNIT_PATTERN.search(message)
+            summary["profit_factor"] = safe_float(profit_factor_match.group(1)) if profit_factor_match else None
+        elif "平均盈亏比" in message:
+            ratio_match = VALUE_WITH_UNIT_PATTERN.search(message)
+            summary["avg_win_loss_ratio"] = safe_float(ratio_match.group(1)) if ratio_match else None
+        elif "平均平仓净PnL" in message:
+            avg_pnl_match = VALUE_WITH_UNIT_PATTERN.search(message)
+            summary["avg_closed_trade_pnl"] = safe_float(avg_pnl_match.group(1)) if avg_pnl_match else None
+        elif "手续费后收益" in message:
+            net_pnl_match = VALUE_WITH_UNIT_PATTERN.search(message)
+            pct_match = PERCENT_IN_PARENS_PATTERN.search(message)
+            summary["net_pnl_after_costs"] = safe_float(net_pnl_match.group(1)) if net_pnl_match else None
+            summary["net_return_pct_after_costs"] = safe_float(pct_match.group(1)) if pct_match else None
         elif "手续费合计" in message:
             fee_match = VALUE_WITH_UNIT_PATTERN.search(message)
             summary["fees_paid"] = safe_float(fee_match.group(1)) if fee_match else None

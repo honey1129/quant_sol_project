@@ -17,6 +17,8 @@ from utils.utils import BASE_DIR, LOGS_DIR
 LOCK_PATH = os.path.join(LOGS_DIR, "model_retrain.lock")
 STATE_PATH = os.path.join(LOGS_DIR, "model_retrain_state.json")
 BACKUP_ROOT = os.path.join(BASE_DIR, "models", "backups")
+HARD_MIN_CLOSED_TRADES = 1
+HARD_MIN_PROFIT_FACTOR = 1.0
 
 
 def utc_now_iso():
@@ -171,17 +173,54 @@ def run_backtest_validation(log_file):
     if not summary:
         raise RuntimeError("回测验证未返回 summary")
 
+    validate_backtest_summary(summary)
+    return summary
+
+
+def validate_backtest_summary(summary):
     min_return_pct = float(config.MODEL_RETRAIN_MIN_RETURN_PCT)
     max_drawdown_pct = float(config.MODEL_RETRAIN_MAX_DRAWDOWN_PCT)
-    if float(summary["return_pct"]) < min_return_pct:
+    min_closed_trades = max(HARD_MIN_CLOSED_TRADES, int(config.MODEL_RETRAIN_MIN_CLOSED_TRADES))
+    min_win_rate_pct = float(config.MODEL_RETRAIN_MIN_WIN_RATE_PCT)
+    min_profit_factor = max(HARD_MIN_PROFIT_FACTOR, float(config.MODEL_RETRAIN_MIN_PROFIT_FACTOR))
+    min_avg_win_loss_ratio = float(config.MODEL_RETRAIN_MIN_AVG_WIN_LOSS_RATIO)
+    min_net_pnl_after_costs = float(config.MODEL_RETRAIN_MIN_NET_PNL_AFTER_COSTS)
+
+    if float(summary.get("return_pct", 0.0)) < min_return_pct:
         raise RuntimeError(
-            f"回测收益未达标: return_pct={summary['return_pct']:.2f} < {min_return_pct:.2f}"
+            f"回测收益未达标: return_pct={summary.get('return_pct', 0.0):.2f} < {min_return_pct:.2f}"
         )
-    if float(summary["max_drawdown_pct"]) < max_drawdown_pct:
+    if float(summary.get("max_drawdown_pct", 0.0)) < max_drawdown_pct:
         raise RuntimeError(
-            f"回测回撤超限: max_drawdown_pct={summary['max_drawdown_pct']:.2f} < {max_drawdown_pct:.2f}"
+            f"回测回撤超限: max_drawdown_pct={summary.get('max_drawdown_pct', 0.0):.2f} < {max_drawdown_pct:.2f}"
         )
-    return summary
+    if int(summary.get("closed_trade_count", 0)) < min_closed_trades:
+        raise RuntimeError(
+            f"平仓交易数不足: closed_trade_count={summary.get('closed_trade_count', 0)} < {min_closed_trades}"
+        )
+    if float(summary.get("win_rate_pct", 0.0)) < min_win_rate_pct:
+        raise RuntimeError(
+            f"回测胜率未达标: win_rate_pct={summary.get('win_rate_pct', 0.0):.2f} < {min_win_rate_pct:.2f}"
+        )
+    if float(summary.get("profit_factor", 0.0)) <= HARD_MIN_PROFIT_FACTOR:
+        raise RuntimeError(
+            "盈利因子必须大于1: "
+            f"profit_factor={summary.get('profit_factor', 0.0):.4f} <= {HARD_MIN_PROFIT_FACTOR:.4f}"
+        )
+    if float(summary.get("profit_factor", 0.0)) < min_profit_factor:
+        raise RuntimeError(
+            f"盈利因子未达标: profit_factor={summary.get('profit_factor', 0.0):.4f} < {min_profit_factor:.4f}"
+        )
+    if float(summary.get("avg_win_loss_ratio", 0.0)) < min_avg_win_loss_ratio:
+        raise RuntimeError(
+            "平均盈亏比未达标: "
+            f"avg_win_loss_ratio={summary.get('avg_win_loss_ratio', 0.0):.4f} < {min_avg_win_loss_ratio:.4f}"
+        )
+    if float(summary.get("net_pnl_after_costs", 0.0)) < min_net_pnl_after_costs:
+        raise RuntimeError(
+            "手续费后收益未达标: "
+            f"net_pnl_after_costs={summary.get('net_pnl_after_costs', 0.0):.2f} < {min_net_pnl_after_costs:.2f}"
+        )
 
 
 def write_state(**updates):

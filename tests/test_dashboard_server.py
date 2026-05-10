@@ -85,6 +85,12 @@ class DashboardServerTests(unittest.TestCase):
             "2026-04-24 10:39:11,430 - INFO - 累计收益: 142.97 USDT (14.30%)",
             "2026-04-24 10:39:11,430 - INFO - 最大回撤: -0.31%",
             "2026-04-24 10:39:11,430 - INFO - 交易次数: 425",
+            "2026-04-24 10:39:11,430 - INFO - 平仓交易数: 120",
+            "2026-04-24 10:39:11,430 - INFO - 胜率: 51.67%",
+            "2026-04-24 10:39:11,430 - INFO - 盈利因子: 1.2345",
+            "2026-04-24 10:39:11,430 - INFO - 平均盈亏比: 1.1200",
+            "2026-04-24 10:39:11,430 - INFO - 平均平仓净PnL: 1.19 USDT",
+            "2026-04-24 10:39:11,430 - INFO - 手续费后收益: 142.97 USDT (14.30%)",
             "2026-04-24 10:39:11,430 - INFO - 手续费合计: 27.02 USDT",
             "2026-04-24 10:39:11,430 - INFO - 滑点成本合计: 14.96 USDT",
         ]
@@ -95,6 +101,13 @@ class DashboardServerTests(unittest.TestCase):
         self.assertAlmostEqual(summary["return_pct"], 14.30)
         self.assertAlmostEqual(summary["max_drawdown_pct"], -0.31)
         self.assertEqual(summary["trade_count"], 425)
+        self.assertEqual(summary["closed_trade_count"], 120)
+        self.assertAlmostEqual(summary["win_rate_pct"], 51.67)
+        self.assertAlmostEqual(summary["profit_factor"], 1.2345)
+        self.assertAlmostEqual(summary["avg_win_loss_ratio"], 1.12)
+        self.assertAlmostEqual(summary["avg_closed_trade_pnl"], 1.19)
+        self.assertAlmostEqual(summary["net_pnl_after_costs"], 142.97)
+        self.assertAlmostEqual(summary["net_return_pct_after_costs"], 14.30)
         self.assertAlmostEqual(summary["fees_paid"], 27.02)
         self.assertAlmostEqual(summary["slippage_cost"], 14.96)
 
