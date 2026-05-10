@@ -1,6 +1,15 @@
-# reward_risk.py
+import math
+from statistics import mean
 
-import numpy as np
+from config import config
+
+
+def get_configured_reward_risk():
+    reward_risk = float(getattr(config, "KELLY_REWARD_RISK", 1.0))
+    if not math.isfinite(reward_risk) or reward_risk <= 0:
+        raise ValueError(f"KELLY_REWARD_RISK 必须为正数: {reward_risk}")
+    return reward_risk
+
 
 class RewardRiskEstimator:
     def __init__(self, min_trades=12, default_rr=1.8):
@@ -21,8 +30,8 @@ class RewardRiskEstimator:
         if not wins or not losses:
             return self.default_rr
 
-        avg_win = np.mean(wins)
-        avg_loss = np.mean(losses)
+        avg_win = mean(wins)
+        avg_loss = mean(losses)
 
         rr = avg_win / avg_loss
         return max(0.8, min(rr, 3.5))

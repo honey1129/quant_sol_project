@@ -6,6 +6,7 @@ import traceback
 import math
 from core.strategy_core import StrategyCore
 from core.trend_filter import derive_trend_context
+from core.reward_risk import get_configured_reward_risk
 import time
 import numpy as np
 import pandas as pd
@@ -101,7 +102,7 @@ class Backtester:
             self.data_dict, self.reward_risk = self._load_data()
         else:
             self.data_dict = data_dict
-            self.reward_risk = float(reward_risk if reward_risk is not None else config.KELLY_REWARD_RISK)
+            self.reward_risk = float(reward_risk if reward_risk is not None else get_configured_reward_risk())
 
         # 特征工程
         if precomputed_data is None:
@@ -191,7 +192,7 @@ class Backtester:
         log_info(f"从OKX拉取历史数据: {self.interval}, {self.window}根K线")
         client = okx_api.OKXClient()
         all_data = client.fetch_data()
-        reward_risk = float(config.KELLY_REWARD_RISK)
+        reward_risk = get_configured_reward_risk()
         log_info(f"回测使用固定 reward_risk={reward_risk:.4f}")
         return all_data,reward_risk
 

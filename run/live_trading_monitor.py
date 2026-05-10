@@ -7,7 +7,7 @@ import traceback
 import numpy as np
 import pandas as pd
 from core import ml_feature_engineering, signal_engine
-from core.reward_risk import RewardRiskEstimator
+from core.reward_risk import get_configured_reward_risk
 from core.strategy_core import StrategyCore
 from core.trend_filter import derive_trend_context
 from utils.utils import log_info, log_error, BASE_DIR
@@ -216,24 +216,9 @@ class LiveTrader:
         self.client.ensure_trading_ready()
 
     def _load_reward_risk(self):
-        try:
-            trades = self.client.fetch_recent_closed_trades()
-            rr = RewardRiskEstimator()
-            rr.batch_update(trades)
-            val = float(rr.estimate())
-            min_rr = float(getattr(config, "LIVE_REWARD_RISK_MIN", 0.0) or 0.0)
-            if min_rr > 0 and val < min_rr:
-                log_info(f"reward_risk={val:.4f} 低于实盘下限 {min_rr:.4f}，使用下限")
-                return min_rr
-            log_info(f"reward_risk={val:.4f}")
-            return val
-        except Exception as e:
-            fallback_rr = float(getattr(config, "KELLY_REWARD_RISK", 1.8) or 1.8)
-            min_rr = float(getattr(config, "LIVE_REWARD_RISK_MIN", 0.0) or 0.0)
-            if min_rr > 0:
-                fallback_rr = max(fallback_rr, min_rr)
-            log_error(f"reward_risk 获取失败，使用默认 {fallback_rr:.4f}：{e}")
-            return fallback_rr
+        reward_risk = get_configured_reward_risk()
+        log_info(f"实盘使用固定 reward_risk={reward_risk:.4f}（与回测一致）")
+        return reward_risk
 
     def _predict_latest_probs(self, row: pd.Series):
         X = row[self.feature_cols].values.reshape(1, -1).astype(float)
