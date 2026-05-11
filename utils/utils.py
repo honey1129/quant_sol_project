@@ -63,12 +63,15 @@ _telegram_disabled_for_process = False
 def log_info(msg):
     print(msg)
     logging.info(msg)
-    send_telegram(msg)
 
 def log_error(msg):
     print("❌", msg)
     logging.error(msg)
-    send_telegram(f"❌ {msg}")
+
+
+def notify_important(message):
+    logging.info("[important] %s", message)
+    send_telegram(message)
 
 # ✅ Telegram 通知模块
 def send_telegram(message):

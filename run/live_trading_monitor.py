@@ -10,7 +10,7 @@ from core import ml_feature_engineering, signal_engine
 from core.reward_risk import get_configured_reward_risk
 from core.strategy_core import StrategyCore
 from core.trend_filter import derive_trend_context
-from utils.utils import log_info, log_error, BASE_DIR
+from utils.utils import log_info, log_error, notify_important, BASE_DIR
 from utils.utils import DISPLAY_TIMEZONE
 from utils.runtime_dashboard import write_runtime_dashboard_snapshot
 from utils.trade_audit import build_trade_record, append_trade_record, write_daily_report
@@ -130,6 +130,15 @@ def format_display_ts(value):
         return str(value)
 
 
+def fmt_optional(value, digits=2):
+    try:
+        if value is None:
+            return "-"
+        return f"{float(value):.{digits}f}"
+    except (TypeError, ValueError):
+        return "-"
+
+
 class LiveTrader:
     def __init__(self, client):
         self.client = client
@@ -162,6 +171,8 @@ class LiveTrader:
         self.last_position_snapshot = {}
         self.last_bar_snapshot = {}
         self.last_execution = {}
+        self.consecutive_loop_errors = 0
+        self.last_error_notified_count = 0
 
         # ===== 模型/特征=====
         feature_path = os.path.join(BASE_DIR, config.FEATURE_LIST_PATH) if "BASE_DIR" in globals() else config.FEATURE_LIST_PATH
@@ -624,6 +635,55 @@ class LiveTrader:
             }
         return record
 
+    def _notify_trade_execution(self, record):
+        if not record:
+            return
+
+        action_labels = {
+            "OPEN": "开仓",
+            "CLOSE": "平仓",
+            "REBALANCE": "调仓",
+        }
+        action = str(record.get("action") or "").upper()
+        label = action_labels.get(action, action or "成交")
+        lines = [
+            f"[交易{label}] {record.get('symbol') or config.SYMBOL}",
+            f"方向: {record.get('pos_side') or '-'} / {record.get('side') or '-'}",
+            f"原因: {record.get('reason') or '-'}",
+            f"成交: price={fmt_optional(record.get('fill_price'), 4)}, qty={fmt_optional(record.get('fill_size'), 6)}",
+            f"名义金额: {fmt_optional(record.get('notional'), 2)} USDT",
+            f"净实现PnL: {fmt_optional(record.get('net_realized_pnl'), 2)} USDT",
+            f"手续费: {fmt_optional(record.get('fee_abs'), 2)} {record.get('fee_currency') or 'USDT'}",
+            f"权益变化: {fmt_optional(record.get('equity_delta'), 2)} USDT",
+        ]
+        notify_important("\n".join(lines))
+
+    def _notify_trade_failure(self, action, reason, detail):
+        notify_important(
+            "[交易未成交]\n"
+            f"动作: {action}\n"
+            f"原因: {reason}\n"
+            f"详情: {detail}\n"
+            f"最近bar: {format_display_ts(self.last_bar_ts)}"
+        )
+
+    def _notify_consecutive_loop_error(self, error):
+        threshold = max(1, int(getattr(config, "TELEGRAM_LOOP_ERROR_NOTIFY_THRESHOLD", 3)))
+        if self.consecutive_loop_errors < threshold:
+            return
+        if self.consecutive_loop_errors == self.last_error_notified_count:
+            return
+        if self.consecutive_loop_errors > threshold and self.consecutive_loop_errors % 5 != 0:
+            return
+
+        self.last_error_notified_count = self.consecutive_loop_errors
+        notify_important(
+            "[实盘连续异常]\n"
+            f"连续次数: {self.consecutive_loop_errors}\n"
+            f"最近bar: {format_display_ts(self.last_bar_ts)}\n"
+            f"错误: {error}"
+        )
+
     def _maybe_log_same_bar_heartbeat(self, current_bar_ts):
         now_ts = time.monotonic()
         if not should_emit_interval_log(
@@ -779,8 +839,10 @@ class LiveTrader:
             )
             if success:
                 log_info(f"执行平仓: reason={out['reason']}")
+                self._notify_trade_execution(trade_record)
             else:
                 log_error(f"平仓未成交，已重新同步仓位: reason={out['reason']}")
+                self._notify_trade_failure("CLOSE", out["reason"], "平仓委托未确认成交，已重新同步仓位")
             self._persist_last_bar_state(bar_ts)
             return
 
@@ -827,8 +889,14 @@ class LiveTrader:
             )
             if success:
                 log_info(f"执行开仓: target_ratio={out['target_ratio']:.3f}, qty={abs(delta):.6f}")
+                self._notify_trade_execution(trade_record)
             else:
                 log_error(f"开仓未成交，已重新同步仓位: target_ratio={out['target_ratio']:.3f}, qty={abs(delta):.6f}")
+                self._notify_trade_failure(
+                    "OPEN",
+                    out["reason"],
+                    f"target_ratio={out['target_ratio']:.3f}, qty={abs(delta):.6f}",
+                )
             self._persist_last_bar_state(bar_ts)
             return
 
@@ -875,8 +943,14 @@ class LiveTrader:
             )
             if success:
                 log_info(f"执行调仓: delta_qty={delta:.6f}, reason={out['reason']}")
+                self._notify_trade_execution(trade_record)
             else:
                 log_error(f"调仓未成交，已重新同步仓位: delta_qty={delta:.6f}, reason={out['reason']}")
+                self._notify_trade_failure(
+                    "REBALANCE",
+                    out["reason"],
+                    f"delta_qty={delta:.6f}",
+                )
             self._persist_last_bar_state(bar_ts)
             return
 
@@ -955,7 +1029,10 @@ def run():
     while True:
         try:
             trader.run_once_on_new_bar()
+            trader.consecutive_loop_errors = 0
+            trader.last_error_notified_count = 0
         except Exception as e:
+            trader.consecutive_loop_errors += 1
             trader._write_dashboard_snapshot(
                 runtime_status="error",
                 latest_closed_bar_ts=trader.last_bar_ts,
@@ -967,6 +1044,7 @@ def run():
             )
             log_error(f"实盘循环异常: {e}")
             log_error(traceback.format_exc())
+            trader._notify_consecutive_loop_error(e)
 
         time.sleep(int(POLL_SEC))
 

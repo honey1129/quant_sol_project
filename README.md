@@ -40,9 +40,9 @@ quant_sol_project/
 
 - 从 OKX 拉取多周期历史数据
 - 生成多周期特征与高级特征
-- 按时间顺序切分训练集 / 测试集，避免未来数据泄漏
+- 按时间顺序切分训练集 / 验证集 / 最终 OOS 回测集，中间留 purge gap，避免未来数据泄漏
 - 在训练集内部做类别平衡
-- 产出模型文件和特征列表
+- 产出模型文件、特征列表和训练元数据
 
 默认模型输出：
 
@@ -50,6 +50,7 @@ quant_sol_project/
 - `models/xgb_model.pkl`
 - `models/rf_model.pkl`
 - `models/feature_list.pkl`
+- `models/training_metadata.json`
 
 ### 2. 回测
 
@@ -68,6 +69,11 @@ quant_sol_project/
 - `return_pct`
 - `max_drawdown_pct`
 - `trade_count`
+- `closed_trade_count`
+- `win_rate_pct`
+- `profit_factor`
+- `avg_win_loss_ratio`
+- `net_pnl_after_costs`
 - `take_profit_count`
 - `stop_loss_count`
 - `fees_paid`
@@ -221,6 +227,18 @@ MODEL_PATHS=lgb_v1:models/lgb_model.pkl,xgb_v1:models/xgb_model.pkl,rf_v1:models
 # 模型权重
 MODEL_WEIGHTS=lgb_v1:0.5,xgb_v1:0.3,rf_v1:0.2
 
+# 训练/验证/OOS 样本切分
+TRAINING_METADATA_PATH=models/training_metadata.json
+MODEL_LABEL_FUTURE_WINDOW=5
+MODEL_LABEL_THRESHOLD=0.002
+MODEL_TRAIN_RATIO=0.70
+MODEL_VALIDATION_RATIO=0.15
+MODEL_PURGE_BARS=5
+MODEL_WALK_FORWARD_ENABLED=1
+MODEL_WALK_FORWARD_FOLDS=3
+MODEL_WALK_FORWARD_MIN_FOLDS=2
+MODEL_WALK_FORWARD_MIN_VALIDATION_ROWS=100
+
 # 仓位边界
 POSITION_MIN=0.08
 POSITION_MAX=0.30
@@ -267,9 +285,22 @@ ADAPTIVE_STOP_LOSS_MAX=0.022
 MIN_TAKE_PROFIT_TO_STOP_LOSS_RATIO=2.2
 MIN_TAKE_PROFIT_COST_MULTIPLIER=6.0
 
+# 自动重训准入
+MODEL_RETRAIN_VALIDATE_BACKTEST=1
+MODEL_RETRAIN_MIN_CLOSED_TRADES=10
+MODEL_RETRAIN_MIN_WIN_RATE_PCT=45.0
+MODEL_RETRAIN_MIN_PROFIT_FACTOR=1.05
+MODEL_RETRAIN_MIN_AVG_WIN_LOSS_RATIO=0.8
+MODEL_RETRAIN_MIN_NET_PNL_AFTER_COSTS=0.0
+MODEL_RETRAIN_MIN_OOS_ROWS=100
+
 # Telegram 通知
 TELEGRAM_BOT_TOKEN=这里填你的token
 TELEGRAM_CHAT_ID=这里填你的chat_id
+TELEGRAM_ENABLED=0
+TELEGRAM_LOOP_ERROR_NOTIFY_THRESHOLD=3
+DAILY_REPORT_HOUR=23
+DAILY_REPORT_MINUTE=59
 
 TRAILING_STOP=0.03
 MAX_HOLD_BARS=96
@@ -284,6 +315,10 @@ POLL_SEC=10
 - `ADD_THRESHOLD=0.25` / `MIN_ADJUST_AMOUNT=75`：目标仓位变化不够大时不 rebalance，避免小额手续费磨损。
 - `ESTIMATED_SLIPPAGE_BPS=5.0` / `MIN_EXPECTED_NET_EDGE=0.001`：只有扣掉估算手续费和滑点后仍有净边际，策略才允许开仓。
 - `POSITION_MAX=0.30` / `LEVERAGE=3`：先降低最大暴露，等测试盘稳定后再逐步放开。
+- `MODEL_TRAIN_RATIO` / `MODEL_VALIDATION_RATIO` / `MODEL_PURGE_BARS`：训练区、验证区、最终 OOS 回测区按时间切开，中间留 purge gap。
+- `MODEL_WALK_FORWARD_ENABLED=1`：重训准入前会在验证区内做滚动 walk-forward 验证。
+- `MODEL_RETRAIN_MIN_*`：最终 OOS 回测必须满足交易数、胜率、profit factor、平均盈亏比和手续费后收益门槛；新模型还必须在同一段 OOS 上优于旧模型。
+- `TELEGRAM_ENABLED=1`：只播报重要事件，包括开平仓/调仓成交、重训成功或失败回滚、连续实盘异常、手动生成的每日复盘汇总；普通心跳和一般日志只写本地文件。
 
 改完线上 `.env` 后，需要重启 PM2 进程才会生效：
 

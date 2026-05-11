@@ -8,7 +8,7 @@ import json
 import signal
 from datetime import datetime, timedelta
 
-from utils.utils import BASE_DIR
+from utils.utils import BASE_DIR, DISPLAY_TIMEZONE
 from utils.safe_runner import safe_run
 from config import config
 
@@ -23,6 +23,7 @@ logging.basicConfig(
 
 PID_FILE = os.path.join(log_dir, "live_trading_monitor.pid")
 MODEL_RETRAIN_STATE_FILE = os.path.join(log_dir, "model_retrain_state.json")
+DAILY_REPORT_STATE_FILE = os.path.join(log_dir, "daily_report_state.json")
 
 def train_job():
     logging.info("🟢 开始训练任务")
@@ -151,11 +152,47 @@ def model_retrain_job():
     if bool(config.MODEL_RETRAIN_RESTART_LIVE_MONITOR):
         stop_live_monitor_for_model_reload()
 
+def should_run_daily_report(now=None):
+    now = now or datetime.now()
+    if now.tzinfo is None:
+        display_now = now.astimezone()
+    else:
+        display_now = now
+    display_now = display_now.astimezone(DISPLAY_TIMEZONE)
+    scheduled_at = display_now.replace(
+        hour=int(config.DAILY_REPORT_HOUR),
+        minute=int(config.DAILY_REPORT_MINUTE),
+        second=0,
+        microsecond=0,
+    )
+    if display_now < scheduled_at:
+        return False
+
+    state = _load_json(DAILY_REPORT_STATE_FILE, {})
+    if state.get("last_report_date") == display_now.strftime("%Y-%m-%d"):
+        return False
+    return True
+
+
+def daily_report_job():
+    logging.info("🟢 开始生成每日交易复盘")
+    result = subprocess.run([sys.executable, "-m", "run.daily_trade_report"], cwd=BASE_DIR)
+    if result.returncode != 0:
+        raise RuntimeError(f"每日交易复盘生成失败: exit_code={result.returncode}")
+
+    now = datetime.now(DISPLAY_TIMEZONE)
+    with open(DAILY_REPORT_STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump({"last_report_date": now.strftime("%Y-%m-%d")}, f, ensure_ascii=False, sort_keys=True)
+    logging.info("✅ 每日交易复盘完成")
+
 def scheduler():
     now = datetime.now()
 
     if should_run_model_retrain(now):
         safe_run(model_retrain_job, max_retry=1)
+
+    if should_run_daily_report(now):
+        safe_run(daily_report_job, max_retry=1)
 
     # 确保实盘常驻进程存在
     safe_run(ensure_live_monitor_running)
