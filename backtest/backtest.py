@@ -1,6 +1,7 @@
 import os
 from datetime import datetime
 import csv
+from collections import Counter
 import joblib
 import traceback
 import math
@@ -69,6 +70,21 @@ def resolve_intrabar_tp_sl(position, entry_price, bar_open, bar_high, bar_low, t
         "tp_price": float(take_profit_price),
         "sl_price": float(stop_loss_price),
     }
+
+
+def _quantiles(values, points=(0.1, 0.25, 0.5, 0.75, 0.9, 0.95)):
+    cleaned = []
+    for value in values:
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            cleaned.append(value)
+    if not cleaned:
+        return {}
+    arr = np.array(cleaned)
+    return {f"p{int(point * 100)}": float(np.quantile(arr, point)) for point in points}
 
 
 class Backtester:
@@ -140,6 +156,15 @@ class Backtester:
         self.tp_exit_count = 0
         self.sl_exit_count = 0
         self.final_equity = self.balance
+        self.decision_reason_counts = Counter()
+        self.decision_action_counts = Counter()
+        self.decision_trend_counts = Counter()
+        self.decision_direction_counts = Counter()
+        self.decision_max_probs = []
+        self.decision_prob_gaps = []
+        self.decision_target_ratios = []
+        self.decision_edge_values = []
+        self.decision_examples = []
 
         # 初始化 position_manager
         self.position_manager = position_manager.PositionManager()
@@ -162,7 +187,7 @@ class Backtester:
             min_hold_bars=config.MIN_HOLD_BARS,
             add_threshold=config.ADD_THRESHOLD,
             max_rebalance_ratio=config.MAX_REBALANCE_RATIO,
-            min_adjust_amount=float(config.MIN_ADJUST_AMOUNT),
+            min_adjust_amount=float(config.BACKTEST_MIN_ADJUST_AMOUNT),
             signal_min_prob_diff=config.SIGNAL_MIN_PROB_DIFF,
             min_signal_target_ratio=config.MIN_SIGNAL_TARGET_RATIO,
             reverse_signal_min_prob_diff=config.REVERSE_SIGNAL_MIN_PROB_DIFF,
@@ -340,6 +365,53 @@ class Backtester:
     def _mark_to_market_equity(self, mark_price):
         return mark_to_market_equity(self.balance, self.position, self.entry_price, mark_price)
 
+    def _record_decision_diagnostic(self, out, signal_row, trend_context, take_profit, stop_loss):
+        self.decision_action_counts[out.get("action", "")] += 1
+        self.decision_reason_counts[out.get("reason", "")] += 1
+        trend_bias = trend_context.get("trend_bias")
+        self.decision_trend_counts[trend_bias] += 1
+
+        long_prob = float(signal_row["long_prob"])
+        short_prob = float(signal_row["short_prob"])
+        dominant_prob = max(long_prob, short_prob)
+        prob_gap = abs(long_prob - short_prob)
+        direction = "long" if long_prob >= short_prob else "short"
+        self.decision_direction_counts[direction] += 1
+        self.decision_max_probs.append(dominant_prob)
+        self.decision_prob_gaps.append(prob_gap)
+        self.decision_target_ratios.append(abs(float(out.get("target_ratio") or 0.0)))
+        expected_edge = self.core._expected_net_edge_ratio(dominant_prob, take_profit, stop_loss)
+        self.decision_edge_values.append(expected_edge)
+
+        if len(self.decision_examples) < 12 and out.get("action") == "HOLD":
+            self.decision_examples.append({
+                "ts": signal_row.name.isoformat() if hasattr(signal_row.name, "isoformat") else str(signal_row.name),
+                "reason": out.get("reason"),
+                "direction": direction,
+                "long_prob": round(long_prob, 4),
+                "short_prob": round(short_prob, 4),
+                "prob_gap": round(prob_gap, 4),
+                "trend_bias": trend_bias,
+                "target_ratio": round(float(out.get("target_ratio") or 0.0), 4),
+                "expected_edge": round(float(expected_edge), 6),
+            })
+
+    def _log_decision_diagnostics(self):
+        if not self.decision_action_counts:
+            return
+
+        log_info("回测决策诊断:")
+        log_info(f"动作分布: {dict(self.decision_action_counts)}")
+        log_info(f"原因分布TOP: {self.decision_reason_counts.most_common(12)}")
+        log_info(f"信号方向分布: {dict(self.decision_direction_counts)}")
+        log_info(f"趋势分布: {dict(self.decision_trend_counts)}")
+        log_info(f"最大概率分位: {_quantiles(self.decision_max_probs)}")
+        log_info(f"概率差分位: {_quantiles(self.decision_prob_gaps)}")
+        log_info(f"目标仓位比例分位: {_quantiles(self.decision_target_ratios)}")
+        log_info(f"预期净边际分位: {_quantiles(self.decision_edge_values)}")
+        if self.decision_examples:
+            log_info(f"HOLD样例: {self.decision_examples}")
+
     def _maybe_execute_intrabar_tp_sl(self, exec_row, take_profit=None, stop_loss=None):
         if not self.enable_intrabar_tp_sl or self.position == 0 or self.entry_price <= 0:
             return False
@@ -452,6 +524,7 @@ class Backtester:
             action = out["action"]
             delta = float(out["delta_qty"])
             take_profit, stop_loss = self.core.get_risk_thresholds()
+            self._record_decision_diagnostic(out, signal_row, trend_context, take_profit, stop_loss)
 
             if action == "CLOSE":
                 pos_to_close = self.position
@@ -602,6 +675,8 @@ class Backtester:
         log_info(f"滑点成本合计: {self.slippage_paid_total:.2f} USDT")
         log_info(f"资金费净额: {self.funding_pnl_total:.2f} USDT")
         log_info(f"交易记录示例: {self.trade_log[-5:]}")
+        if len(self.trade_log) == 0:
+            self._log_decision_diagnostics()
         if self.enable_csv_dump:
             self.dump_trade_log_to_csv(pnl, drawdown, {
                 "closed_trade_count": closed_trade_count,
