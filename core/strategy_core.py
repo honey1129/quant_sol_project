@@ -42,6 +42,7 @@ class StrategyCore:
         min_take_profit_cost_multiplier: float = 6.0,
         trade_cooldown_bars: int = 0,
         trend_filter_enabled: bool = False,
+        block_losing_position_adds: bool = True,
     ):
         self.pm = position_manager
 
@@ -83,6 +84,7 @@ class StrategyCore:
         self.min_take_profit_cost_multiplier = max(0.0, float(min_take_profit_cost_multiplier))
         self.trade_cooldown_bars = max(0, int(trade_cooldown_bars))
         self.trend_filter_enabled = bool(trend_filter_enabled)
+        self.block_losing_position_adds = bool(block_losing_position_adds)
 
         self.position = 0.0
         self.entry_price = 0.0
@@ -571,6 +573,31 @@ class StrategyCore:
                 ))
 
                 if abs(delta * price) >= self.min_adjust_amount:
+                    if (
+                        self.block_losing_position_adds
+                        and np.sign(delta) == np.sign(pos)
+                        and self.entry_price > 0
+                    ):
+                        pnl_pct = (
+                            (price - self.entry_price) / self.entry_price
+                            if pos > 0 else
+                            (self.entry_price - price) / self.entry_price
+                        )
+                        if pnl_pct < 0:
+                            return {
+                                "action": "HOLD",
+                                "delta_qty": 0.0,
+                                "target_ratio": target_ratio,
+                                "target_position": target_position,
+                                "reason": f"NoAddToLosingPosition(pnl={pnl_pct:.4%})",
+                                "next_position": float(pos),
+                                "next_entry_price": float(self.entry_price),
+                                "next_hold_bars": next_hold_bars,
+                                "next_cooldown_bars": self._next_hold_cooldown(),
+                                "next_reverse_signal_bars": next_reverse_signal_bars,
+                                "next_reset_risk": False,
+                            }
+
                     new_position = pos + delta
 
                     # 同方向加仓时，更新持仓均价；减仓则保留剩余仓位原均价。

@@ -203,6 +203,7 @@ class Backtester:
             min_take_profit_cost_multiplier=float(config.MIN_TAKE_PROFIT_COST_MULTIPLIER),
             trade_cooldown_bars=int(config.TRADE_COOLDOWN_BARS),
             trend_filter_enabled=bool(config.TREND_FILTER_ENABLED),
+            block_losing_position_adds=bool(config.BLOCK_LOSING_POSITION_ADDS),
         )
         if self.emit_diagnostics:
             self._log_intrabar_range_diagnostics()

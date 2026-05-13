@@ -66,7 +66,7 @@ class StrategyCoreRebalanceTests(unittest.TestCase):
         self.assertAlmostEqual(out["delta_qty"], 5.0)
 
     def test_short_rebalance_adding_position_returns_negative_delta(self):
-        core = self.build_core(target_ratio=1.5)
+        core = self.build_core(target_ratio=1.5, block_losing_position_adds=False)
         core.set_state(position=-10.0, entry_price=100.0, hold_bars=0)
 
         out = core.on_bar(
@@ -80,6 +80,54 @@ class StrategyCoreRebalanceTests(unittest.TestCase):
 
         self.assertEqual(out["action"], "REBALANCE")
         self.assertAlmostEqual(out["delta_qty"], -5.0)
+
+    def test_same_direction_add_to_losing_long_is_blocked(self):
+        core = self.build_core(target_ratio=1.5, block_losing_position_adds=True)
+        core.set_state(position=10.0, entry_price=100.0, hold_bars=0)
+
+        out = core.on_bar(
+            price=99.0,
+            equity=1000.0,
+            long_prob=0.9,
+            short_prob=0.1,
+            money_flow_ratio=1.0,
+            volatility=0.01,
+        )
+
+        self.assertEqual(out["action"], "HOLD")
+        self.assertTrue(out["reason"].startswith("NoAddToLosingPosition"))
+
+    def test_same_direction_reduction_of_losing_long_is_allowed(self):
+        core = self.build_core(target_ratio=0.5, block_losing_position_adds=True)
+        core.set_state(position=10.0, entry_price=100.0, hold_bars=0)
+
+        out = core.on_bar(
+            price=99.0,
+            equity=1000.0,
+            long_prob=0.9,
+            short_prob=0.1,
+            money_flow_ratio=1.0,
+            volatility=0.01,
+        )
+
+        self.assertEqual(out["action"], "REBALANCE")
+        self.assertLess(out["delta_qty"], 0)
+
+    def test_same_direction_add_to_winning_short_is_allowed(self):
+        core = self.build_core(target_ratio=1.5, block_losing_position_adds=True)
+        core.set_state(position=-10.0, entry_price=100.0, hold_bars=0)
+
+        out = core.on_bar(
+            price=99.0,
+            equity=1000.0,
+            long_prob=0.1,
+            short_prob=0.9,
+            money_flow_ratio=1.0,
+            volatility=0.01,
+        )
+
+        self.assertEqual(out["action"], "REBALANCE")
+        self.assertLess(out["delta_qty"], 0)
 
     def test_adaptive_thresholds_override_fixed_tp_sl(self):
         core = self.build_core(
