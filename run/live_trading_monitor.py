@@ -9,6 +9,7 @@ import pandas as pd
 from core import ml_feature_engineering, signal_engine
 from core.reward_risk import get_configured_reward_risk
 from core.strategy_core import StrategyCore
+from core.dynamic_risk import DynamicRiskController
 from core.trend_filter import derive_trend_context
 from utils.utils import log_info, log_error, notify_important, BASE_DIR
 from utils.utils import DISPLAY_TIMEZONE
@@ -143,6 +144,7 @@ class LiveTrader:
     def __init__(self, client):
         self.client = client
         self.position_manager = PositionManager()
+        self.dynamic_risk_controller = DynamicRiskController()
 
         self.MIN_HOLD_BARS = config.MIN_HOLD_BARS
         self.ADD_THRESHOLD = config.ADD_THRESHOLD
@@ -219,6 +221,7 @@ class LiveTrader:
             trade_cooldown_bars=int(config.TRADE_COOLDOWN_BARS),
             trend_filter_enabled=bool(config.TREND_FILTER_ENABLED),
             block_losing_position_adds=bool(config.BLOCK_LOSING_POSITION_ADDS),
+            dynamic_risk_controller=self.dynamic_risk_controller,
         )
 
         if self.last_bar_ts is not None:
@@ -403,6 +406,7 @@ class LiveTrader:
                 "symbol": config.SYMBOL,
                 "last_price": current_price,
                 "leverage": float(config.LEVERAGE),
+                "dynamic_risk_enabled": bool(config.DYNAMIC_RISK_ENABLED),
                 "simulated": str(config.USE_SERVER) == "1",
             },
             "bar": self.last_bar_snapshot,
@@ -538,24 +542,34 @@ class LiveTrader:
             return -float(short_pos["size"]), float(short_pos["entry_price"])
         return 0.0, 0.0
 
-    def _execute_delta(self, current_pos_qty: float, delta_qty: float) -> bool:
+    def _resolve_order_leverage(self, decision=None):
+        risk = (decision or {}).get("risk") or {}
+        leverage = risk.get("effective_leverage", config.LEVERAGE)
+        try:
+            leverage = int(round(float(leverage)))
+        except (TypeError, ValueError):
+            leverage = int(config.LEVERAGE)
+        return max(1, min(int(config.LEVERAGE), leverage))
+
+    def _execute_delta(self, current_pos_qty: float, delta_qty: float, decision=None) -> bool:
         qty = abs(float(delta_qty))
         if qty <= 0:
             return False
+        leverage = self._resolve_order_leverage(decision)
 
         if current_pos_qty > 0:
             if delta_qty > 0:
-                return self.client.open_long_sz(qty, config.LEVERAGE)
-            return self.client.close_long_sz(qty, config.LEVERAGE)
+                return self.client.open_long_sz(qty, leverage)
+            return self.client.close_long_sz(qty, leverage)
 
         if current_pos_qty < 0:
             if delta_qty < 0:
-                return self.client.open_short_sz(qty, config.LEVERAGE)
-            return self.client.close_short_sz(qty, config.LEVERAGE)
+                return self.client.open_short_sz(qty, leverage)
+            return self.client.close_short_sz(qty, leverage)
 
         if delta_qty > 0:
-            return self.client.open_long_sz(qty, config.LEVERAGE)
-        return self.client.open_short_sz(qty, config.LEVERAGE)
+            return self.client.open_long_sz(qty, leverage)
+        return self.client.open_short_sz(qty, leverage)
 
     def _persist_last_bar_state(self, bar_ts):
         if not bool(config.LIVE_PERSIST_LAST_BAR):
@@ -786,6 +800,7 @@ class LiveTrader:
             "target_ratio": float(out.get("target_ratio", 0.0) or 0.0),
             "target_position": float(out.get("target_position", 0.0) or 0.0),
             "delta_qty": delta,
+            "risk": out.get("risk"),
             "next_cooldown_bars": int(out.get("next_cooldown_bars", self.cooldown_bars_remaining)),
             "next_reverse_signal_bars": int(out.get("next_reverse_signal_bars", self.reverse_signal_bars)),
             "trend_bias": trend_context.get("trend_bias"),
@@ -794,10 +809,11 @@ class LiveTrader:
 
         if action == "CLOSE":
             success = False
+            leverage = self._resolve_order_leverage(decision)
             if pos_qty > 0:
-                success = self.client.close_long_sz(abs(pos_qty), config.LEVERAGE)
+                success = self.client.close_long_sz(abs(pos_qty), leverage)
             elif pos_qty < 0:
-                success = self.client.close_short_sz(abs(pos_qty), config.LEVERAGE)
+                success = self.client.close_short_sz(abs(pos_qty), leverage)
             if success:
                 self.cooldown_bars_remaining = int(out.get("next_cooldown_bars", self.cooldown_bars_remaining))
                 self.reverse_signal_bars = int(out.get("next_reverse_signal_bars", 0))
@@ -848,7 +864,7 @@ class LiveTrader:
             return
 
         elif action == "OPEN":
-            success = self._execute_delta(pos_qty, delta)
+            success = self._execute_delta(pos_qty, delta, decision)
             self.cooldown_bars_remaining = int(out.get("next_cooldown_bars", self.cooldown_bars_remaining))
             self.reverse_signal_bars = int(out.get("next_reverse_signal_bars", 0))
             self._sync_after_trade()
@@ -902,7 +918,7 @@ class LiveTrader:
             return
 
         elif action == "REBALANCE":
-            success = self._execute_delta(pos_qty, delta)
+            success = self._execute_delta(pos_qty, delta, decision)
             self.cooldown_bars_remaining = int(out.get("next_cooldown_bars", self.cooldown_bars_remaining))
             self.reverse_signal_bars = int(out.get("next_reverse_signal_bars", self.reverse_signal_bars))
             self._sync_after_trade()

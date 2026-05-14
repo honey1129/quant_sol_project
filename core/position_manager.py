@@ -5,10 +5,16 @@ import math
 from config import config
 
 class PositionManager:
-    def __init__(self):
-        self.min_ratio = config.POSITION_MIN
-        self.max_ratio = config.POSITION_MAX
+    def __init__(self, min_ratio=None, max_ratio=None):
+        self.min_ratio = float(config.POSITION_MIN if min_ratio is None else min_ratio)
+        self.max_ratio = float(config.POSITION_MAX if max_ratio is None else max_ratio)
         self.adjust_unit = config.ADJUST_UNIT
+
+    def set_bounds(self, *, min_ratio=None, max_ratio=None):
+        if min_ratio is not None:
+            self.min_ratio = float(min_ratio)
+        if max_ratio is not None:
+            self.max_ratio = max(float(max_ratio), self.min_ratio)
 
     # Kelly公式计算
     def kelly_fraction(self, prob, reward_risk):

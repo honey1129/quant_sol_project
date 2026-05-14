@@ -9,6 +9,7 @@ from core.ml_feature_engineering import merge_multi_period_features, add_advance
 from core.okx_api import OKXClient
 from core.position_manager import PositionManager
 from core.strategy_core import StrategyCore
+from core.dynamic_risk import DynamicRiskController
 from core.trend_filter import derive_trend_context
 from utils.utils import BASE_DIR
 
@@ -53,6 +54,7 @@ class MultiPeriodSignalPredictor:
             trade_cooldown_bars=int(config.TRADE_COOLDOWN_BARS),
             trend_filter_enabled=bool(config.TREND_FILTER_ENABLED),
             block_losing_position_adds=bool(config.BLOCK_LOSING_POSITION_ADDS),
+            dynamic_risk_controller=DynamicRiskController(),
         )
 
     def get_latest_signal(self):

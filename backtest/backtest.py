@@ -8,6 +8,7 @@ import math
 from core.strategy_core import StrategyCore
 from core.trend_filter import derive_trend_context
 from core.reward_risk import get_configured_reward_risk
+from core.dynamic_risk import DynamicRiskController
 import time
 import numpy as np
 import pandas as pd
@@ -168,6 +169,7 @@ class Backtester:
 
         # 初始化 position_manager
         self.position_manager = position_manager.PositionManager()
+        self.dynamic_risk_controller = DynamicRiskController()
         # ✅ 统一核心策略（以回测为准）
         self.core = StrategyCore(
             self.position_manager,
@@ -204,6 +206,7 @@ class Backtester:
             trade_cooldown_bars=int(config.TRADE_COOLDOWN_BARS),
             trend_filter_enabled=bool(config.TREND_FILTER_ENABLED),
             block_losing_position_adds=bool(config.BLOCK_LOSING_POSITION_ADDS),
+            dynamic_risk_controller=self.dynamic_risk_controller,
         )
         if self.emit_diagnostics:
             self._log_intrabar_range_diagnostics()
