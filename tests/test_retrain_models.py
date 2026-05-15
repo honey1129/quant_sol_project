@@ -1,5 +1,7 @@
 import unittest
+import os
 import sys
+import tempfile
 import types
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -139,6 +141,36 @@ class RetrainBacktestValidationTests(unittest.TestCase):
     def test_oos_restriction_requires_training_metadata(self):
         with self.assertRaisesRegex(RuntimeError, "训练元数据缺失"):
             retrain_models.restrict_backtester_to_oos(object(), None)
+
+    def test_preserve_candidate_training_metadata_copies_metadata_to_backup_root(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = os.path.join(tmpdir, "project")
+            backup_dir = os.path.join(tmpdir, "backup")
+            metadata_path = os.path.join(base_dir, "models", "training_metadata.json")
+            os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
+            with open(metadata_path, "w", encoding="utf-8") as file:
+                file.write('{"oos_start":"2026-01-01T00:00:00+00:00"}')
+
+            with patch("run.retrain_models.BASE_DIR", base_dir):
+                with patch("run.retrain_models.config.TRAINING_METADATA_PATH", "models/training_metadata.json"):
+                    preserved_path = retrain_models.preserve_candidate_training_metadata(backup_dir)
+
+            self.assertEqual(
+                preserved_path,
+                os.path.join(backup_dir, "candidate_training_metadata.json"),
+            )
+            with open(preserved_path, "r", encoding="utf-8") as file:
+                self.assertIn("oos_start", file.read())
+
+    def test_preserve_candidate_training_metadata_returns_none_when_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("run.retrain_models.BASE_DIR", tmpdir):
+                with patch("run.retrain_models.config.TRAINING_METADATA_PATH", "models/training_metadata.json"):
+                    self.assertIsNone(
+                        retrain_models.preserve_candidate_training_metadata(
+                            os.path.join(tmpdir, "backup")
+                        )
+                    )
 
     @unittest.skipUnless(HAS_REAL_PANDAS, "requires pandas")
     def test_oos_restriction_cuts_data_and_funding_to_candidate_oos(self):

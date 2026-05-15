@@ -113,6 +113,21 @@ def restore_backup(backup_dir, manifest):
             os.remove(dst_path)
 
 
+def preserve_candidate_training_metadata(backup_dir):
+    """Keep failed candidate metadata for diagnostics before restoring old artifacts."""
+    if not backup_dir:
+        return None
+
+    metadata_path = os.path.join(BASE_DIR, config.TRAINING_METADATA_PATH)
+    if not os.path.exists(metadata_path):
+        return None
+
+    dst_path = os.path.join(backup_dir, "candidate_training_metadata.json")
+    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+    shutil.copy2(metadata_path, dst_path)
+    return dst_path
+
+
 def prune_backups(keep_count):
     keep_count = max(1, int(keep_count))
     if not os.path.isdir(BACKUP_ROOT):
@@ -740,17 +755,24 @@ def retrain_once(*, validate_backtest=None):
         notify_important(format_retrain_success_notification(backtest_summary, log_file))
         return 0
     except Exception as exc:
+        candidate_metadata_path = None
         if backup_dir and manifest:
+            candidate_metadata_path = preserve_candidate_training_metadata(backup_dir)
             restore_backup(backup_dir, manifest)
         finished_at = utc_now_iso()
-        write_state(
-            last_finished_at=finished_at,
-            last_status="failed",
-            last_error=str(exc),
-            last_log_path=log_file,
-            last_backup_path=backup_dir,
-        )
+        state_updates = {
+            "last_finished_at": finished_at,
+            "last_status": "failed",
+            "last_error": str(exc),
+            "last_log_path": log_file,
+            "last_backup_path": backup_dir,
+        }
+        if candidate_metadata_path:
+            state_updates["last_candidate_metadata_path"] = candidate_metadata_path
+        write_state(**state_updates)
         with open(log_file, "a", encoding="utf-8") as file:
+            if candidate_metadata_path:
+                file.write(f"\n候选训练元数据已保留: {candidate_metadata_path}\n")
             file.write(f"\nFAILED: {exc}\n")
         print(f"模型重训失败，已回滚旧模型: {exc}")
         print(f"详情日志: {log_file}")
