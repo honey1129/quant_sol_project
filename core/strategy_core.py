@@ -3,6 +3,23 @@ import math
 import numpy as np
 
 from core.trend_filter import trend_allows_direction
+from core.regime_filter import regime_allows_direction, regime_reason
+
+
+def _risk_payload(risk_decision):
+    if risk_decision is None:
+        return None
+    return {
+        "enabled": bool(risk_decision.enabled),
+        "signal_strength": float(risk_decision.signal_strength),
+        "volatility_ratio": float(risk_decision.volatility_ratio),
+        "atr_ratio": float(risk_decision.atr_ratio),
+        "trend_aligned": bool(risk_decision.trend_aligned),
+        "risk_multiplier": float(risk_decision.risk_multiplier),
+        "effective_leverage": int(risk_decision.effective_leverage),
+        "max_position_ratio": float(risk_decision.max_position_ratio),
+    }
+
 
 
 def _risk_payload(risk_decision):
@@ -56,8 +73,21 @@ class StrategyCore:
         min_expected_net_edge: float = 0.0,
         min_take_profit_to_stop_loss_ratio: float = 2.2,
         min_take_profit_cost_multiplier: float = 6.0,
+        regime_high_vol_stop_loss_min: float = None,
         trade_cooldown_bars: int = 0,
+        take_profit_cooldown_bars: int = None,
+        stop_loss_cooldown_bars: int = None,
         trend_filter_enabled: bool = False,
+        regime_filter_enabled: bool = False,
+        regime_range_allow_trades: bool = True,
+        regime_high_vol_allow_trades: bool = False,
+        regime_range_threshold_bonus: float = 0.0,
+        regime_high_vol_threshold_bonus: float = 0.0,
+        regime_trend_against_block: bool = True,
+        regime_range_target_multiplier: float = 1.0,
+        regime_high_vol_target_multiplier: float = 1.0,
+        regime_range_min_signal_target_ratio: float = None,
+        regime_high_vol_min_signal_target_ratio: float = None,
         block_losing_position_adds: bool = True,
         dynamic_risk_controller=None,
     ):
@@ -99,8 +129,41 @@ class StrategyCore:
         self.min_expected_net_edge = float(min_expected_net_edge)
         self.min_take_profit_to_stop_loss_ratio = max(0.0, float(min_take_profit_to_stop_loss_ratio))
         self.min_take_profit_cost_multiplier = max(0.0, float(min_take_profit_cost_multiplier))
+        self.regime_high_vol_stop_loss_min = (
+            None
+            if regime_high_vol_stop_loss_min is None
+            else max(0.0, float(regime_high_vol_stop_loss_min))
+        )
         self.trade_cooldown_bars = max(0, int(trade_cooldown_bars))
+        self.take_profit_cooldown_bars = (
+            self.trade_cooldown_bars
+            if take_profit_cooldown_bars is None
+            else max(0, int(take_profit_cooldown_bars))
+        )
+        self.stop_loss_cooldown_bars = (
+            max(self.trade_cooldown_bars, 36)
+            if stop_loss_cooldown_bars is None
+            else max(0, int(stop_loss_cooldown_bars))
+        )
         self.trend_filter_enabled = bool(trend_filter_enabled)
+        self.regime_filter_enabled = bool(regime_filter_enabled)
+        self.regime_range_allow_trades = bool(regime_range_allow_trades)
+        self.regime_high_vol_allow_trades = bool(regime_high_vol_allow_trades)
+        self.regime_range_threshold_bonus = max(0.0, float(regime_range_threshold_bonus))
+        self.regime_high_vol_threshold_bonus = max(0.0, float(regime_high_vol_threshold_bonus))
+        self.regime_trend_against_block = bool(regime_trend_against_block)
+        self.regime_range_target_multiplier = max(0.0, float(regime_range_target_multiplier))
+        self.regime_high_vol_target_multiplier = max(0.0, float(regime_high_vol_target_multiplier))
+        self.regime_range_min_signal_target_ratio = (
+            None
+            if regime_range_min_signal_target_ratio is None
+            else max(0.0, float(regime_range_min_signal_target_ratio))
+        )
+        self.regime_high_vol_min_signal_target_ratio = (
+            None
+            if regime_high_vol_min_signal_target_ratio is None
+            else max(0.0, float(regime_high_vol_min_signal_target_ratio))
+        )
         self.block_losing_position_adds = bool(block_losing_position_adds)
         self.dynamic_risk_controller = dynamic_risk_controller
 
@@ -141,7 +204,11 @@ class StrategyCore:
     def _next_hold_cooldown(self):
         return max(0, int(self.cooldown_bars_remaining) - 1)
 
-    def _next_trade_cooldown(self):
+    def _next_trade_cooldown(self, reason=None):
+        if reason == "TakeProfit":
+            return max(0, int(self.take_profit_cooldown_bars))
+        if reason == "StopLoss":
+            return max(0, int(self.stop_loss_cooldown_bars))
         return max(0, int(self.trade_cooldown_bars))
 
     def _clean_optional_ratio(self, value):
@@ -155,7 +222,7 @@ class StrategyCore:
             return None
         return value
 
-    def resolve_risk_thresholds(self, *, volatility: float = None, atr_ratio: float = None):
+    def resolve_risk_thresholds(self, *, volatility: float = None, atr_ratio: float = None, market_regime: str = None):
         if not self.adaptive_tp_sl_enabled:
             return self.take_profit, self.stop_loss
 
@@ -176,9 +243,16 @@ class StrategyCore:
         take_profit = max(tp_candidates) if tp_candidates else self.take_profit
         stop_loss = max(sl_candidates) if sl_candidates else self.stop_loss
 
+        stop_loss_floor = self.adaptive_stop_loss_min
+        if (
+            self.regime_high_vol_stop_loss_min is not None
+            and str(market_regime or "").lower() in {"high_vol", "range_high_vol"}
+        ):
+            stop_loss_floor = max(stop_loss_floor, self.regime_high_vol_stop_loss_min)
+
         stop_loss = float(np.clip(
             stop_loss,
-            self.adaptive_stop_loss_min,
+            stop_loss_floor,
             self.adaptive_stop_loss_max,
         ))
         take_profit_floor = max(
@@ -193,10 +267,11 @@ class StrategyCore:
         ))
         return take_profit, stop_loss
 
-    def update_risk_thresholds(self, *, volatility: float = None, atr_ratio: float = None):
+    def update_risk_thresholds(self, *, volatility: float = None, atr_ratio: float = None, market_regime: str = None):
         take_profit, stop_loss = self.resolve_risk_thresholds(
             volatility=volatility,
             atr_ratio=atr_ratio,
+            market_regime=market_regime,
         )
         self.current_take_profit = take_profit
         self.current_stop_loss = stop_loss
@@ -236,9 +311,15 @@ class StrategyCore:
             "next_position": 0.0,
             "next_entry_price": 0.0,
             "next_hold_bars": 0,
-            "next_cooldown_bars": self._next_trade_cooldown(),
+            "next_cooldown_bars": self._next_trade_cooldown(reason),
             "next_reverse_signal_bars": 0,
             "next_reset_risk": True,
+            "raw_target_ratio": 0.0,
+            "expected_net_edge": None,
+            "take_profit": float(self.take_profit),
+            "stop_loss": float(self.stop_loss),
+            "signal_prob_gap": 0.0,
+            "dominant_prob": 0.0,
         }, risk_decision)
 
     def _with_risk(self, decision, risk_decision):
@@ -270,18 +351,57 @@ class StrategyCore:
             return f"TrendFilter({trend_bias or 'neutral'})"
         return None
 
-    def _dominant_signal_direction(self, long_prob, short_prob, *, min_prob_diff=None):
+    def _regime_adjustments(self, regime):
+        if not self.regime_filter_enabled:
+            return 0.0, 1.0
+        regime = str(regime or "unknown").lower()
+        threshold_bonus = 0.0
+        target_multiplier = 1.0
+        if regime == "range":
+            threshold_bonus = self.regime_range_threshold_bonus
+            target_multiplier = self.regime_range_target_multiplier
+        elif regime in {"high_vol", "range_high_vol"}:
+            threshold_bonus = self.regime_high_vol_threshold_bonus
+            target_multiplier = self.regime_high_vol_target_multiplier
+        return threshold_bonus, target_multiplier
+
+    def _regime_block_reason(self, direction, regime):
+        if not self.regime_filter_enabled or direction is None:
+            return None
+        regime = str(regime or "unknown").lower()
+        allow_range = bool(self.regime_range_allow_trades)
+        allow_high_vol = bool(self.regime_high_vol_allow_trades)
+        if not self.regime_trend_against_block and regime in {"trend_long", "trend_short"}:
+            return None
+        if not regime_allows_direction(regime, direction, allow_range=allow_range, allow_high_vol=allow_high_vol):
+            return regime_reason(regime)
+        return None
+
+    def _min_signal_target_ratio_for_regime(self, regime):
+        if not self.regime_filter_enabled:
+            return self.min_signal_target_ratio
+        regime = str(regime or "unknown").lower()
+        if regime == "range" and self.regime_range_min_signal_target_ratio is not None:
+            return self.regime_range_min_signal_target_ratio
+        if regime in {"high_vol", "range_high_vol"} and self.regime_high_vol_min_signal_target_ratio is not None:
+            return self.regime_high_vol_min_signal_target_ratio
+        return self.min_signal_target_ratio
+
+    def _dominant_signal_direction(self, long_prob, short_prob, *, min_prob_diff=None, regime=None):
         long_prob = float(long_prob)
         short_prob = float(short_prob)
         prob_gap = abs(long_prob - short_prob)
         min_prob_diff = self.signal_min_prob_diff if min_prob_diff is None else float(min_prob_diff)
+        threshold_bonus, _ = self._regime_adjustments(regime)
+        threshold_long = self.threshold_long + threshold_bonus
+        threshold_short = self.threshold_short + threshold_bonus
 
         if long_prob >= short_prob:
-            if long_prob <= self.threshold_long or prob_gap < min_prob_diff:
+            if long_prob <= threshold_long or prob_gap < min_prob_diff:
                 return None, prob_gap, long_prob
             return "long", prob_gap, long_prob
 
-        if short_prob <= self.threshold_short or prob_gap < min_prob_diff:
+        if short_prob <= threshold_short or prob_gap < min_prob_diff:
             return None, prob_gap, short_prob
         return "short", prob_gap, short_prob
 
@@ -295,12 +415,17 @@ class StrategyCore:
         take_profit: float,
         stop_loss: float,
         trend_bias: str = None,
+        market_regime: str = None,
         apply_trend_filter: bool = True,
     ):
         long_prob = float(long_prob)
         short_prob = float(short_prob)
         prob_gap = abs(long_prob - short_prob)
         blocked_reason = None
+        threshold_bonus, target_multiplier = self._regime_adjustments(market_regime)
+        min_signal_target_ratio = self._min_signal_target_ratio_for_regime(market_regime)
+        threshold_long = self.threshold_long + threshold_bonus
+        threshold_short = self.threshold_short + threshold_bonus
 
         def passes_cost_gate(dominant_prob):
             expected_net_edge = self._expected_net_edge_ratio(
@@ -315,12 +440,14 @@ class StrategyCore:
         if long_prob >= short_prob:
             direction = "long"
             dominant_prob = long_prob
-            if dominant_prob <= self.threshold_long or prob_gap < self.signal_min_prob_diff:
-                return 0.0, prob_gap, dominant_prob, "WeakSignal", None
+            if dominant_prob <= threshold_long or prob_gap < self.signal_min_prob_diff:
+                return 0.0, prob_gap, dominant_prob, "WeakSignal", None, 0.0
 
             cost_ok, expected_net_edge = passes_cost_gate(dominant_prob)
             if not cost_ok:
                 blocked_reason = f"CostGate(edge={expected_net_edge:.4%})"
+            if blocked_reason is None:
+                blocked_reason = self._regime_block_reason(direction, market_regime)
             if (
                 blocked_reason is None
                 and apply_trend_filter
@@ -333,20 +460,23 @@ class StrategyCore:
                 volatility,
                 self.reward_risk,
             ))
-            if target_ratio < self.min_signal_target_ratio:
-                return 0.0, prob_gap, dominant_prob, "SmallTarget", expected_net_edge
+            target_ratio *= target_multiplier
+            if target_ratio < min_signal_target_ratio:
+                return 0.0, prob_gap, dominant_prob, "SmallTarget", expected_net_edge, target_ratio
             if blocked_reason is not None:
-                return 0.0, prob_gap, dominant_prob, blocked_reason, expected_net_edge
-            return target_ratio, prob_gap, dominant_prob, None, expected_net_edge
+                return 0.0, prob_gap, dominant_prob, blocked_reason, expected_net_edge, target_ratio
+            return target_ratio, prob_gap, dominant_prob, None, expected_net_edge, target_ratio
 
         direction = "short"
         dominant_prob = short_prob
-        if dominant_prob <= self.threshold_short or prob_gap < self.signal_min_prob_diff:
-            return 0.0, prob_gap, dominant_prob, "WeakSignal", None
+        if dominant_prob <= threshold_short or prob_gap < self.signal_min_prob_diff:
+            return 0.0, prob_gap, dominant_prob, "WeakSignal", None, 0.0
 
         cost_ok, expected_net_edge = passes_cost_gate(dominant_prob)
         if not cost_ok:
             blocked_reason = f"CostGate(edge={expected_net_edge:.4%})"
+        if blocked_reason is None:
+            blocked_reason = self._regime_block_reason(direction, market_regime)
         if (
             blocked_reason is None
             and apply_trend_filter
@@ -359,11 +489,12 @@ class StrategyCore:
             volatility,
             self.reward_risk,
         ))
-        if target_ratio < self.min_signal_target_ratio:
-            return 0.0, prob_gap, dominant_prob, "SmallTarget", expected_net_edge
+        target_ratio *= target_multiplier
+        if target_ratio < min_signal_target_ratio:
+            return 0.0, prob_gap, dominant_prob, "SmallTarget", expected_net_edge, target_ratio
         if blocked_reason is not None:
-            return 0.0, prob_gap, dominant_prob, blocked_reason, expected_net_edge
-        return -target_ratio, prob_gap, dominant_prob, None, expected_net_edge
+            return 0.0, prob_gap, dominant_prob, blocked_reason, expected_net_edge, target_ratio
+        return -target_ratio, prob_gap, dominant_prob, None, expected_net_edge, -target_ratio
 
     def on_bar(
         self,
@@ -376,6 +507,7 @@ class StrategyCore:
         volatility: float,
         atr_ratio: float = None,
         trend_bias: str = None,
+        market_regime: str = None,
     ):
         """
         单根 5m bar 决策一次（与回测一致）
@@ -386,6 +518,7 @@ class StrategyCore:
         take_profit, stop_loss = self.update_risk_thresholds(
             volatility=volatility,
             atr_ratio=atr_ratio,
+            market_regime=market_regime,
         )
         cooldown_remaining = int(self.cooldown_bars_remaining)
         reverse_signal_bars = int(self.reverse_signal_bars)
@@ -396,8 +529,10 @@ class StrategyCore:
         # ======================
         if pos != 0:
             pnl_pct = (price - self.entry_price) / self.entry_price if pos > 0 else (self.entry_price - price) / self.entry_price
-            if pnl_pct >= take_profit or pnl_pct <= -stop_loss:
-                return self._build_close_action(pos=pos, reason="TP/SL", risk_decision=risk_decision)
+            if pnl_pct >= take_profit:
+                return self._build_close_action(pos=pos, reason="TakeProfit", risk_decision=risk_decision)
+            if pnl_pct <= -stop_loss:
+                return self._build_close_action(pos=pos, reason="StopLoss", risk_decision=risk_decision)
 
         if pos == 0 and cooldown_remaining > 0:
             return self._with_risk({
@@ -412,12 +547,18 @@ class StrategyCore:
                 "next_cooldown_bars": self._next_hold_cooldown(),
                 "next_reverse_signal_bars": 0,
                 "next_reset_risk": True,
+                "raw_target_ratio": 0.0,
+                "expected_net_edge": None,
+                "take_profit": float(take_profit),
+                "stop_loss": float(stop_loss),
+                "signal_prob_gap": abs(float(long_prob) - float(short_prob)),
+                "dominant_prob": max(float(long_prob), float(short_prob)),
             }, risk_decision)
 
         # ======================
         # 2) 计算目标仓位档位
         # ======================
-        target_ratio, signal_prob_gap, dominant_prob, block_reason, expected_net_edge = self._resolve_directional_target_ratio(
+        target_ratio, signal_prob_gap, dominant_prob, block_reason, expected_net_edge, raw_target_ratio = self._resolve_directional_target_ratio(
             long_prob=long_prob,
             short_prob=short_prob,
             money_flow_ratio=money_flow_ratio,
@@ -425,10 +566,20 @@ class StrategyCore:
             take_profit=take_profit,
             stop_loss=stop_loss,
             trend_bias=trend_bias,
+            market_regime=market_regime,
             apply_trend_filter=False,
         )
-        raw_target_ratio = float(target_ratio)
+        raw_target_ratio = float(raw_target_ratio)
         target_position = target_ratio * equity / price
+
+        def attach_signal_diagnostics(decision):
+            decision["raw_target_ratio"] = float(raw_target_ratio)
+            decision["expected_net_edge"] = None if expected_net_edge is None else float(expected_net_edge)
+            decision["take_profit"] = float(take_profit)
+            decision["stop_loss"] = float(stop_loss)
+            decision["signal_prob_gap"] = float(signal_prob_gap)
+            decision["dominant_prob"] = float(dominant_prob)
+            return decision
         target_direction = None
         if target_ratio > 0:
             target_direction = "long"
@@ -447,10 +598,13 @@ class StrategyCore:
             target_ratio = self.dynamic_risk_controller.apply_to_target_ratio(target_ratio, risk_decision)
             target_position = target_ratio * equity / price
         trend_block_reason = self._trend_block_reason(target_direction, trend_bias)
+        regime_block_reason = self._regime_block_reason(target_direction, market_regime)
+        entry_block_reason = regime_block_reason or trend_block_reason
         raw_signal_direction, raw_signal_prob_gap, raw_dominant_prob = self._dominant_signal_direction(
             long_prob,
             short_prob,
             min_prob_diff=self.reverse_exit_min_prob_diff,
+            regime=market_regime,
         )
         same_direction = (pos > 0 and target_position > 0) or (pos < 0 and target_position < 0)
         raw_reverse_signal = (
@@ -477,25 +631,25 @@ class StrategyCore:
         # ======================
         if pos == 0:
             if (
-                trend_block_reason is not None
+                entry_block_reason is not None
                 and target_position != 0
                 and abs(target_position * price) >= self.min_adjust_amount
             ):
-                return self._with_risk({
+                return self._with_risk(attach_signal_diagnostics({
                     "action": "HOLD",
                     "delta_qty": 0.0,
                     "target_ratio": 0.0,
                     "target_position": 0.0,
-                    "reason": trend_block_reason,
+                    "reason": entry_block_reason,
                     "next_position": 0.0,
                     "next_entry_price": 0.0,
                     "next_hold_bars": 0,
                     "next_cooldown_bars": self._next_hold_cooldown(),
                     "next_reverse_signal_bars": 0,
                     "next_reset_risk": True,
-                }, risk_decision)
+                }), risk_decision)
             if abs(target_position * price) >= self.min_adjust_amount and target_position != 0:
-                return self._with_risk({
+                return self._with_risk(attach_signal_diagnostics({
                     "action": "OPEN",
                     "delta_qty": target_position,
                     "target_ratio": target_ratio,
@@ -507,11 +661,11 @@ class StrategyCore:
                     "next_cooldown_bars": self._next_trade_cooldown(),
                     "next_reverse_signal_bars": 0,
                     "next_reset_risk": False,
-                }, risk_decision)
+                }), risk_decision)
             flat_reason = "FlatNoSignal"
             if block_reason is not None and expected_net_edge is not None:
                 flat_reason = f"{block_reason}"
-            return self._with_risk({
+            return self._with_risk(attach_signal_diagnostics({
                 "action": "HOLD",
                 "delta_qty": 0.0,
                 "target_ratio": target_ratio,
@@ -523,7 +677,7 @@ class StrategyCore:
                 "next_cooldown_bars": self._next_hold_cooldown(),
                 "next_reverse_signal_bars": 0,
                 "next_reset_risk": True,
-            }, risk_decision)
+            }), risk_decision)
 
         # ======================
         # 4) 反向强信号 -> 强制先平仓
@@ -551,7 +705,7 @@ class StrategyCore:
         # ======================
         next_hold_bars = self.hold_bars + 1
         if next_hold_bars < self.min_hold_bars:
-            return self._with_risk({
+            return self._with_risk(attach_signal_diagnostics({
                 "action": "HOLD",
                 "delta_qty": 0.0,
                 "target_ratio": target_ratio,
@@ -563,14 +717,14 @@ class StrategyCore:
                 "next_cooldown_bars": self._next_hold_cooldown(),
                 "next_reverse_signal_bars": next_reverse_signal_bars,
                 "next_reset_risk": False,
-            }, risk_decision)
+            }), risk_decision)
 
         # ======================
         # 6) 同方向 -> 分段加 / 减仓
         # ======================
         if same_direction:
             if cooldown_remaining > 0:
-                return self._with_risk({
+                return self._with_risk(attach_signal_diagnostics({
                     "action": "HOLD",
                     "delta_qty": 0.0,
                     "target_ratio": target_ratio,
@@ -582,27 +736,27 @@ class StrategyCore:
                     "next_cooldown_bars": self._next_hold_cooldown(),
                     "next_reverse_signal_bars": next_reverse_signal_bars,
                     "next_reset_risk": False,
-                }, risk_decision)
+                }), risk_decision)
 
             raw_delta = target_position - pos
             if (
-                trend_block_reason is not None
+                entry_block_reason is not None
                 and np.sign(raw_delta) == np.sign(pos)
                 and abs(raw_delta * price) >= self.min_adjust_amount
             ):
-                return self._with_risk({
+                return self._with_risk(attach_signal_diagnostics({
                     "action": "HOLD",
                     "delta_qty": 0.0,
                     "target_ratio": target_ratio,
                     "target_position": target_position,
-                    "reason": trend_block_reason,
+                    "reason": entry_block_reason,
                     "next_position": float(pos),
                     "next_entry_price": float(self.entry_price),
                     "next_hold_bars": next_hold_bars,
                     "next_cooldown_bars": self._next_hold_cooldown(),
                     "next_reverse_signal_bars": next_reverse_signal_bars,
                     "next_reset_risk": False,
-                }, risk_decision)
+                }), risk_decision)
             diff_ratio = raw_delta / max(abs(pos), 1e-9)
 
             if abs(diff_ratio) >= self.add_threshold:
@@ -625,7 +779,7 @@ class StrategyCore:
                             (self.entry_price - price) / self.entry_price
                         )
                         if pnl_pct < 0:
-                            return self._with_risk({
+                            return self._with_risk(attach_signal_diagnostics({
                                 "action": "HOLD",
                                 "delta_qty": 0.0,
                                 "target_ratio": target_ratio,
@@ -637,7 +791,7 @@ class StrategyCore:
                                 "next_cooldown_bars": self._next_hold_cooldown(),
                                 "next_reverse_signal_bars": next_reverse_signal_bars,
                                 "next_reset_risk": False,
-                            }, risk_decision)
+                            }), risk_decision)
 
                     new_position = pos + delta
 
@@ -656,7 +810,7 @@ class StrategyCore:
                     else:
                         next_entry_price = self.entry_price
 
-                    return self._with_risk({
+                    return self._with_risk(attach_signal_diagnostics({
                         "action": "REBALANCE",
                         "delta_qty": delta,
                         "target_ratio": target_ratio,
@@ -668,9 +822,9 @@ class StrategyCore:
                         "next_cooldown_bars": self._next_trade_cooldown(),
                         "next_reverse_signal_bars": next_reverse_signal_bars,
                         "next_reset_risk": False,
-                    }, risk_decision)
+                    }), risk_decision)
 
-            return self._with_risk({
+            return self._with_risk(attach_signal_diagnostics({
                 "action": "HOLD",
                 "delta_qty": 0.0,
                 "target_ratio": target_ratio,
@@ -682,13 +836,13 @@ class StrategyCore:
                 "next_cooldown_bars": self._next_hold_cooldown(),
                 "next_reverse_signal_bars": next_reverse_signal_bars,
                 "next_reset_risk": False,
-            }, risk_decision)
+            }), risk_decision)
 
         # ======================
         # 7) 反向弱信号 -> 持仓等待
         # ======================
         if block_reason is not None:
-            return self._with_risk({
+            return self._with_risk(attach_signal_diagnostics({
                 "action": "HOLD",
                 "delta_qty": 0.0,
                 "target_ratio": target_ratio,
@@ -700,10 +854,10 @@ class StrategyCore:
                 "next_cooldown_bars": self._next_hold_cooldown(),
                 "next_reverse_signal_bars": next_reverse_signal_bars,
                 "next_reset_risk": False,
-            }, risk_decision)
+            }), risk_decision)
 
         if abs(target_position) > 0:
-            return self._with_risk({
+            return self._with_risk(attach_signal_diagnostics({
                 "action": "HOLD",
                 "delta_qty": 0.0,
                 "target_ratio": target_ratio,
@@ -720,9 +874,9 @@ class StrategyCore:
                 "next_cooldown_bars": self._next_hold_cooldown(),
                 "next_reverse_signal_bars": next_reverse_signal_bars,
                 "next_reset_risk": False,
-            }, risk_decision)
+            }), risk_decision)
 
-        return self._with_risk({
+        return self._with_risk(attach_signal_diagnostics({
             "action": "HOLD",
             "delta_qty": 0.0,
             "target_ratio": target_ratio,
@@ -734,4 +888,4 @@ class StrategyCore:
             "next_cooldown_bars": self._next_hold_cooldown(),
             "next_reverse_signal_bars": next_reverse_signal_bars,
             "next_reset_risk": False,
-        }, risk_decision)
+        }), risk_decision)

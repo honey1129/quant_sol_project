@@ -273,3 +273,44 @@ class DashboardServerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class DashboardObservabilityTests(unittest.TestCase):
+    def test_model_observability_reports_metadata_and_failed_retrain(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            metadata_path = os.path.join(tmpdir, "models", "training_metadata.json")
+            logs_dir = os.path.join(tmpdir, "logs")
+            os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
+            os.makedirs(logs_dir, exist_ok=True)
+            with open(metadata_path, "w", encoding="utf-8") as f:
+                f.write('{"schema_version":2,"source":"unit","symbol":"SOL-USDT-SWAP","artifact_hashes":{"a":"b"},"feature_count":3,"oos_start":"2026-01-01T00:00:00+00:00"}')
+            with open(os.path.join(logs_dir, "model_retrain_state.json"), "w", encoding="utf-8") as f:
+                f.write('{"last_status":"failed","last_error":"gate failed","last_log_path":"logs/model_retrain_x.log"}')
+            log_path = os.path.join(logs_dir, "model_retrain_x.log")
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write("FAILED: gate failed\n")
+
+            with patch("run.dashboard_server.BASE_DIR", tmpdir), patch("run.dashboard_server.LOGS_DIR", logs_dir):
+                with patch.object(dashboard_server.config, "TRAINING_METADATA_PATH", "models/training_metadata.json"):
+                    snapshot = dashboard_server.build_model_observability_snapshot()
+
+            self.assertEqual(snapshot["health"], "warning")
+            self.assertIn("last_retrain_failed", snapshot["warnings"])
+            self.assertEqual(snapshot["schema_version"], 2)
+            self.assertEqual(snapshot["artifact_hash_count"], 1)
+            self.assertTrue(snapshot["metadata_file"]["exists"])
+            self.assertTrue(snapshot["latest_retrain_log_file"]["exists"])
+
+    def test_observability_escalates_runtime_error(self):
+        with patch("run.dashboard_server.build_model_observability_snapshot", return_value={"health": "ok", "warnings": []}):
+            snapshot = dashboard_server.build_observability_snapshot({"runtime": {"last_error": "boom"}})
+        self.assertEqual(snapshot["health"], "error")
+        self.assertEqual(snapshot["alerts"][0]["code"], "runtime_last_error")
+
+    def test_enrich_status_ignores_tmp_runtime_dashboard_corruption_from_tests(self):
+        log_lines = [
+            "2026-05-17 21:20:00,000 - ERROR - ⚠ runtime_dashboard JSON 损坏，已备份到 /tmp/tmpabc/history.json.corrupt-20260517T192008Z: Expecting value",
+            "2026-05-17 21:20:10,000 - INFO - 心跳: 运行中，最近已处理bar=2026-05-17 21:15:00, 当前最新已收盘bar=2026-05-17 21:15:00, 连续跳过同bar次数=1",
+        ]
+        status = dashboard_server.enrich_status_with_fallbacks({}, log_lines, log_lines)
+        self.assertIsNone(status["runtime"].get("last_error"))
+        self.assertEqual(status["runtime"]["last_status"], "waiting_next_bar")

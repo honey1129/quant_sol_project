@@ -6,11 +6,13 @@ import joblib
 import traceback
 import numpy as np
 import pandas as pd
+from collections import Counter
 from core import ml_feature_engineering, signal_engine
 from core.reward_risk import get_configured_reward_risk
 from core.strategy_core import StrategyCore
 from core.dynamic_risk import DynamicRiskController
 from core.trend_filter import derive_trend_context
+from core.regime_filter import derive_market_regime
 from utils.utils import log_info, log_error, notify_important, BASE_DIR
 from utils.utils import DISPLAY_TIMEZONE
 from utils.runtime_dashboard import write_runtime_dashboard_snapshot
@@ -22,6 +24,15 @@ from core.position_manager import PositionManager
 
 LIVE_STATE_PATH = os.path.join(BASE_DIR, "logs", "live_trading_state.json")
 HEARTBEAT_LOG_INTERVAL_SEC = 30.0
+TELEGRAM_RUNTIME_SUMMARY_INTERVAL_SEC = 3600.0
+TELEGRAM_HOLD_ALERT_MIN_BARS = 3
+TELEGRAM_HOLD_ALERT_COOLDOWN_SEC = 1800.0
+TELEGRAM_HOLD_ALERT_REASONS = (
+    "SmallTarget",
+    "CostGate",
+    "RegimeFilter",
+    "TrendFilter",
+)
 
 
 def should_emit_interval_log(last_emitted_at, now_ts, interval_sec):
@@ -175,6 +186,13 @@ class LiveTrader:
         self.last_execution = {}
         self.consecutive_loop_errors = 0
         self.last_error_notified_count = 0
+        self.last_runtime_summary_notified_at = None
+        self.hold_reason_counts = Counter()
+        self.recent_hold_decisions = []
+        self.consecutive_abnormal_hold_reason = None
+        self.consecutive_abnormal_hold_count = 0
+        self.last_hold_alert_notified_at = None
+        self.last_hold_alert_key = None
 
         # ===== 模型/特征=====
         feature_path = os.path.join(BASE_DIR, config.FEATURE_LIST_PATH) if "BASE_DIR" in globals() else config.FEATURE_LIST_PATH
@@ -218,8 +236,21 @@ class LiveTrader:
             min_expected_net_edge=float(config.MIN_EXPECTED_NET_EDGE),
             min_take_profit_to_stop_loss_ratio=float(config.MIN_TAKE_PROFIT_TO_STOP_LOSS_RATIO),
             min_take_profit_cost_multiplier=float(config.MIN_TAKE_PROFIT_COST_MULTIPLIER),
+            regime_high_vol_stop_loss_min=float(config.REGIME_HIGH_VOL_STOP_LOSS_MIN),
             trade_cooldown_bars=int(config.TRADE_COOLDOWN_BARS),
+            take_profit_cooldown_bars=int(config.TAKE_PROFIT_COOLDOWN_BARS),
+            stop_loss_cooldown_bars=int(config.STOP_LOSS_COOLDOWN_BARS),
             trend_filter_enabled=bool(config.TREND_FILTER_ENABLED),
+            regime_filter_enabled=bool(config.REGIME_FILTER_ENABLED),
+            regime_range_allow_trades=bool(config.REGIME_RANGE_ALLOW_TRADES),
+            regime_high_vol_allow_trades=bool(config.REGIME_HIGH_VOL_ALLOW_TRADES),
+            regime_range_threshold_bonus=float(config.REGIME_RANGE_THRESHOLD_BONUS),
+            regime_high_vol_threshold_bonus=float(config.REGIME_HIGH_VOL_THRESHOLD_BONUS),
+            regime_trend_against_block=bool(config.REGIME_TREND_AGAINST_BLOCK),
+            regime_range_target_multiplier=float(config.REGIME_RANGE_TARGET_MULTIPLIER),
+            regime_high_vol_target_multiplier=float(config.REGIME_HIGH_VOL_TARGET_MULTIPLIER),
+            regime_range_min_signal_target_ratio=float(config.REGIME_RANGE_MIN_SIGNAL_TARGET_RATIO),
+            regime_high_vol_min_signal_target_ratio=float(config.REGIME_HIGH_VOL_MIN_SIGNAL_TARGET_RATIO),
             block_losing_position_adds=bool(config.BLOCK_LOSING_POSITION_ADDS),
             dynamic_risk_controller=self.dynamic_risk_controller,
         )
@@ -289,8 +320,19 @@ class LiveTrader:
             slow_col=config.TREND_FILTER_SLOW_COL,
             min_gap=config.TREND_FILTER_MIN_GAP,
         )
+        regime_context = derive_market_regime(
+            trend_bias=trend_context.get("trend_bias"),
+            trend_gap=trend_context.get("trend_gap"),
+            volatility=volatility,
+            atr_ratio=atr_ratio,
+            money_flow_ratio=money_flow_ratio,
+            trend_gap_threshold=config.REGIME_TREND_GAP_THRESHOLD,
+            high_vol_atr_threshold=config.REGIME_HIGH_VOL_ATR_THRESHOLD,
+            high_volatility_threshold=config.REGIME_HIGH_VOLATILITY_THRESHOLD,
+            money_flow_extreme_threshold=config.REGIME_MONEY_FLOW_EXTREME_THRESHOLD,
+        )
 
-        return bar_ts, price, long_prob, short_prob, money_flow_ratio, volatility, atr_ratio, trend_context
+        return bar_ts, price, long_prob, short_prob, money_flow_ratio, volatility, atr_ratio, trend_context, regime_context
 
     def _get_equity(self) -> float:
         account = self._get_account_snapshot()
@@ -673,6 +715,50 @@ class LiveTrader:
         ]
         notify_important("\n".join(lines))
 
+    @staticmethod
+    def _fmt_optional_pct(value):
+        if value is None:
+            return "-"
+        try:
+            return f"{float(value):.4%}"
+        except (TypeError, ValueError):
+            return "-"
+
+    @staticmethod
+    def _fmt_optional_float(value, digits=4):
+        if value is None:
+            return "-"
+        try:
+            return f"{float(value):.{digits}f}"
+        except (TypeError, ValueError):
+            return "-"
+
+    def _format_hold_decision_log(self, decision, out, *, price, equity, pos_qty, entry_price):
+        risk = out.get("risk") or {}
+        return (
+            "HOLD诊断: "
+            f"reason={out.get('reason') or '-'} "
+            f"target_ratio={float(out.get('target_ratio') or 0.0):.4f} "
+            f"raw_target_ratio={float(out.get('raw_target_ratio') or 0.0):.4f} "
+            f"target_position={float(out.get('target_position') or 0.0):.6f} "
+            f"delta_qty={float(out.get('delta_qty') or 0.0):.6f} "
+            f"edge={self._fmt_optional_pct(out.get('expected_net_edge'))} "
+            f"tp={self._fmt_optional_pct(out.get('take_profit'))} "
+            f"sl={self._fmt_optional_pct(out.get('stop_loss'))} "
+            f"gap={self._fmt_optional_float(out.get('signal_prob_gap'), 4)} "
+            f"dominant={self._fmt_optional_float(out.get('dominant_prob'), 4)} "
+            f"pos={float(pos_qty or 0.0):.6f} "
+            f"entry={float(entry_price or 0.0):.4f} "
+            f"price={float(price):.4f} "
+            f"equity={float(equity):.2f} "
+            f"trend={decision.get('trend_bias') or 'neutral'} "
+            f"regime={decision.get('market_regime') or '-'} "
+            f"cooldown_next={int(out.get('next_cooldown_bars', 0) or 0)} "
+            f"reverse_bars_next={int(out.get('next_reverse_signal_bars', 0) or 0)} "
+            f"risk_scale={self._fmt_optional_float(risk.get('risk_scale'), 3)} "
+            f"risk_reason={risk.get('reason') or '-'}"
+        )
+
     def _notify_trade_failure(self, action, reason, detail):
         notify_important(
             "[交易未成交]\n"
@@ -699,6 +785,117 @@ class LiveTrader:
             f"错误: {error}"
         )
 
+    def _hold_reason_key(self, reason):
+        reason = str(reason or "-")
+        if reason.startswith("CostGate"):
+            return "CostGate"
+        if reason.startswith("RegimeFilter"):
+            return "RegimeFilter"
+        if reason.startswith("TrendFilter"):
+            return "TrendFilter"
+        if reason.startswith("Cooldown"):
+            return "Cooldown"
+        return reason
+
+    def _is_abnormal_hold_reason(self, reason):
+        key = self._hold_reason_key(reason)
+        return key in TELEGRAM_HOLD_ALERT_REASONS
+
+    def _format_runtime_summary_notification(self, *, bar_ts, price, equity, position_snapshot, signal_snapshot, decision):
+        top_holds = ", ".join(
+            f"{reason}:{count}"
+            for reason, count in self.hold_reason_counts.most_common(5)
+        ) or "无"
+        position_snapshot = position_snapshot or {}
+        signal_snapshot = signal_snapshot or {}
+        decision = decision or {}
+        risk = decision.get("risk") or {}
+        return (
+            "[实盘运行摘要]\n"
+            f"最近bar: {format_display_ts(bar_ts)}\n"
+            f"价格: {fmt_optional(price, 4)}  权益: {fmt_optional(equity, 2)} USDT\n"
+            f"仓位: {position_snapshot.get('direction', '-')} qty={fmt_optional(position_snapshot.get('net_qty'), 6)} "
+            f"entry={fmt_optional(position_snapshot.get('entry_price'), 4)} notional={fmt_optional(position_snapshot.get('notional'), 2)}\n"
+            f"信号: long={fmt_optional(signal_snapshot.get('long_prob'), 3)} short={fmt_optional(signal_snapshot.get('short_prob'), 3)} "
+            f"regime={signal_snapshot.get('regime') or '-'} trend={signal_snapshot.get('trend_bias') or '-'}\n"
+            f"最近决策: {decision.get('action') or '-'} / {decision.get('reason') or '-'} "
+            f"target={fmt_optional(decision.get('target_ratio'), 4)} raw={fmt_optional(decision.get('raw_target_ratio'), 4)} "
+            f"edge={self._fmt_optional_pct(decision.get('expected_net_edge'))} "
+            f"tp/sl={self._fmt_optional_pct(decision.get('take_profit'))}/{self._fmt_optional_pct(decision.get('stop_loss'))}\n"
+            f"HOLD原因统计: {top_holds}\n"
+            f"动态风控: scale={self._fmt_optional_float(risk.get('risk_scale'), 3)} reason={risk.get('reason') or '-'}"
+        )
+
+    def _maybe_notify_runtime_summary(self, *, bar_ts, price, equity, position_snapshot, signal_snapshot, decision):
+        now_ts = time.monotonic()
+        if (
+            self.last_runtime_summary_notified_at is not None
+            and now_ts - float(self.last_runtime_summary_notified_at) < TELEGRAM_RUNTIME_SUMMARY_INTERVAL_SEC
+        ):
+            return
+        self.last_runtime_summary_notified_at = now_ts
+        notify_important(self._format_runtime_summary_notification(
+            bar_ts=bar_ts,
+            price=price,
+            equity=equity,
+            position_snapshot=position_snapshot,
+            signal_snapshot=signal_snapshot,
+            decision=decision,
+        ))
+
+    def _maybe_notify_abnormal_hold(self, *, bar_ts, price, equity, decision, signal_snapshot):
+        reason = decision.get("reason")
+        key = self._hold_reason_key(reason)
+        self.hold_reason_counts[key] += 1
+        self.recent_hold_decisions.append({
+            "bar_ts": normalize_ts(bar_ts),
+            "reason": reason,
+            "target_ratio": decision.get("target_ratio"),
+            "raw_target_ratio": decision.get("raw_target_ratio"),
+            "expected_net_edge": decision.get("expected_net_edge"),
+            "market_regime": decision.get("market_regime"),
+            "trend_bias": decision.get("trend_bias"),
+        })
+        self.recent_hold_decisions = self.recent_hold_decisions[-48:]
+
+        if not self._is_abnormal_hold_reason(reason):
+            self.consecutive_abnormal_hold_reason = None
+            self.consecutive_abnormal_hold_count = 0
+            return
+
+        if key == self.consecutive_abnormal_hold_reason:
+            self.consecutive_abnormal_hold_count += 1
+        else:
+            self.consecutive_abnormal_hold_reason = key
+            self.consecutive_abnormal_hold_count = 1
+
+        if self.consecutive_abnormal_hold_count < TELEGRAM_HOLD_ALERT_MIN_BARS:
+            return
+
+        now_ts = time.monotonic()
+        alert_key = f"{key}:{self.consecutive_abnormal_hold_count // TELEGRAM_HOLD_ALERT_MIN_BARS}"
+        if (
+            self.last_hold_alert_notified_at is not None
+            and now_ts - float(self.last_hold_alert_notified_at) < TELEGRAM_HOLD_ALERT_COOLDOWN_SEC
+            and self.last_hold_alert_key == alert_key
+        ):
+            return
+
+        self.last_hold_alert_notified_at = now_ts
+        self.last_hold_alert_key = alert_key
+        notify_important(
+            "[异常HOLD聚合]\n"
+            f"原因: {reason}\n"
+            f"连续bar数: {self.consecutive_abnormal_hold_count}\n"
+            f"最近bar: {format_display_ts(bar_ts)} price={fmt_optional(price, 4)} equity={fmt_optional(equity, 2)}\n"
+            f"信号: long={fmt_optional(signal_snapshot.get('long_prob'), 3)} short={fmt_optional(signal_snapshot.get('short_prob'), 3)} "
+            f"gap={fmt_optional(decision.get('signal_prob_gap'), 4)} dominant={fmt_optional(decision.get('dominant_prob'), 4)}\n"
+            f"target={fmt_optional(decision.get('target_ratio'), 4)} raw={fmt_optional(decision.get('raw_target_ratio'), 4)} "
+            f"edge={self._fmt_optional_pct(decision.get('expected_net_edge'))} "
+            f"tp/sl={self._fmt_optional_pct(decision.get('take_profit'))}/{self._fmt_optional_pct(decision.get('stop_loss'))}\n"
+            f"regime={decision.get('market_regime') or '-'} trend={decision.get('trend_bias') or '-'}"
+        )
+
     def _maybe_log_same_bar_heartbeat(self, current_bar_ts):
         now_ts = time.monotonic()
         if not should_emit_interval_log(
@@ -716,7 +913,7 @@ class LiveTrader:
 
     def run_once_on_new_bar(self):
         self.loop_count += 1
-        bar_ts, price, long_prob, short_prob, money_flow_ratio, volatility, atr_ratio, trend_context = self._get_latest_features()
+        bar_ts, price, long_prob, short_prob, money_flow_ratio, volatility, atr_ratio, trend_context, regime_context = self._get_latest_features()
         signal_snapshot = {
             "long_prob": float(long_prob),
             "short_prob": float(short_prob),
@@ -724,6 +921,7 @@ class LiveTrader:
             "volatility": float(volatility),
             "atr_ratio": None if atr_ratio is None else float(atr_ratio),
             **trend_context,
+            **regime_context,
         }
 
         if self._reconcile_dual_side_position(
@@ -758,7 +956,8 @@ class LiveTrader:
         log_info(
             f"新bar={format_display_ts(bar_ts)} price={price:.4f} long={long_prob:.3f} short={short_prob:.3f} "
             f"mf={money_flow_ratio:.3f} vol={volatility:.6f} atr_ratio={0.0 if atr_ratio is None else atr_ratio:.4%} "
-            f"trend={trend_context.get('trend_bias', 'neutral')} trend_gap={trend_context.get('trend_gap')}"
+            f"trend={trend_context.get('trend_bias', 'neutral')} trend_gap={trend_context.get('trend_gap')} "
+            f"regime={regime_context.get('regime')}"
         )
 
         pos_qty, entry_price = self._get_net_position()
@@ -787,6 +986,7 @@ class LiveTrader:
             volatility=volatility,
             atr_ratio=atr_ratio,
             trend_bias=trend_context.get("trend_bias"),
+            market_regime=regime_context.get("regime"),
         )
 
         action = out["action"]
@@ -801,10 +1001,18 @@ class LiveTrader:
             "target_position": float(out.get("target_position", 0.0) or 0.0),
             "delta_qty": delta,
             "risk": out.get("risk"),
+            "raw_target_ratio": float(out.get("raw_target_ratio", 0.0) or 0.0),
+            "expected_net_edge": out.get("expected_net_edge"),
+            "take_profit": out.get("take_profit"),
+            "stop_loss": out.get("stop_loss"),
+            "signal_prob_gap": out.get("signal_prob_gap"),
+            "dominant_prob": out.get("dominant_prob"),
             "next_cooldown_bars": int(out.get("next_cooldown_bars", self.cooldown_bars_remaining)),
             "next_reverse_signal_bars": int(out.get("next_reverse_signal_bars", self.reverse_signal_bars)),
             "trend_bias": trend_context.get("trend_bias"),
             "trend_gap": trend_context.get("trend_gap"),
+            "market_regime": regime_context.get("regime"),
+            "regime_reason": regime_context.get("regime_reason"),
         }
 
         if action == "CLOSE":
@@ -982,16 +1190,39 @@ class LiveTrader:
                 cooldown_bars_remaining=self.cooldown_bars_remaining,
                 reverse_signal_bars=self.reverse_signal_bars,
             )
+            position_snapshot = self._build_position_snapshot(pos_qty, entry_price, current_price=price, pending_orders=0)
             self._write_dashboard_snapshot(
                 runtime_status="running",
                 latest_closed_bar_ts=bar_ts,
                 current_price=price,
                 signal_snapshot=signal_snapshot,
                 account_snapshot=account_snapshot,
-                position_snapshot=self._build_position_snapshot(pos_qty, entry_price, current_price=price, pending_orders=0),
+                position_snapshot=position_snapshot,
                 decision=decision,
             )
-            log_info("无明显信号或目标为0：保持仓位不变")
+            self._maybe_notify_abnormal_hold(
+                bar_ts=bar_ts,
+                price=price,
+                equity=equity,
+                decision=decision,
+                signal_snapshot=signal_snapshot,
+            )
+            self._maybe_notify_runtime_summary(
+                bar_ts=bar_ts,
+                price=price,
+                equity=equity,
+                position_snapshot=position_snapshot,
+                signal_snapshot=signal_snapshot,
+                decision=decision,
+            )
+            log_info(self._format_hold_decision_log(
+                decision,
+                out,
+                price=price,
+                equity=equity,
+                pos_qty=pos_qty,
+                entry_price=entry_price,
+            ))
             self._persist_last_bar_state(bar_ts)
             return
 

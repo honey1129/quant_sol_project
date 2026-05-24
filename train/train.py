@@ -1,4 +1,5 @@
 import json
+import hashlib
 import pandas as pd
 import numpy as np
 import joblib
@@ -44,8 +45,145 @@ def balance_samples(X, y):
 def evaluate_model(model, model_name, X_test, y_test):
     y_pred = model.predict(X_test)
     acc = accuracy_score(y_test, y_pred)
+    report = classification_report(y_test, y_pred, digits=4, output_dict=True)
     log_info(f"✅ {model_name} 准确率: {acc:.4f}")
     log_info(f"分类报告:\n{classification_report(y_test, y_pred, digits=4)}")
+    return {
+        "accuracy": float(acc),
+        "classification_report": _json_safe(report),
+    }
+
+
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        return float(value)
+    return value
+
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def write_json_atomic(path, payload):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as file:
+        json.dump(payload, file, ensure_ascii=False, indent=2, sort_keys=True)
+    os.replace(tmp_path, path)
+
+
+def build_training_metadata(*, X, y, feature_cols, train_end, validation_start, validation_end, oos_start, original_train_rows, balanced_train_rows, validation_metrics, artifact_paths):
+    artifact_hashes = {
+        os.path.relpath(path, BASE_DIR): sha256_file(path)
+        for path in artifact_paths
+        if os.path.exists(path)
+    }
+    label_distribution = {
+        "all": {str(k): int(v) for k, v in y.value_counts().sort_index().items()},
+        "train": {str(k): int(v) for k, v in y.iloc[:train_end].value_counts().sort_index().items()},
+        "validation": {str(k): int(v) for k, v in y.iloc[validation_start:validation_end].value_counts().sort_index().items()},
+        "oos": {str(k): int(v) for k, v in y.iloc[oos_start:].value_counts().sort_index().items()},
+    }
+    return {
+        "schema_version": 2,
+        "created_at": pd.Timestamp.utcnow().isoformat(),
+        "source": "train.train",
+        "symbol": config.SYMBOL,
+        "intervals": list(config.INTERVALS),
+        "model_paths": dict(config.MODEL_PATHS),
+        "model_weights": dict(config.MODEL_WEIGHTS),
+        "feature_list_path": config.FEATURE_LIST_PATH,
+        "training_metadata_path": config.TRAINING_METADATA_PATH,
+        "artifact_hashes": artifact_hashes,
+        "feature_count": int(len(feature_cols)),
+        "feature_columns_sha256": hashlib.sha256("\n".join(feature_cols).encode("utf-8")).hexdigest(),
+        "label_distribution": label_distribution,
+        "validation_metrics": validation_metrics,
+        "label_future_window": int(config.MODEL_LABEL_FUTURE_WINDOW),
+        "label_threshold": float(config.MODEL_LABEL_THRESHOLD),
+        "train_ratio": float(config.MODEL_TRAIN_RATIO),
+        "validation_ratio": float(config.MODEL_VALIDATION_RATIO),
+        "purge_bars": int(config.MODEL_PURGE_BARS),
+        "row_count": int(len(X)),
+        "train_rows": int(original_train_rows),
+        "balanced_train_rows": int(balanced_train_rows),
+        "validation_rows": int(validation_end - validation_start),
+        "oos_rows": int(len(X.iloc[oos_start:])),
+        "train_start": X.index[0].isoformat(),
+        "train_end": X.index[train_end - 1].isoformat(),
+        "validation_start": X.index[validation_start].isoformat(),
+        "validation_end": X.index[validation_end - 1].isoformat(),
+        "oos_start": X.index[oos_start].isoformat(),
+        "oos_end": X.index[-1].isoformat(),
+    }
+
+
+def build_model_estimators():
+    return {
+        "lgb_v1": lgb.LGBMClassifier(
+            n_estimators=500,
+            learning_rate=0.02,
+            max_depth=6,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            reg_alpha=0.1,
+            reg_lambda=1.0,
+            min_child_samples=5,
+            min_split_gain=0.0,
+            force_col_wise=True,
+            random_state=42
+        ),
+        "xgb_v1": xgb.XGBClassifier(
+            n_estimators=500,
+            learning_rate=0.02,
+            max_depth=6,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            reg_alpha=0.1,
+            reg_lambda=1.0,
+            random_state=42
+        ),
+        "rf_v1": RandomForestClassifier(n_estimators=300, max_depth=6, random_state=42),
+    }
+
+
+def train_model_bundle(X_train, y_train):
+    X_balanced, y_balanced = balance_samples(X_train, y_train)
+    X_balanced = pd.DataFrame(X_balanced, columns=X_train.columns)
+
+    models = build_model_estimators()
+    for model in models.values():
+        model.fit(X_balanced, y_balanced)
+    return models, X_balanced, y_balanced
+
+
+def build_time_splits(length):
+    train_ratio = float(config.MODEL_TRAIN_RATIO)
+    validation_ratio = float(config.MODEL_VALIDATION_RATIO)
+    purge_bars = max(0, int(config.MODEL_PURGE_BARS))
+
+    if train_ratio <= 0 or validation_ratio <= 0 or train_ratio + validation_ratio >= 1:
+        raise ValueError("MODEL_TRAIN_RATIO 和 MODEL_VALIDATION_RATIO 必须为正，且总和小于 1")
+
+    train_end = int(length * train_ratio)
+    validation_start = train_end + purge_bars
+    validation_end = int(length * (train_ratio + validation_ratio))
+    oos_start = validation_end + purge_bars
+
+    if train_end <= 0 or validation_start >= validation_end or oos_start >= length:
+        raise ValueError("样本量不足，无法切分 train/validation/oos")
+
+    return train_end, validation_start, validation_end, oos_start
 
 
 def build_model_estimators():
@@ -150,36 +288,29 @@ def train():
     joblib.dump(rf_model, rf_path)
     log_info(f"✅ RF 模型已保存至: {rf_path}")
 
-    # 评估示例（以LightGBM为例）
-    evaluate_model(lgb_model, "LightGBM", X_test, y_test)
-    evaluate_model(xgb_model, "XGBoost", X_test, y_test)
-    evaluate_model(rf_model, "RandomForest", X_test, y_test)
+    validation_metrics = {
+        "lgb_v1": evaluate_model(lgb_model, "LightGBM", X_test, y_test),
+        "xgb_v1": evaluate_model(xgb_model, "XGBoost", X_test, y_test),
+        "rf_v1": evaluate_model(rf_model, "RandomForest", X_test, y_test),
+    }
 
     joblib.dump(feature_cols, feature_path)
     log_info(f"✅ 特征列已保存至: {feature_path}")
 
-    metadata = {
-        "created_at": pd.Timestamp.utcnow().isoformat(),
-        "label_future_window": int(config.MODEL_LABEL_FUTURE_WINDOW),
-        "label_threshold": float(config.MODEL_LABEL_THRESHOLD),
-        "train_ratio": float(config.MODEL_TRAIN_RATIO),
-        "validation_ratio": float(config.MODEL_VALIDATION_RATIO),
-        "purge_bars": int(config.MODEL_PURGE_BARS),
-        "row_count": int(len(X)),
-        "train_rows": int(original_train_rows),
-        "balanced_train_rows": int(len(X_train)),
-        "validation_rows": int(len(X_test)),
-        "oos_rows": int(len(X.iloc[oos_start:])),
-        "train_start": X.index[0].isoformat(),
-        "train_end": X.index[train_end - 1].isoformat(),
-        "validation_start": X.index[validation_start].isoformat(),
-        "validation_end": X.index[validation_end - 1].isoformat(),
-        "oos_start": X.index[oos_start].isoformat(),
-        "oos_end": X.index[-1].isoformat(),
-    }
-    os.makedirs(os.path.dirname(training_metadata_path), exist_ok=True)
-    with open(training_metadata_path, "w", encoding="utf-8") as file:
-        json.dump(metadata, file, ensure_ascii=False, indent=2, sort_keys=True)
+    metadata = build_training_metadata(
+        X=X,
+        y=y,
+        feature_cols=feature_cols,
+        train_end=train_end,
+        validation_start=validation_start,
+        validation_end=validation_end,
+        oos_start=oos_start,
+        original_train_rows=original_train_rows,
+        balanced_train_rows=len(X_train),
+        validation_metrics=validation_metrics,
+        artifact_paths=[lgb_path, xgb_path, rf_path, feature_path],
+    )
+    write_json_atomic(training_metadata_path, metadata)
     log_info(f"✅ 训练元数据已保存至: {training_metadata_path}")
     log_info(
         "样本切分: "

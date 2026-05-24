@@ -160,7 +160,12 @@ def validate_artifacts():
     if not os.path.exists(metadata_path):
         raise RuntimeError(f"训练后缺少模型产物: {metadata_path}")
     metadata = read_json(metadata_path, {})
-    if not metadata or not metadata.get("oos_start"):
+    if not metadata:
+        raise RuntimeError(f"训练元数据无效: {metadata_path}")
+    # New training runs must include strict OOS split fields. Legacy artifacts that predate
+    # metadata tracking are allowed only when explicitly backfilled with artifact hashes;
+    # they are useful for version traceability but are not sufficient for retrain promotion.
+    if not metadata.get("oos_start") and not metadata.get("artifact_hashes"):
         raise RuntimeError(f"训练元数据无效或缺少 oos_start: {metadata_path}")
     loaded.append(os.path.relpath(metadata_path, BASE_DIR))
     return loaded
@@ -362,6 +367,27 @@ def build_walk_forward_slices(index, metadata):
     return slices
 
 
+def aggregate_regime_signal_summaries(summaries):
+    aggregate = {}
+    for summary in summaries:
+        regime_summary = summary.get("decision_regime_signal_summary") or {}
+        for regime, stats in regime_summary.items():
+            item = aggregate.setdefault(str(regime), {
+                "rows": 0,
+                "dominant_long_count": 0,
+                "dominant_short_count": 0,
+            })
+            item["rows"] += int(stats.get("rows", 0))
+            item["dominant_long_count"] += int(stats.get("dominant_long_count", 0))
+            item["dominant_short_count"] += int(stats.get("dominant_short_count", 0))
+
+    for item in aggregate.values():
+        rows = max(int(item.get("rows", 0)), 1)
+        item["dominant_long_pct"] = item["dominant_long_count"] / rows * 100.0
+        item["dominant_short_pct"] = item["dominant_short_count"] / rows * 100.0
+    return aggregate
+
+
 def aggregate_backtest_summaries(summaries):
     fold_count = len(summaries)
     closed_trade_count = sum(int(item.get("closed_trade_count", 0)) for item in summaries)
@@ -421,6 +447,7 @@ def aggregate_backtest_summaries(summaries):
         "fees_paid": float(fees_paid),
         "slippage_cost": float(slippage_cost),
         "funding_pnl": float(funding_pnl),
+        "decision_regime_signal_summary": aggregate_regime_signal_summaries(summaries),
         "folds": summaries,
     }
 
@@ -567,6 +594,39 @@ def run_backtest_with_bundle(log_file, title, context_backtester, bundle):
             return backtester.run_backtest()
 
 
+def validate_regime_signal_summary(summary):
+    if not bool(getattr(config, "MODEL_RETRAIN_REGIME_GATE_ENABLED", True)):
+        return
+
+    regime_summary = summary.get("decision_regime_signal_summary") or {}
+    if not regime_summary:
+        return
+
+    min_rows = max(1, int(getattr(config, "MODEL_RETRAIN_REGIME_GATE_MIN_ROWS", 30)))
+    max_trend_short_long_pct = float(getattr(config, "MODEL_RETRAIN_MAX_TREND_SHORT_LONG_DOMINANCE_PCT", 80.0))
+    max_trend_long_short_pct = float(getattr(config, "MODEL_RETRAIN_MAX_TREND_LONG_SHORT_DOMINANCE_PCT", 80.0))
+
+    trend_short = regime_summary.get("trend_short") or {}
+    if int(trend_short.get("rows", 0)) >= min_rows:
+        long_pct = float(trend_short.get("dominant_long_pct", 0.0))
+        if long_pct > max_trend_short_long_pct:
+            raise RuntimeError(
+                "Regime分层检查失败: trend_short 中候选模型过度偏多 "
+                f"dominant_long_pct={long_pct:.2f} > {max_trend_short_long_pct:.2f}, "
+                f"rows={trend_short.get('rows', 0)}"
+            )
+
+    trend_long = regime_summary.get("trend_long") or {}
+    if int(trend_long.get("rows", 0)) >= min_rows:
+        short_pct = float(trend_long.get("dominant_short_pct", 0.0))
+        if short_pct > max_trend_long_short_pct:
+            raise RuntimeError(
+                "Regime分层检查失败: trend_long 中候选模型过度偏空 "
+                f"dominant_short_pct={short_pct:.2f} > {max_trend_long_short_pct:.2f}, "
+                f"rows={trend_long.get('rows', 0)}"
+            )
+
+
 def validate_backtest_summary(summary):
     min_return_pct = float(config.MODEL_RETRAIN_MIN_RETURN_PCT)
     max_drawdown_pct = float(config.MODEL_RETRAIN_MAX_DRAWDOWN_PCT)
@@ -611,6 +671,7 @@ def validate_backtest_summary(summary):
             "手续费后收益未达标: "
             f"net_pnl_after_costs={summary.get('net_pnl_after_costs', 0.0):.2f} < {min_net_pnl_after_costs:.2f}"
         )
+    validate_regime_signal_summary(summary)
 
 
 def validate_new_model_improvement(new_summary, old_summary):

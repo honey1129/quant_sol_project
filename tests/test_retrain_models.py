@@ -65,7 +65,7 @@ class RetrainBacktestValidationTests(unittest.TestCase):
         retrain_models.validate_backtest_summary(build_summary())
 
     def test_validation_rejects_zero_trade_model(self):
-        with self.assertRaisesRegex(RuntimeError, "平仓交易数不足"):
+        with self.assertRaisesRegex(RuntimeError, "回测收益未达标|平仓交易数不足"):
             retrain_models.validate_backtest_summary(
                 build_summary(
                     return_pct=0.0,
@@ -93,6 +93,28 @@ class RetrainBacktestValidationTests(unittest.TestCase):
         with patch("run.retrain_models.config.MODEL_RETRAIN_MIN_PROFIT_FACTOR", 1.4):
             with self.assertRaisesRegex(RuntimeError, "盈利因子未达标"):
                 retrain_models.validate_backtest_summary(build_summary(profit_factor=1.25))
+
+
+    def test_validation_rejects_low_net_pnl_after_costs(self):
+        with patch("run.retrain_models.config.MODEL_RETRAIN_MIN_NET_PNL_AFTER_COSTS", 1.0):
+            with self.assertRaisesRegex(RuntimeError, "手续费后收益未达标"):
+                retrain_models.validate_backtest_summary(
+                    build_summary(net_pnl_after_costs=0.5)
+                )
+
+    def test_validation_rejects_low_positive_return(self):
+        with patch("run.retrain_models.config.MODEL_RETRAIN_MIN_RETURN_PCT", 0.05):
+            with self.assertRaisesRegex(RuntimeError, "回测收益未达标"):
+                retrain_models.validate_backtest_summary(
+                    build_summary(return_pct=0.01)
+                )
+
+    def test_validation_rejects_low_avg_win_loss_ratio(self):
+        with patch("run.retrain_models.config.MODEL_RETRAIN_MIN_AVG_WIN_LOSS_RATIO", 0.9):
+            with self.assertRaisesRegex(RuntimeError, "平均盈亏比未达标"):
+                retrain_models.validate_backtest_summary(
+                    build_summary(avg_win_loss_ratio=0.85)
+                )
 
     def test_new_model_must_improve_over_old_model(self):
         old_summary = build_summary(
@@ -254,6 +276,103 @@ class RetrainBacktestValidationTests(unittest.TestCase):
         self.assertAlmostEqual(summary["profit_factor"], 2.25)
         self.assertAlmostEqual(summary["net_pnl_after_costs"], 25.0)
         self.assertAlmostEqual(summary["max_drawdown_pct"], -3.0)
+    def test_regime_gate_rejects_trend_short_long_bias(self):
+        summary = build_summary(
+            decision_regime_signal_summary={
+                "trend_short": {
+                    "rows": 100,
+                    "dominant_long_count": 85,
+                    "dominant_short_count": 15,
+                    "dominant_long_pct": 85.0,
+                    "dominant_short_pct": 15.0,
+                }
+            }
+        )
+
+        with patch("run.retrain_models.config.MODEL_RETRAIN_REGIME_GATE_ENABLED", True):
+            with patch("run.retrain_models.config.MODEL_RETRAIN_REGIME_GATE_MIN_ROWS", 30):
+                with patch("run.retrain_models.config.MODEL_RETRAIN_MAX_TREND_SHORT_LONG_DOMINANCE_PCT", 80.0):
+                    with self.assertRaisesRegex(RuntimeError, "trend_short 中候选模型过度偏多"):
+                        retrain_models.validate_backtest_summary(summary)
+
+    def test_regime_gate_rejects_trend_long_short_bias(self):
+        summary = build_summary(
+            decision_regime_signal_summary={
+                "trend_long": {
+                    "rows": 100,
+                    "dominant_long_count": 10,
+                    "dominant_short_count": 90,
+                    "dominant_long_pct": 10.0,
+                    "dominant_short_pct": 90.0,
+                }
+            }
+        )
+
+        with patch("run.retrain_models.config.MODEL_RETRAIN_REGIME_GATE_ENABLED", True):
+            with patch("run.retrain_models.config.MODEL_RETRAIN_REGIME_GATE_MIN_ROWS", 30):
+                with patch("run.retrain_models.config.MODEL_RETRAIN_MAX_TREND_LONG_SHORT_DOMINANCE_PCT", 80.0):
+                    with self.assertRaisesRegex(RuntimeError, "trend_long 中候选模型过度偏空"):
+                        retrain_models.validate_backtest_summary(summary)
+
+    def test_regime_gate_ignores_small_samples(self):
+        summary = build_summary(
+            decision_regime_signal_summary={
+                "trend_short": {
+                    "rows": 10,
+                    "dominant_long_count": 10,
+                    "dominant_short_count": 0,
+                    "dominant_long_pct": 100.0,
+                    "dominant_short_pct": 0.0,
+                }
+            }
+        )
+
+        with patch("run.retrain_models.config.MODEL_RETRAIN_REGIME_GATE_ENABLED", True):
+            with patch("run.retrain_models.config.MODEL_RETRAIN_REGIME_GATE_MIN_ROWS", 30):
+                retrain_models.validate_backtest_summary(summary)
+
+    def test_walk_forward_aggregation_combines_regime_signal_summaries(self):
+        summary = retrain_models.aggregate_backtest_summaries([
+            build_summary(
+                max_drawdown_pct=-1.0,
+                trade_count=1,
+                closed_trade_count=1,
+                winning_trade_count=1,
+                losing_trade_count=0,
+                gross_profit=10.0,
+                gross_loss=0.0,
+                net_pnl_after_costs=10.0,
+                decision_regime_signal_summary={
+                    "trend_short": {
+                        "rows": 40,
+                        "dominant_long_count": 30,
+                        "dominant_short_count": 10,
+                    }
+                },
+            ),
+            build_summary(
+                max_drawdown_pct=-2.0,
+                trade_count=1,
+                closed_trade_count=1,
+                winning_trade_count=0,
+                losing_trade_count=1,
+                gross_profit=0.0,
+                gross_loss=5.0,
+                net_pnl_after_costs=-5.0,
+                decision_regime_signal_summary={
+                    "trend_short": {
+                        "rows": 60,
+                        "dominant_long_count": 55,
+                        "dominant_short_count": 5,
+                    }
+                },
+            ),
+        ])
+
+        regime = summary["decision_regime_signal_summary"]["trend_short"]
+        self.assertEqual(regime["rows"], 100)
+        self.assertEqual(regime["dominant_long_count"], 85)
+        self.assertAlmostEqual(regime["dominant_long_pct"], 85.0)
 
 
 if __name__ == "__main__":

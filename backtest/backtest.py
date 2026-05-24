@@ -7,6 +7,7 @@ import traceback
 import math
 from core.strategy_core import StrategyCore
 from core.trend_filter import derive_trend_context
+from core.regime_filter import derive_market_regime
 from core.reward_risk import get_configured_reward_risk
 from core.dynamic_risk import DynamicRiskController
 import time
@@ -160,6 +161,8 @@ class Backtester:
         self.decision_reason_counts = Counter()
         self.decision_action_counts = Counter()
         self.decision_trend_counts = Counter()
+        self.decision_regime_counts = Counter()
+        self.decision_regime_direction_counts = Counter()
         self.decision_direction_counts = Counter()
         self.decision_max_probs = []
         self.decision_prob_gaps = []
@@ -203,8 +206,21 @@ class Backtester:
             min_expected_net_edge=float(config.MIN_EXPECTED_NET_EDGE),
             min_take_profit_to_stop_loss_ratio=float(config.MIN_TAKE_PROFIT_TO_STOP_LOSS_RATIO),
             min_take_profit_cost_multiplier=float(config.MIN_TAKE_PROFIT_COST_MULTIPLIER),
+            regime_high_vol_stop_loss_min=float(config.REGIME_HIGH_VOL_STOP_LOSS_MIN),
             trade_cooldown_bars=int(config.TRADE_COOLDOWN_BARS),
+            take_profit_cooldown_bars=int(config.TAKE_PROFIT_COOLDOWN_BARS),
+            stop_loss_cooldown_bars=int(config.STOP_LOSS_COOLDOWN_BARS),
             trend_filter_enabled=bool(config.TREND_FILTER_ENABLED),
+            regime_filter_enabled=bool(config.REGIME_FILTER_ENABLED),
+            regime_range_allow_trades=bool(config.REGIME_RANGE_ALLOW_TRADES),
+            regime_high_vol_allow_trades=bool(config.REGIME_HIGH_VOL_ALLOW_TRADES),
+            regime_range_threshold_bonus=float(config.REGIME_RANGE_THRESHOLD_BONUS),
+            regime_high_vol_threshold_bonus=float(config.REGIME_HIGH_VOL_THRESHOLD_BONUS),
+            regime_trend_against_block=bool(config.REGIME_TREND_AGAINST_BLOCK),
+            regime_range_target_multiplier=float(config.REGIME_RANGE_TARGET_MULTIPLIER),
+            regime_high_vol_target_multiplier=float(config.REGIME_HIGH_VOL_TARGET_MULTIPLIER),
+            regime_range_min_signal_target_ratio=float(config.REGIME_RANGE_MIN_SIGNAL_TARGET_RATIO),
+            regime_high_vol_min_signal_target_ratio=float(config.REGIME_HIGH_VOL_MIN_SIGNAL_TARGET_RATIO),
             block_losing_position_adds=bool(config.BLOCK_LOSING_POSITION_ADDS),
             dynamic_risk_controller=self.dynamic_risk_controller,
         )
@@ -369,11 +385,14 @@ class Backtester:
     def _mark_to_market_equity(self, mark_price):
         return mark_to_market_equity(self.balance, self.position, self.entry_price, mark_price)
 
-    def _record_decision_diagnostic(self, out, signal_row, trend_context, take_profit, stop_loss):
+    def _record_decision_diagnostic(self, out, signal_row, trend_context, take_profit, stop_loss, regime_context=None):
         self.decision_action_counts[out.get("action", "")] += 1
         self.decision_reason_counts[out.get("reason", "")] += 1
         trend_bias = trend_context.get("trend_bias")
+        regime_context = regime_context or {}
+        market_regime = str(regime_context.get("regime") or "unknown")
         self.decision_trend_counts[trend_bias] += 1
+        self.decision_regime_counts[market_regime] += 1
 
         long_prob = float(signal_row["long_prob"])
         short_prob = float(signal_row["short_prob"])
@@ -381,6 +400,7 @@ class Backtester:
         prob_gap = abs(long_prob - short_prob)
         direction = "long" if long_prob >= short_prob else "short"
         self.decision_direction_counts[direction] += 1
+        self.decision_regime_direction_counts[(market_regime, direction)] += 1
         self.decision_max_probs.append(dominant_prob)
         self.decision_prob_gaps.append(prob_gap)
         self.decision_target_ratios.append(abs(float(out.get("target_ratio") or 0.0)))
@@ -396,6 +416,7 @@ class Backtester:
                 "short_prob": round(short_prob, 4),
                 "prob_gap": round(prob_gap, 4),
                 "trend_bias": trend_bias,
+                "market_regime": market_regime,
                 "target_ratio": round(float(out.get("target_ratio") or 0.0), 4),
                 "expected_edge": round(float(expected_edge), 6),
             })
@@ -409,6 +430,7 @@ class Backtester:
         log_info(f"原因分布TOP: {self.decision_reason_counts.most_common(12)}")
         log_info(f"信号方向分布: {dict(self.decision_direction_counts)}")
         log_info(f"趋势分布: {dict(self.decision_trend_counts)}")
+        log_info(f"Regime分布: {dict(self.decision_regime_counts)}")
         log_info(f"最大概率分位: {_quantiles(self.decision_max_probs)}")
         log_info(f"概率差分位: {_quantiles(self.decision_prob_gaps)}")
         log_info(f"目标仓位比例分位: {_quantiles(self.decision_target_ratios)}")
@@ -507,6 +529,17 @@ class Backtester:
                 slow_col=config.TREND_FILTER_SLOW_COL,
                 min_gap=config.TREND_FILTER_MIN_GAP,
             )
+            regime_context = derive_market_regime(
+                trend_bias=trend_context.get("trend_bias"),
+                trend_gap=trend_context.get("trend_gap"),
+                volatility=volatility,
+                atr_ratio=atr_ratio,
+                money_flow_ratio=money_flow_ratio,
+                trend_gap_threshold=config.REGIME_TREND_GAP_THRESHOLD,
+                high_vol_atr_threshold=config.REGIME_HIGH_VOL_ATR_THRESHOLD,
+                high_volatility_threshold=config.REGIME_HIGH_VOLATILITY_THRESHOLD,
+                money_flow_extreme_threshold=config.REGIME_MONEY_FLOW_EXTREME_THRESHOLD,
+            )
 
             self._apply_funding_until(exec_row.name)
 
@@ -523,12 +556,13 @@ class Backtester:
                 volatility=volatility,
                 atr_ratio=atr_ratio,
                 trend_bias=trend_context.get("trend_bias"),
+                market_regime=regime_context.get("regime"),
             )
 
             action = out["action"]
             delta = float(out["delta_qty"])
             take_profit, stop_loss = self.core.get_risk_thresholds()
-            self._record_decision_diagnostic(out, signal_row, trend_context, take_profit, stop_loss)
+            self._record_decision_diagnostic(out, signal_row, trend_context, take_profit, stop_loss, regime_context)
 
             if action == "CLOSE":
                 pos_to_close = self.position
@@ -542,7 +576,7 @@ class Backtester:
                 self._record_closed_trade_pnl()
                 self.core.apply_decision(out)
 
-                act = "平仓" if out.get("reason") == "TP/SL" else "反向平仓"
+                act = "平仓" if out.get("reason") in {"TP/SL", "TakeProfit", "StopLoss"} else "反向平仓"
                 self.trade_log.append((exec_row.name, act, exec_price, pos_to_close, self.balance))
 
             elif action == "OPEN":
@@ -637,6 +671,23 @@ class Backtester:
         long_prob, short_prob = avg_pred[1], avg_pred[0]
         return long_prob, short_prob
 
+    def _decision_regime_signal_summary(self):
+        summary = {}
+        regimes = sorted(str(key) for key in self.decision_regime_counts if key is not None)
+        for regime in regimes:
+            rows = int(self.decision_regime_counts.get(regime, 0))
+            long_count = int(self.decision_regime_direction_counts.get((regime, "long"), 0))
+            short_count = int(self.decision_regime_direction_counts.get((regime, "short"), 0))
+            denom = max(rows, 1)
+            summary[regime] = {
+                "rows": rows,
+                "dominant_long_count": long_count,
+                "dominant_short_count": short_count,
+                "dominant_long_pct": long_count / denom * 100.0,
+                "dominant_short_pct": short_count / denom * 100.0,
+            }
+        return summary
+
     def _summary(self):
         pnl = self.final_equity - config.INITIAL_BALANCE
         drawdown = self.max_drawdown
@@ -722,6 +773,10 @@ class Backtester:
             "funding_pnl": float(self.funding_pnl_total),
             "ending_position": float(self.position),
             "ending_entry_price": float(self.entry_price),
+            "decision_action_counts": dict(self.decision_action_counts),
+            "decision_reason_top": self.decision_reason_counts.most_common(15),
+            "decision_trend_counts": dict(self.decision_trend_counts),
+            "decision_regime_signal_summary": self._decision_regime_signal_summary(),
         }
 
     def dump_trade_log_to_csv(self,pnl, drawdown, performance_metrics=None):
