@@ -1,11 +1,15 @@
 import os
 from datetime import datetime
 import csv
+from collections import Counter
 import joblib
 import traceback
 import math
 from core.strategy_core import StrategyCore
 from core.trend_filter import derive_trend_context
+from core.regime_filter import derive_market_regime
+from core.reward_risk import get_configured_reward_risk
+from core.dynamic_risk import DynamicRiskController
 import time
 import numpy as np
 import pandas as pd
@@ -70,6 +74,21 @@ def resolve_intrabar_tp_sl(position, entry_price, bar_open, bar_high, bar_low, t
     }
 
 
+def _quantiles(values, points=(0.1, 0.25, 0.5, 0.75, 0.9, 0.95)):
+    cleaned = []
+    for value in values:
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            cleaned.append(value)
+    if not cleaned:
+        return {}
+    arr = np.array(cleaned)
+    return {f"p{int(point * 100)}": float(np.quantile(arr, point)) for point in points}
+
+
 class Backtester:
     def __init__(
         self,
@@ -101,7 +120,7 @@ class Backtester:
             self.data_dict, self.reward_risk = self._load_data()
         else:
             self.data_dict = data_dict
-            self.reward_risk = float(reward_risk if reward_risk is not None else config.KELLY_REWARD_RISK)
+            self.reward_risk = float(reward_risk if reward_risk is not None else get_configured_reward_risk())
 
         # 特征工程
         if precomputed_data is None:
@@ -125,6 +144,8 @@ class Backtester:
         self.max_balance = self.balance
         self.max_drawdown = 0.0
         self.trade_log = []
+        self.closed_trade_pnls = []
+        self.last_closed_balance = self.balance
         self.funding_log = []
         self.fee_rate = config.FEE_RATE
         self.slippage_bps = float(config.BACKTEST_SLIPPAGE_BPS)
@@ -137,9 +158,21 @@ class Backtester:
         self.tp_exit_count = 0
         self.sl_exit_count = 0
         self.final_equity = self.balance
+        self.decision_reason_counts = Counter()
+        self.decision_action_counts = Counter()
+        self.decision_trend_counts = Counter()
+        self.decision_regime_counts = Counter()
+        self.decision_regime_direction_counts = Counter()
+        self.decision_direction_counts = Counter()
+        self.decision_max_probs = []
+        self.decision_prob_gaps = []
+        self.decision_target_ratios = []
+        self.decision_edge_values = []
+        self.decision_examples = []
 
         # 初始化 position_manager
         self.position_manager = position_manager.PositionManager()
+        self.dynamic_risk_controller = DynamicRiskController()
         # ✅ 统一核心策略（以回测为准）
         self.core = StrategyCore(
             self.position_manager,
@@ -159,7 +192,7 @@ class Backtester:
             min_hold_bars=config.MIN_HOLD_BARS,
             add_threshold=config.ADD_THRESHOLD,
             max_rebalance_ratio=config.MAX_REBALANCE_RATIO,
-            min_adjust_amount=float(config.MIN_ADJUST_AMOUNT),
+            min_adjust_amount=float(config.BACKTEST_MIN_ADJUST_AMOUNT),
             signal_min_prob_diff=config.SIGNAL_MIN_PROB_DIFF,
             min_signal_target_ratio=config.MIN_SIGNAL_TARGET_RATIO,
             reverse_signal_min_prob_diff=config.REVERSE_SIGNAL_MIN_PROB_DIFF,
@@ -173,8 +206,23 @@ class Backtester:
             min_expected_net_edge=float(config.MIN_EXPECTED_NET_EDGE),
             min_take_profit_to_stop_loss_ratio=float(config.MIN_TAKE_PROFIT_TO_STOP_LOSS_RATIO),
             min_take_profit_cost_multiplier=float(config.MIN_TAKE_PROFIT_COST_MULTIPLIER),
+            regime_high_vol_stop_loss_min=float(config.REGIME_HIGH_VOL_STOP_LOSS_MIN),
             trade_cooldown_bars=int(config.TRADE_COOLDOWN_BARS),
+            take_profit_cooldown_bars=int(config.TAKE_PROFIT_COOLDOWN_BARS),
+            stop_loss_cooldown_bars=int(config.STOP_LOSS_COOLDOWN_BARS),
             trend_filter_enabled=bool(config.TREND_FILTER_ENABLED),
+            regime_filter_enabled=bool(config.REGIME_FILTER_ENABLED),
+            regime_range_allow_trades=bool(config.REGIME_RANGE_ALLOW_TRADES),
+            regime_high_vol_allow_trades=bool(config.REGIME_HIGH_VOL_ALLOW_TRADES),
+            regime_range_threshold_bonus=float(config.REGIME_RANGE_THRESHOLD_BONUS),
+            regime_high_vol_threshold_bonus=float(config.REGIME_HIGH_VOL_THRESHOLD_BONUS),
+            regime_trend_against_block=bool(config.REGIME_TREND_AGAINST_BLOCK),
+            regime_range_target_multiplier=float(config.REGIME_RANGE_TARGET_MULTIPLIER),
+            regime_high_vol_target_multiplier=float(config.REGIME_HIGH_VOL_TARGET_MULTIPLIER),
+            regime_range_min_signal_target_ratio=float(config.REGIME_RANGE_MIN_SIGNAL_TARGET_RATIO),
+            regime_high_vol_min_signal_target_ratio=float(config.REGIME_HIGH_VOL_MIN_SIGNAL_TARGET_RATIO),
+            block_losing_position_adds=bool(config.BLOCK_LOSING_POSITION_ADDS),
+            dynamic_risk_controller=self.dynamic_risk_controller,
         )
         if self.emit_diagnostics:
             self._log_intrabar_range_diagnostics()
@@ -191,7 +239,7 @@ class Backtester:
         log_info(f"从OKX拉取历史数据: {self.interval}, {self.window}根K线")
         client = okx_api.OKXClient()
         all_data = client.fetch_data()
-        reward_risk = float(config.KELLY_REWARD_RISK)
+        reward_risk = get_configured_reward_risk()
         log_info(f"回测使用固定 reward_risk={reward_risk:.4f}")
         return all_data,reward_risk
 
@@ -308,6 +356,12 @@ class Backtester:
         self.slippage_paid_total += slippage_cost
         return fee, slippage_cost
 
+    def _record_closed_trade_pnl(self):
+        net_pnl = float(self.balance) - float(self.last_closed_balance)
+        self.closed_trade_pnls.append(net_pnl)
+        self.last_closed_balance = float(self.balance)
+        return net_pnl
+
     def _apply_funding_until(self, ts):
         if self.funding_history.empty:
             return
@@ -330,6 +384,59 @@ class Backtester:
 
     def _mark_to_market_equity(self, mark_price):
         return mark_to_market_equity(self.balance, self.position, self.entry_price, mark_price)
+
+    def _record_decision_diagnostic(self, out, signal_row, trend_context, take_profit, stop_loss, regime_context=None):
+        self.decision_action_counts[out.get("action", "")] += 1
+        self.decision_reason_counts[out.get("reason", "")] += 1
+        trend_bias = trend_context.get("trend_bias")
+        regime_context = regime_context or {}
+        market_regime = str(regime_context.get("regime") or "unknown")
+        self.decision_trend_counts[trend_bias] += 1
+        self.decision_regime_counts[market_regime] += 1
+
+        long_prob = float(signal_row["long_prob"])
+        short_prob = float(signal_row["short_prob"])
+        dominant_prob = max(long_prob, short_prob)
+        prob_gap = abs(long_prob - short_prob)
+        direction = "long" if long_prob >= short_prob else "short"
+        self.decision_direction_counts[direction] += 1
+        self.decision_regime_direction_counts[(market_regime, direction)] += 1
+        self.decision_max_probs.append(dominant_prob)
+        self.decision_prob_gaps.append(prob_gap)
+        self.decision_target_ratios.append(abs(float(out.get("target_ratio") or 0.0)))
+        expected_edge = self.core._expected_net_edge_ratio(dominant_prob, take_profit, stop_loss)
+        self.decision_edge_values.append(expected_edge)
+
+        if len(self.decision_examples) < 12 and out.get("action") == "HOLD":
+            self.decision_examples.append({
+                "ts": signal_row.name.isoformat() if hasattr(signal_row.name, "isoformat") else str(signal_row.name),
+                "reason": out.get("reason"),
+                "direction": direction,
+                "long_prob": round(long_prob, 4),
+                "short_prob": round(short_prob, 4),
+                "prob_gap": round(prob_gap, 4),
+                "trend_bias": trend_bias,
+                "market_regime": market_regime,
+                "target_ratio": round(float(out.get("target_ratio") or 0.0), 4),
+                "expected_edge": round(float(expected_edge), 6),
+            })
+
+    def _log_decision_diagnostics(self):
+        if not self.decision_action_counts:
+            return
+
+        log_info("回测决策诊断:")
+        log_info(f"动作分布: {dict(self.decision_action_counts)}")
+        log_info(f"原因分布TOP: {self.decision_reason_counts.most_common(12)}")
+        log_info(f"信号方向分布: {dict(self.decision_direction_counts)}")
+        log_info(f"趋势分布: {dict(self.decision_trend_counts)}")
+        log_info(f"Regime分布: {dict(self.decision_regime_counts)}")
+        log_info(f"最大概率分位: {_quantiles(self.decision_max_probs)}")
+        log_info(f"概率差分位: {_quantiles(self.decision_prob_gaps)}")
+        log_info(f"目标仓位比例分位: {_quantiles(self.decision_target_ratios)}")
+        log_info(f"预期净边际分位: {_quantiles(self.decision_edge_values)}")
+        if self.decision_examples:
+            log_info(f"HOLD样例: {self.decision_examples}")
 
     def _maybe_execute_intrabar_tp_sl(self, exec_row, take_profit=None, stop_loss=None):
         if not self.enable_intrabar_tp_sl or self.position == 0 or self.entry_price <= 0:
@@ -361,6 +468,7 @@ class Backtester:
         profit = (exec_price - self.entry_price) * pos_to_close
         self.balance += profit
         self._apply_trade_costs(pos_to_close, reference_price, exec_price)
+        self._record_closed_trade_pnl()
 
         action = "止损" if hit["reason"] == "SL" else "止盈"
         if hit["reason"] == "SL":
@@ -421,6 +529,17 @@ class Backtester:
                 slow_col=config.TREND_FILTER_SLOW_COL,
                 min_gap=config.TREND_FILTER_MIN_GAP,
             )
+            regime_context = derive_market_regime(
+                trend_bias=trend_context.get("trend_bias"),
+                trend_gap=trend_context.get("trend_gap"),
+                volatility=volatility,
+                atr_ratio=atr_ratio,
+                money_flow_ratio=money_flow_ratio,
+                trend_gap_threshold=config.REGIME_TREND_GAP_THRESHOLD,
+                high_vol_atr_threshold=config.REGIME_HIGH_VOL_ATR_THRESHOLD,
+                high_volatility_threshold=config.REGIME_HIGH_VOLATILITY_THRESHOLD,
+                money_flow_extreme_threshold=config.REGIME_MONEY_FLOW_EXTREME_THRESHOLD,
+            )
 
             self._apply_funding_until(exec_row.name)
 
@@ -437,11 +556,13 @@ class Backtester:
                 volatility=volatility,
                 atr_ratio=atr_ratio,
                 trend_bias=trend_context.get("trend_bias"),
+                market_regime=regime_context.get("regime"),
             )
 
             action = out["action"]
             delta = float(out["delta_qty"])
             take_profit, stop_loss = self.core.get_risk_thresholds()
+            self._record_decision_diagnostic(out, signal_row, trend_context, take_profit, stop_loss, regime_context)
 
             if action == "CLOSE":
                 pos_to_close = self.position
@@ -452,9 +573,10 @@ class Backtester:
                 profit = (exec_price - entry_price) * pos_to_close
                 self.balance += profit
                 self._apply_trade_costs(pos_to_close, price, exec_price)
+                self._record_closed_trade_pnl()
                 self.core.apply_decision(out)
 
-                act = "平仓" if out.get("reason") == "TP/SL" else "反向平仓"
+                act = "平仓" if out.get("reason") in {"TP/SL", "TakeProfit", "StopLoss"} else "反向平仓"
                 self.trade_log.append((exec_row.name, act, exec_price, pos_to_close, self.balance))
 
             elif action == "OPEN":
@@ -479,6 +601,8 @@ class Backtester:
                 side = self._get_trade_side(old_pos, delta, action)
                 exec_price = self._apply_slippage(price, side, bar_low=bar_low, bar_high=bar_high)
 
+                realized_profit = 0.0
+                reduced_qty = 0.0
                 if old_pos != 0 and np.sign(delta) != np.sign(old_pos):
                     reduced_qty = min(abs(delta), abs(old_pos))
                     closed_pos = math.copysign(reduced_qty, old_pos)
@@ -486,6 +610,8 @@ class Backtester:
                     self.balance += realized_profit
 
                 self._apply_trade_costs(delta, price, exec_price)
+                if reduced_qty > 0:
+                    self._record_closed_trade_pnl()
 
                 if abs(new_pos) > abs(old_pos):
                     existing_qty = abs(old_pos)
@@ -545,9 +671,42 @@ class Backtester:
         long_prob, short_prob = avg_pred[1], avg_pred[0]
         return long_prob, short_prob
 
+    def _decision_regime_signal_summary(self):
+        summary = {}
+        regimes = sorted(str(key) for key in self.decision_regime_counts if key is not None)
+        for regime in regimes:
+            rows = int(self.decision_regime_counts.get(regime, 0))
+            long_count = int(self.decision_regime_direction_counts.get((regime, "long"), 0))
+            short_count = int(self.decision_regime_direction_counts.get((regime, "short"), 0))
+            denom = max(rows, 1)
+            summary[regime] = {
+                "rows": rows,
+                "dominant_long_count": long_count,
+                "dominant_short_count": short_count,
+                "dominant_long_pct": long_count / denom * 100.0,
+                "dominant_short_pct": short_count / denom * 100.0,
+            }
+        return summary
+
     def _summary(self):
         pnl = self.final_equity - config.INITIAL_BALANCE
         drawdown = self.max_drawdown
+        wins = [value for value in self.closed_trade_pnls if value > 0]
+        losses = [value for value in self.closed_trade_pnls if value < 0]
+        closed_trade_count = len(self.closed_trade_pnls)
+        win_rate_pct = (len(wins) / closed_trade_count * 100.0) if closed_trade_count else 0.0
+        gross_profit = sum(wins)
+        gross_loss = -sum(losses)
+        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (float("inf") if gross_profit > 0 else 0.0)
+        avg_win = gross_profit / len(wins) if wins else 0.0
+        avg_loss = gross_loss / len(losses) if losses else 0.0
+        avg_win_loss_ratio = (avg_win / avg_loss) if avg_loss > 0 else (float("inf") if avg_win > 0 else 0.0)
+        avg_closed_trade_pnl = (
+            sum(self.closed_trade_pnls) / closed_trade_count
+            if closed_trade_count
+            else 0.0
+        )
+        net_pnl_after_costs = pnl
 
         log_info("回测完成 ✅")
         log_info(f"期末净值: {self.final_equity:.2f} USDT")
@@ -558,6 +717,12 @@ class Backtester:
         log_info(f"累计收益: {pnl:.2f} USDT ({pnl / config.INITIAL_BALANCE * 100:.2f}%)")
         log_info(f"最大回撤: {drawdown * 100:.2f}%")
         log_info(f"交易次数: {len(self.trade_log)}")
+        log_info(f"平仓交易数: {closed_trade_count}")
+        log_info(f"胜率: {win_rate_pct:.2f}%")
+        log_info(f"盈利因子: {profit_factor:.4f}")
+        log_info(f"平均盈亏比: {avg_win_loss_ratio:.4f}")
+        log_info(f"平均平仓净PnL: {avg_closed_trade_pnl:.2f} USDT")
+        log_info(f"手续费后收益: {net_pnl_after_costs:.2f} USDT ({net_pnl_after_costs / config.INITIAL_BALANCE * 100:.2f}%)")
         log_info(f"资金费事件数: {len(self.funding_log)}")
         log_info(f"止盈次数: {self.tp_exit_count}")
         log_info(f"止损次数: {self.sl_exit_count}")
@@ -565,8 +730,20 @@ class Backtester:
         log_info(f"滑点成本合计: {self.slippage_paid_total:.2f} USDT")
         log_info(f"资金费净额: {self.funding_pnl_total:.2f} USDT")
         log_info(f"交易记录示例: {self.trade_log[-5:]}")
+        if len(self.trade_log) == 0:
+            self._log_decision_diagnostics()
         if self.enable_csv_dump:
-            self.dump_trade_log_to_csv(pnl, drawdown)
+            self.dump_trade_log_to_csv(pnl, drawdown, {
+                "closed_trade_count": closed_trade_count,
+                "win_rate_pct": win_rate_pct,
+                "profit_factor": profit_factor,
+                "avg_win": avg_win,
+                "avg_loss": avg_loss,
+                "avg_win_loss_ratio": avg_win_loss_ratio,
+                "avg_closed_trade_pnl": avg_closed_trade_pnl,
+                "net_pnl_after_costs": net_pnl_after_costs,
+                "net_return_pct_after_costs": net_pnl_after_costs / config.INITIAL_BALANCE * 100,
+            })
 
         return {
             "final_equity": float(self.final_equity),
@@ -575,6 +752,19 @@ class Backtester:
             "return_pct": float(pnl / config.INITIAL_BALANCE * 100),
             "max_drawdown_pct": float(drawdown * 100),
             "trade_count": int(len(self.trade_log)),
+            "closed_trade_count": int(closed_trade_count),
+            "winning_trade_count": int(len(wins)),
+            "losing_trade_count": int(len(losses)),
+            "win_rate_pct": float(win_rate_pct),
+            "gross_profit": float(gross_profit),
+            "gross_loss": float(gross_loss),
+            "profit_factor": float(profit_factor),
+            "avg_win": float(avg_win),
+            "avg_loss": float(avg_loss),
+            "avg_win_loss_ratio": float(avg_win_loss_ratio),
+            "avg_closed_trade_pnl": float(avg_closed_trade_pnl),
+            "net_pnl_after_costs": float(net_pnl_after_costs),
+            "net_return_pct_after_costs": float(net_pnl_after_costs / config.INITIAL_BALANCE * 100),
             "funding_event_count": int(len(self.funding_log)),
             "take_profit_count": int(self.tp_exit_count),
             "stop_loss_count": int(self.sl_exit_count),
@@ -583,9 +773,14 @@ class Backtester:
             "funding_pnl": float(self.funding_pnl_total),
             "ending_position": float(self.position),
             "ending_entry_price": float(self.entry_price),
+            "decision_action_counts": dict(self.decision_action_counts),
+            "decision_reason_top": self.decision_reason_counts.most_common(15),
+            "decision_trend_counts": dict(self.decision_trend_counts),
+            "decision_regime_signal_summary": self._decision_regime_signal_summary(),
         }
 
-    def dump_trade_log_to_csv(self,pnl, drawdown):
+    def dump_trade_log_to_csv(self,pnl, drawdown, performance_metrics=None):
+        performance_metrics = performance_metrics or {}
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         backtest_log_path = os.path.join(LOGS_DIR, f"backtest_{self.interval}_{ts}.csv")
         with open(backtest_log_path, "w", newline="") as f:
@@ -614,6 +809,42 @@ class Backtester:
             writer.writerow([
                 "Trade Count",
                 len(self.trade_log)
+            ])
+            writer.writerow([
+                "Closed Trade Count",
+                performance_metrics.get("closed_trade_count", 0)
+            ])
+            writer.writerow([
+                "Win Rate (%)",
+                round(performance_metrics.get("win_rate_pct", 0.0), 2)
+            ])
+            writer.writerow([
+                "Profit Factor",
+                round(performance_metrics.get("profit_factor", 0.0), 4)
+            ])
+            writer.writerow([
+                "Average Win (USDT)",
+                round(performance_metrics.get("avg_win", 0.0), 2)
+            ])
+            writer.writerow([
+                "Average Loss (USDT)",
+                round(performance_metrics.get("avg_loss", 0.0), 2)
+            ])
+            writer.writerow([
+                "Average Win/Loss Ratio",
+                round(performance_metrics.get("avg_win_loss_ratio", 0.0), 4)
+            ])
+            writer.writerow([
+                "Average Closed Trade PnL (USDT)",
+                round(performance_metrics.get("avg_closed_trade_pnl", 0.0), 2)
+            ])
+            writer.writerow([
+                "Net PnL After Costs (USDT)",
+                round(performance_metrics.get("net_pnl_after_costs", pnl), 2)
+            ])
+            writer.writerow([
+                "Net Return After Costs (%)",
+                round(performance_metrics.get("net_return_pct_after_costs", pnl / config.INITIAL_BALANCE * 100), 2)
             ])
             writer.writerow([
                 "Funding Event Count",

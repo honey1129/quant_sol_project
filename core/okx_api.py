@@ -90,8 +90,30 @@ class OKXClient:
         self.market_api = Market.MarketAPI(config.OKX_API_KEY, config.OKX_SECRET, config.OKX_PASSWORD, use_server_time=True, flag=config.USE_SERVER)
         self.public_api = Public.PublicAPI(config.OKX_API_KEY, config.OKX_SECRET, config.OKX_PASSWORD, use_server_time=True,flag=config.USE_SERVER)
 
+    def _call_with_retry(self, label, func, *, max_retry=None, sleep_sec=None, backoff=None):
+        max_retry = max(1, int(max_retry if max_retry is not None else config.OKX_API_MAX_RETRY))
+        sleep_sec = max(0.0, float(sleep_sec if sleep_sec is not None else config.OKX_API_RETRY_SLEEP_SEC))
+        backoff = max(1.0, float(backoff if backoff is not None else config.OKX_API_RETRY_BACKOFF))
+        delay = sleep_sec
+        last_error = None
+
+        for attempt in range(max_retry):
+            try:
+                return func()
+            except Exception as exc:
+                last_error = exc
+                log_error(f"⚠ {label}失败，第{attempt + 1}/{max_retry}次: {exc}")
+                if attempt < max_retry - 1 and delay > 0:
+                    time.sleep(delay)
+                    delay *= backoff
+
+        raise last_error
+
     def get_account_config(self):
-        result = self.account_api.get_account_config()
+        result = self._call_with_retry(
+            "获取账户配置",
+            self.account_api.get_account_config,
+        )
         if result.get("code") != "0":
             raise RuntimeError(f"获取账户配置失败: {result}")
         data = result.get("data", [])
@@ -100,9 +122,12 @@ class OKXClient:
         return data[0]
 
     def list_pending_orders(self):
-        result = self.trade_api.get_order_list(
-            instType="SWAP",
-            instId=config.SYMBOL,
+        result = self._call_with_retry(
+            "获取挂单列表",
+            lambda: self.trade_api.get_order_list(
+                instType="SWAP",
+                instId=config.SYMBOL,
+            ),
         )
         if result.get("code") != "0":
             raise RuntimeError(f"获取挂单列表失败: {result}")
@@ -112,7 +137,10 @@ class OKXClient:
         if not cl_ord_id:
             return None
         try:
-            result = self.trade_api.get_order(instId=config.SYMBOL, clOrdId=cl_ord_id)
+            result = self._call_with_retry(
+                "按 clOrdId 查询订单",
+                lambda: self.trade_api.get_order(instId=config.SYMBOL, clOrdId=cl_ord_id),
+            )
         except Exception as exc:
             log_error(f"按 clOrdId 查询订单失败: {cl_ord_id} -> {exc}")
             return None
@@ -126,10 +154,13 @@ class OKXClient:
         if not ord_id:
             return []
         try:
-            result = self.trade_api.get_fills(
-                instType="SWAP",
-                instId=config.SYMBOL,
-                ordId=ord_id,
+            result = self._call_with_retry(
+                "查询订单成交明细",
+                lambda: self.trade_api.get_fills(
+                    instType="SWAP",
+                    instId=config.SYMBOL,
+                    ordId=ord_id,
+                ),
             )
         except Exception as exc:
             log_error(f"查询订单成交明细失败: ordId={ord_id} -> {exc}")
@@ -236,7 +267,10 @@ class OKXClient:
             if long_pos["size"] > 0 or short_pos["size"] > 0:
                 raise RuntimeError("持仓模式不是 long_short_mode，且当前已有持仓，拒绝自动切换")
 
-            result = self.account_api.set_position_mode("long_short_mode")
+            result = self._call_with_retry(
+                "自动设置持仓模式",
+                lambda: self.account_api.set_position_mode("long_short_mode"),
+            )
             if result.get("code") != "0":
                 raise RuntimeError(f"自动设置持仓模式失败: {result}")
             log_info("已自动切换到账户双向持仓模式 long_short_mode")
@@ -246,7 +280,10 @@ class OKXClient:
             if pos_mode != "long_short_mode":
                 raise RuntimeError(f"持仓模式校验失败，当前为 {pos_mode or 'unknown'}")
 
-        leverage_rows = self.account_api.get_leverage(mgnMode="cross", instId=config.SYMBOL)
+        leverage_rows = self._call_with_retry(
+            "获取杠杆配置",
+            lambda: self.account_api.get_leverage(mgnMode="cross", instId=config.SYMBOL),
+        )
         if leverage_rows.get("code") != "0":
             raise RuntimeError(f"获取杠杆配置失败: {leverage_rows}")
         leverage_map = self._extract_leverage_by_side(leverage_rows.get("data", []))
@@ -256,11 +293,14 @@ class OKXClient:
             for pos_side in ("long", "short"):
                 current_leverage = leverage_map.get(pos_side, leverage_map.get("both", 0.0))
                 if abs(current_leverage - target_leverage) > 1e-9:
-                    result = self.account_api.set_leverage(
-                        lever=str(config.LEVERAGE),
-                        mgnMode="cross",
-                        instId=config.SYMBOL,
-                        posSide=pos_side,
+                    result = self._call_with_retry(
+                        f"设置 {pos_side} 杠杆",
+                        lambda pos_side=pos_side: self.account_api.set_leverage(
+                            lever=str(config.LEVERAGE),
+                            mgnMode="cross",
+                            instId=config.SYMBOL,
+                            posSide=pos_side,
+                        ),
                     )
                     if result.get("code") != "0":
                         raise RuntimeError(f"设置 {pos_side} 杠杆失败: {result}")
@@ -280,7 +320,12 @@ class OKXClient:
 
     # 获取当前账户余额等信息
     def get_account_balance(self):
-        result = self.account_api.get_account_balance()
+        result = self._call_with_retry(
+            "获取账户余额",
+            self.account_api.get_account_balance,
+        )
+        if result.get("code") != "0":
+            raise RuntimeError(f"获取账户余额失败: {result}")
 
         total_eq_raw = result['data'][0].get('totalEq', '0')
         total_eq = float(total_eq_raw) if total_eq_raw not in ['', None] else 0.0
@@ -301,7 +346,13 @@ class OKXClient:
 
     # 获取SYMBOL当前最新仓位
     def get_position(self):
-        positions = self.account_api.get_positions(instType='SWAP', instId=config.SYMBOL)['data']
+        result = self._call_with_retry(
+            "获取仓位",
+            lambda: self.account_api.get_positions(instType='SWAP', instId=config.SYMBOL),
+        )
+        if result.get("code") != "0":
+            raise RuntimeError(f"获取仓位失败: {result}")
+        positions = result['data']
 
         long_position = {'size': 0.0, 'entry_price': 0.0}
         short_position = {'size': 0.0, 'entry_price': 0.0}
@@ -341,7 +392,13 @@ class OKXClient:
 
     # 获取最近已平仓交易的真实收益率（计算reward_risk用）
     def fetch_recent_closed_trades(self, limit=50):
-        result = self.account_api.get_positions_history(instType="SWAP", instId=config.SYMBOL, limit=str(limit))
+        result = self._call_with_retry(
+            "获取历史平仓",
+            lambda: self.account_api.get_positions_history(instType="SWAP", instId=config.SYMBOL, limit=str(limit)),
+        )
+        if result.get("code") != "0":
+            log_error(f"获取历史平仓失败: {result}")
+            return []
         trades = []
         for item in result.get("data", []):
             try:

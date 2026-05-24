@@ -71,8 +71,8 @@ class DashboardServerTests(unittest.TestCase):
         self.assertAlmostEqual(status["market"]["last_price"], 85.62)
         self.assertAlmostEqual(status["signal"]["long_prob"], 0.389)
         self.assertAlmostEqual(status["signal"]["short_prob"], 0.611)
-        self.assertEqual(status["bar"]["last_processed_bar_ts"], "2026-04-24T06:00:00+00:00")
-        self.assertEqual(status["bar"]["latest_closed_bar_ts"], "2026-04-24T06:05:00+00:00")
+        self.assertEqual(status["bar"]["last_processed_bar_ts"], "2026-04-23T22:00:00+00:00")
+        self.assertEqual(status["bar"]["latest_closed_bar_ts"], "2026-04-23T22:05:00+00:00")
 
     def test_parse_latest_backtest_summary_uses_latest_block(self):
         log_lines = [
@@ -85,6 +85,12 @@ class DashboardServerTests(unittest.TestCase):
             "2026-04-24 10:39:11,430 - INFO - 累计收益: 142.97 USDT (14.30%)",
             "2026-04-24 10:39:11,430 - INFO - 最大回撤: -0.31%",
             "2026-04-24 10:39:11,430 - INFO - 交易次数: 425",
+            "2026-04-24 10:39:11,430 - INFO - 平仓交易数: 120",
+            "2026-04-24 10:39:11,430 - INFO - 胜率: 51.67%",
+            "2026-04-24 10:39:11,430 - INFO - 盈利因子: 1.2345",
+            "2026-04-24 10:39:11,430 - INFO - 平均盈亏比: 1.1200",
+            "2026-04-24 10:39:11,430 - INFO - 平均平仓净PnL: 1.19 USDT",
+            "2026-04-24 10:39:11,430 - INFO - 手续费后收益: 142.97 USDT (14.30%)",
             "2026-04-24 10:39:11,430 - INFO - 手续费合计: 27.02 USDT",
             "2026-04-24 10:39:11,430 - INFO - 滑点成本合计: 14.96 USDT",
         ]
@@ -95,6 +101,13 @@ class DashboardServerTests(unittest.TestCase):
         self.assertAlmostEqual(summary["return_pct"], 14.30)
         self.assertAlmostEqual(summary["max_drawdown_pct"], -0.31)
         self.assertEqual(summary["trade_count"], 425)
+        self.assertEqual(summary["closed_trade_count"], 120)
+        self.assertAlmostEqual(summary["win_rate_pct"], 51.67)
+        self.assertAlmostEqual(summary["profit_factor"], 1.2345)
+        self.assertAlmostEqual(summary["avg_win_loss_ratio"], 1.12)
+        self.assertAlmostEqual(summary["avg_closed_trade_pnl"], 1.19)
+        self.assertAlmostEqual(summary["net_pnl_after_costs"], 142.97)
+        self.assertAlmostEqual(summary["net_return_pct_after_costs"], 14.30)
         self.assertAlmostEqual(summary["fees_paid"], 27.02)
         self.assertAlmostEqual(summary["slippage_cost"], 14.96)
 
@@ -260,3 +273,44 @@ class DashboardServerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class DashboardObservabilityTests(unittest.TestCase):
+    def test_model_observability_reports_metadata_and_failed_retrain(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            metadata_path = os.path.join(tmpdir, "models", "training_metadata.json")
+            logs_dir = os.path.join(tmpdir, "logs")
+            os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
+            os.makedirs(logs_dir, exist_ok=True)
+            with open(metadata_path, "w", encoding="utf-8") as f:
+                f.write('{"schema_version":2,"source":"unit","symbol":"SOL-USDT-SWAP","artifact_hashes":{"a":"b"},"feature_count":3,"oos_start":"2026-01-01T00:00:00+00:00"}')
+            with open(os.path.join(logs_dir, "model_retrain_state.json"), "w", encoding="utf-8") as f:
+                f.write('{"last_status":"failed","last_error":"gate failed","last_log_path":"logs/model_retrain_x.log"}')
+            log_path = os.path.join(logs_dir, "model_retrain_x.log")
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write("FAILED: gate failed\n")
+
+            with patch("run.dashboard_server.BASE_DIR", tmpdir), patch("run.dashboard_server.LOGS_DIR", logs_dir):
+                with patch.object(dashboard_server.config, "TRAINING_METADATA_PATH", "models/training_metadata.json"):
+                    snapshot = dashboard_server.build_model_observability_snapshot()
+
+            self.assertEqual(snapshot["health"], "warning")
+            self.assertIn("last_retrain_failed", snapshot["warnings"])
+            self.assertEqual(snapshot["schema_version"], 2)
+            self.assertEqual(snapshot["artifact_hash_count"], 1)
+            self.assertTrue(snapshot["metadata_file"]["exists"])
+            self.assertTrue(snapshot["latest_retrain_log_file"]["exists"])
+
+    def test_observability_escalates_runtime_error(self):
+        with patch("run.dashboard_server.build_model_observability_snapshot", return_value={"health": "ok", "warnings": []}):
+            snapshot = dashboard_server.build_observability_snapshot({"runtime": {"last_error": "boom"}})
+        self.assertEqual(snapshot["health"], "error")
+        self.assertEqual(snapshot["alerts"][0]["code"], "runtime_last_error")
+
+    def test_enrich_status_ignores_tmp_runtime_dashboard_corruption_from_tests(self):
+        log_lines = [
+            "2026-05-17 21:20:00,000 - ERROR - ⚠ runtime_dashboard JSON 损坏，已备份到 /tmp/tmpabc/history.json.corrupt-20260517T192008Z: Expecting value",
+            "2026-05-17 21:20:10,000 - INFO - 心跳: 运行中，最近已处理bar=2026-05-17 21:15:00, 当前最新已收盘bar=2026-05-17 21:15:00, 连续跳过同bar次数=1",
+        ]
+        status = dashboard_server.enrich_status_with_fallbacks({}, log_lines, log_lines)
+        self.assertIsNone(status["runtime"].get("last_error"))
+        self.assertEqual(status["runtime"]["last_status"], "waiting_next_bar")

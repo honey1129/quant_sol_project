@@ -109,6 +109,13 @@ class LiveRuntimeStateTests(unittest.TestCase):
         self.assertEqual(payload["position"]["direction"], "long")
         self.assertAlmostEqual(payload["position"]["net_qty"], 2.5)
 
+    def test_live_reward_risk_uses_configured_value(self):
+        trader = LiveTrader.__new__(LiveTrader)
+        trader.client = object()
+
+        with patch("run.live_trading_monitor.config.KELLY_REWARD_RISK", 2.8):
+            self.assertAlmostEqual(trader._load_reward_risk(), 2.8)
+
 
 class OkxOrderHelperTests(unittest.TestCase):
     def test_build_client_order_id_is_short_and_unique(self):

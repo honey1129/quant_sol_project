@@ -9,7 +9,9 @@ from core.ml_feature_engineering import merge_multi_period_features, add_advance
 from core.okx_api import OKXClient
 from core.position_manager import PositionManager
 from core.strategy_core import StrategyCore
+from core.dynamic_risk import DynamicRiskController
 from core.trend_filter import derive_trend_context
+from core.regime_filter import derive_market_regime
 from utils.utils import BASE_DIR
 
 class MultiPeriodSignalPredictor:
@@ -50,8 +52,23 @@ class MultiPeriodSignalPredictor:
             min_expected_net_edge=float(config.MIN_EXPECTED_NET_EDGE),
             min_take_profit_to_stop_loss_ratio=float(config.MIN_TAKE_PROFIT_TO_STOP_LOSS_RATIO),
             min_take_profit_cost_multiplier=float(config.MIN_TAKE_PROFIT_COST_MULTIPLIER),
+            regime_high_vol_stop_loss_min=float(config.REGIME_HIGH_VOL_STOP_LOSS_MIN),
             trade_cooldown_bars=int(config.TRADE_COOLDOWN_BARS),
+            take_profit_cooldown_bars=int(config.TAKE_PROFIT_COOLDOWN_BARS),
+            stop_loss_cooldown_bars=int(config.STOP_LOSS_COOLDOWN_BARS),
             trend_filter_enabled=bool(config.TREND_FILTER_ENABLED),
+            regime_filter_enabled=bool(config.REGIME_FILTER_ENABLED),
+            regime_range_allow_trades=bool(config.REGIME_RANGE_ALLOW_TRADES),
+            regime_high_vol_allow_trades=bool(config.REGIME_HIGH_VOL_ALLOW_TRADES),
+            regime_range_threshold_bonus=float(config.REGIME_RANGE_THRESHOLD_BONUS),
+            regime_high_vol_threshold_bonus=float(config.REGIME_HIGH_VOL_THRESHOLD_BONUS),
+            regime_trend_against_block=bool(config.REGIME_TREND_AGAINST_BLOCK),
+            regime_range_target_multiplier=float(config.REGIME_RANGE_TARGET_MULTIPLIER),
+            regime_high_vol_target_multiplier=float(config.REGIME_HIGH_VOL_TARGET_MULTIPLIER),
+            regime_range_min_signal_target_ratio=float(config.REGIME_RANGE_MIN_SIGNAL_TARGET_RATIO),
+            regime_high_vol_min_signal_target_ratio=float(config.REGIME_HIGH_VOL_MIN_SIGNAL_TARGET_RATIO),
+            block_losing_position_adds=bool(config.BLOCK_LOSING_POSITION_ADDS),
+            dynamic_risk_controller=DynamicRiskController(),
         )
 
     def get_latest_signal(self):
@@ -94,10 +111,21 @@ class MultiPeriodSignalPredictor:
             slow_col=config.TREND_FILTER_SLOW_COL,
             min_gap=config.TREND_FILTER_MIN_GAP,
         )
+        regime_context = derive_market_regime(
+            trend_bias=trend_context.get("trend_bias"),
+            trend_gap=trend_context.get("trend_gap"),
+            volatility=volatility,
+            atr_ratio=atr_ratio,
+            money_flow_ratio=money_flow_ratio,
+            trend_gap_threshold=config.REGIME_TREND_GAP_THRESHOLD,
+            high_vol_atr_threshold=config.REGIME_HIGH_VOL_ATR_THRESHOLD,
+            high_volatility_threshold=config.REGIME_HIGH_VOLATILITY_THRESHOLD,
+            money_flow_extreme_threshold=config.REGIME_MONEY_FLOW_EXTREME_THRESHOLD,
+        )
 
         print(
             f"实时预测概率 => 多头: {long_prob:.3f} | 空头: {short_prob:.3f} | "
-            f"趋势: {trend_context.get('trend_bias')}"
+            f"趋势: {trend_context.get('trend_bias')} | regime: {regime_context.get('regime')}"
         )
 
         # 统一复用空仓状态下的真实策略开仓判定，避免和交易引擎口径不一致。
@@ -111,6 +139,7 @@ class MultiPeriodSignalPredictor:
             volatility=volatility,
             atr_ratio=atr_ratio,
             trend_bias=trend_context.get("trend_bias"),
+            market_regime=regime_context.get("regime"),
         )
 
         if out["action"] == "OPEN" and out["delta_qty"] > 0:

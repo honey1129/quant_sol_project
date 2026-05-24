@@ -66,7 +66,7 @@ class StrategyCoreRebalanceTests(unittest.TestCase):
         self.assertAlmostEqual(out["delta_qty"], 5.0)
 
     def test_short_rebalance_adding_position_returns_negative_delta(self):
-        core = self.build_core(target_ratio=1.5)
+        core = self.build_core(target_ratio=1.5, block_losing_position_adds=False)
         core.set_state(position=-10.0, entry_price=100.0, hold_bars=0)
 
         out = core.on_bar(
@@ -80,6 +80,54 @@ class StrategyCoreRebalanceTests(unittest.TestCase):
 
         self.assertEqual(out["action"], "REBALANCE")
         self.assertAlmostEqual(out["delta_qty"], -5.0)
+
+    def test_same_direction_add_to_losing_long_is_blocked(self):
+        core = self.build_core(target_ratio=1.5, block_losing_position_adds=True)
+        core.set_state(position=10.0, entry_price=100.0, hold_bars=0)
+
+        out = core.on_bar(
+            price=99.0,
+            equity=1000.0,
+            long_prob=0.9,
+            short_prob=0.1,
+            money_flow_ratio=1.0,
+            volatility=0.01,
+        )
+
+        self.assertEqual(out["action"], "HOLD")
+        self.assertTrue(out["reason"].startswith("NoAddToLosingPosition"))
+
+    def test_same_direction_reduction_of_losing_long_is_allowed(self):
+        core = self.build_core(target_ratio=0.5, block_losing_position_adds=True)
+        core.set_state(position=10.0, entry_price=100.0, hold_bars=0)
+
+        out = core.on_bar(
+            price=99.0,
+            equity=1000.0,
+            long_prob=0.9,
+            short_prob=0.1,
+            money_flow_ratio=1.0,
+            volatility=0.01,
+        )
+
+        self.assertEqual(out["action"], "REBALANCE")
+        self.assertLess(out["delta_qty"], 0)
+
+    def test_same_direction_add_to_winning_short_is_allowed(self):
+        core = self.build_core(target_ratio=1.5, block_losing_position_adds=True)
+        core.set_state(position=-10.0, entry_price=100.0, hold_bars=0)
+
+        out = core.on_bar(
+            price=99.0,
+            equity=1000.0,
+            long_prob=0.1,
+            short_prob=0.9,
+            money_flow_ratio=1.0,
+            volatility=0.01,
+        )
+
+        self.assertEqual(out["action"], "REBALANCE")
+        self.assertLess(out["delta_qty"], 0)
 
     def test_adaptive_thresholds_override_fixed_tp_sl(self):
         core = self.build_core(
@@ -107,7 +155,7 @@ class StrategyCoreRebalanceTests(unittest.TestCase):
         )
 
         self.assertEqual(out["action"], "CLOSE")
-        self.assertEqual(out["reason"], "TP/SL")
+        self.assertEqual(out["reason"], "TakeProfit")
         core.apply_decision(out)
         take_profit, stop_loss = core.get_risk_thresholds()
         self.assertAlmostEqual(take_profit, 0.5)
@@ -134,6 +182,63 @@ class StrategyCoreRebalanceTests(unittest.TestCase):
 
         self.assertAlmostEqual(take_profit, 0.03)
         self.assertAlmostEqual(stop_loss, 0.02)
+
+
+    def test_range_high_vol_uses_regime_stop_loss_floor(self):
+        core = self.build_core(
+            target_ratio=0.0,
+            adaptive_tp_sl_enabled=True,
+            adaptive_stop_loss_min=0.0065,
+            adaptive_stop_loss_max=0.022,
+            regime_high_vol_stop_loss_min=0.009,
+            atr_stop_loss_multiplier=2.4,
+            volatility_stop_loss_multiplier=2.8,
+            atr_take_profit_multiplier=6.0,
+            volatility_take_profit_multiplier=8.0,
+            min_take_profit_to_stop_loss_ratio=2.2,
+        )
+
+        _, normal_stop_loss = core.resolve_risk_thresholds(
+            volatility=0.0008,
+            atr_ratio=0.0014,
+            market_regime="trend_long",
+        )
+        take_profit, high_vol_stop_loss = core.resolve_risk_thresholds(
+            volatility=0.0008,
+            atr_ratio=0.0014,
+            market_regime="range_high_vol",
+        )
+
+        self.assertAlmostEqual(normal_stop_loss, 0.0065)
+        self.assertAlmostEqual(high_vol_stop_loss, 0.009)
+        self.assertGreaterEqual(take_profit, high_vol_stop_loss * 2.2)
+
+    def test_range_high_vol_stop_loss_floor_delays_noise_stopout(self):
+        core = self.build_core(
+            target_ratio=0.0,
+            adaptive_tp_sl_enabled=True,
+            adaptive_stop_loss_min=0.0065,
+            adaptive_stop_loss_max=0.022,
+            regime_high_vol_stop_loss_min=0.009,
+            atr_stop_loss_multiplier=2.4,
+            volatility_stop_loss_multiplier=2.8,
+            min_hold_bars=0,
+        )
+        core.set_state(position=1.0, entry_price=100.0, hold_bars=10)
+
+        out = core.on_bar(
+            price=99.2,
+            equity=1000.0,
+            long_prob=0.75,
+            short_prob=0.25,
+            money_flow_ratio=1.0,
+            volatility=0.0008,
+            atr_ratio=0.0014,
+            market_regime="range_high_vol",
+        )
+
+        self.assertEqual(out["action"], "HOLD")
+        self.assertNotEqual(out["reason"], "StopLoss")
 
     def test_flat_position_stays_flat_on_weak_signal_gap(self):
         core = self.build_core(target_ratio=0.2, signal_min_prob_diff=0.12)
@@ -443,6 +548,30 @@ class StrategyCoreRebalanceTests(unittest.TestCase):
         self.assertEqual(out["action"], "HOLD")
         self.assertEqual(out["reason"], "Cooldown(2)")
 
+
+    def test_stop_loss_uses_dedicated_cooldown(self):
+        core = self.build_core(
+            target_ratio=0.0,
+            take_profit=0.5,
+            stop_loss=0.01,
+            trade_cooldown_bars=3,
+            stop_loss_cooldown_bars=9,
+        )
+        core.set_state(position=1.0, entry_price=100.0, hold_bars=0)
+
+        out = core.on_bar(
+            price=98.9,
+            equity=1000.0,
+            long_prob=0.1,
+            short_prob=0.1,
+            money_flow_ratio=1.0,
+            volatility=0.01,
+        )
+
+        self.assertEqual(out["action"], "CLOSE")
+        self.assertEqual(out["reason"], "StopLoss")
+        self.assertEqual(out["next_cooldown_bars"], 9)
+
     def test_apply_open_decision_sets_trade_cooldown(self):
         core = self.build_core(target_ratio=0.5, trade_cooldown_bars=3)
         core.set_state(position=0.0, entry_price=0.0, hold_bars=0)
@@ -531,3 +660,128 @@ class StrategyCoreRebalanceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class StrategyCoreRegimeTests(unittest.TestCase):
+    def build_core(self, target_ratio=0.2, **kwargs):
+        defaults = dict(
+            threshold_long=0.60,
+            threshold_short=0.60,
+            take_profit=0.5,
+            stop_loss=0.5,
+            adaptive_tp_sl_enabled=False,
+            min_hold_bars=0,
+            add_threshold=0.0,
+            max_rebalance_ratio=1.0,
+            min_adjust_amount=0.0,
+            signal_min_prob_diff=0.10,
+            min_signal_target_ratio=0.05,
+            reward_risk=1.0,
+            regime_filter_enabled=True,
+            regime_range_allow_trades=True,
+            regime_high_vol_allow_trades=False,
+            regime_range_threshold_bonus=0.04,
+            regime_high_vol_threshold_bonus=0.06,
+            regime_range_target_multiplier=0.5,
+            regime_high_vol_target_multiplier=0.25,
+        )
+        defaults.update(kwargs)
+        return StrategyCore(
+            StubPositionManager(target_ratio),
+            **defaults,
+        )
+
+    def test_regime_blocks_against_trend_direction(self):
+        core = self.build_core(target_ratio=0.2)
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.20,
+            short_prob=0.90,
+            money_flow_ratio=1.0,
+            volatility=0.001,
+            market_regime="trend_long",
+        )
+        self.assertEqual(out["action"], "HOLD")
+        self.assertEqual(out["reason"], "RegimeFilter(trend_long)")
+
+    def test_range_regime_requires_stronger_signal(self):
+        core = self.build_core(target_ratio=0.2)
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.62,
+            short_prob=0.38,
+            money_flow_ratio=1.0,
+            volatility=0.001,
+            market_regime="range",
+        )
+        self.assertEqual(out["action"], "HOLD")
+        self.assertEqual(out["reason"], "FlatNoSignal")
+
+    def test_range_regime_scales_target_ratio(self):
+        core = self.build_core(target_ratio=0.4)
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.80,
+            short_prob=0.20,
+            money_flow_ratio=1.0,
+            volatility=0.001,
+            market_regime="range",
+        )
+        self.assertEqual(out["action"], "OPEN")
+        self.assertAlmostEqual(out["target_ratio"], 0.2)
+
+
+    def test_range_regime_can_use_lower_min_target_ratio(self):
+        core = self.build_core(
+            target_ratio=0.10,
+            regime_range_target_multiplier=0.5,
+            min_signal_target_ratio=0.08,
+            regime_range_min_signal_target_ratio=0.05,
+        )
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.80,
+            short_prob=0.20,
+            money_flow_ratio=1.0,
+            volatility=0.001,
+            market_regime="range",
+        )
+        self.assertEqual(out["action"], "OPEN")
+        self.assertAlmostEqual(out["target_ratio"], 0.05)
+
+    def test_high_vol_regime_can_use_lower_min_target_ratio_when_allowed(self):
+        core = self.build_core(
+            target_ratio=0.16,
+            regime_high_vol_allow_trades=True,
+            regime_high_vol_target_multiplier=0.35,
+            min_signal_target_ratio=0.08,
+            regime_high_vol_min_signal_target_ratio=0.05,
+        )
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.90,
+            short_prob=0.10,
+            money_flow_ratio=1.0,
+            volatility=0.003,
+            market_regime="range_high_vol",
+        )
+        self.assertEqual(out["action"], "OPEN")
+        self.assertAlmostEqual(out["target_ratio"], 0.056)
+
+    def test_high_vol_regime_blocks_new_trades_by_default(self):
+        core = self.build_core(target_ratio=0.4)
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.90,
+            short_prob=0.10,
+            money_flow_ratio=1.0,
+            volatility=0.003,
+            market_regime="range_high_vol",
+        )
+        self.assertEqual(out["action"], "HOLD")
+        self.assertEqual(out["reason"], "RegimeFilter(range_high_vol)")

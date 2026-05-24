@@ -8,14 +8,14 @@ module.exports = {
       name: "quant_okx_paper",
       cwd: projectRoot,
       script: path.join(projectRoot, ".venv/bin/python"),
-      args: "-m run.live_trading_monitor",
+      args: "-m run.scheduler",
       autorestart: true,
       max_restarts: 10,
       restart_delay: 5000,
       env: {
         PYTHONPATH: projectRoot,
         PATH: process.env.PATH,
-        TELEGRAM_ENABLED: process.env.TELEGRAM_ENABLED || "0"
+        TELEGRAM_ENABLED: process.env.TELEGRAM_ENABLED || "1"
       }
     },
     {

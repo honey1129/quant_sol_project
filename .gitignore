@@ -113,3 +113,7 @@ pytest_cache/
 # 其他你未来可能产生的临时文件
 tmp/
 temp/
+
+# Local environment backups / variants
+.env.*
+*.env.*

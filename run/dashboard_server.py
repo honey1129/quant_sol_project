@@ -37,7 +37,7 @@ FRONTEND_DIST_ROOT = os.path.join(FRONTEND_ROOT, "dist")
 EVENT_PATTERN = re.compile(
     r"交易环境校验完成|paper_ready_ok|Live trading monitor started|"
     r"已恢复最近处理 bar|新bar=|心跳:|执行开仓|执行平仓|执行调仓|"
-    r"无明显信号或目标为0|实盘循环异常|未成交|同时多空持仓"
+    r"HOLD诊断|无明显信号或目标为0|实盘循环异常|未成交|同时多空持仓"
 )
 EXECUTION_PATTERN = re.compile(r"执行开仓|执行平仓|执行调仓|未成交")
 LOG_LINE_PATTERN = re.compile(
@@ -178,6 +178,115 @@ def read_log_tail_lines(log_path, max_lines=DASHBOARD_LOG_TAIL_LINES):
     return list(lines)
 
 
+def read_json_file(path, default=None):
+    if default is None:
+        default = {}
+    if not path or not os.path.exists(path):
+        return default
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def file_info(path):
+    if not path or not os.path.exists(path):
+        return {"exists": False}
+    stat = os.stat(path)
+    return {
+        "exists": True,
+        "size_bytes": int(stat.st_size),
+        "mtime": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+    }
+
+
+def latest_retrain_log_path():
+    paths = sorted(glob.glob(os.path.join(LOGS_DIR, "model_retrain_*.log")))
+    return paths[-1] if paths else None
+
+
+def build_model_observability_snapshot():
+    metadata_path = os.path.join(BASE_DIR, getattr(config, "TRAINING_METADATA_PATH", "models/training_metadata.json"))
+    state_path = os.path.join(LOGS_DIR, "model_retrain_state.json")
+    latest_log = latest_retrain_log_path()
+    metadata = read_json_file(metadata_path, {})
+    state = read_json_file(state_path, {})
+    artifact_hashes = metadata.get("artifact_hashes") if isinstance(metadata, dict) else {}
+    missing_artifacts = metadata.get("missing_artifacts") if isinstance(metadata, dict) else []
+    if not isinstance(artifact_hashes, dict):
+        artifact_hashes = {}
+    if not isinstance(missing_artifacts, list):
+        missing_artifacts = []
+    last_status = state.get("last_status")
+    last_error = state.get("last_error")
+    health = "ok"
+    warnings = []
+    if not metadata:
+        health = "error"
+        warnings.append("training_metadata_missing")
+    elif not artifact_hashes:
+        health = "warning"
+        warnings.append("artifact_hashes_missing")
+    if missing_artifacts:
+        health = "error"
+        warnings.append("model_artifacts_missing")
+    if last_status == "failed":
+        health = "warning" if health == "ok" else health
+        warnings.append("last_retrain_failed")
+    if state.get("last_status") == "running":
+        warnings.append("retrain_running")
+
+    return {
+        "health": health,
+        "warnings": warnings,
+        "metadata_path": os.path.relpath(metadata_path, BASE_DIR),
+        "metadata_file": file_info(metadata_path),
+        "schema_version": metadata.get("schema_version") if isinstance(metadata, dict) else None,
+        "source": metadata.get("source") if isinstance(metadata, dict) else None,
+        "created_at": metadata.get("created_at") if isinstance(metadata, dict) else None,
+        "symbol": metadata.get("symbol") if isinstance(metadata, dict) else getattr(config, "SYMBOL", None),
+        "feature_count": metadata.get("feature_count") if isinstance(metadata, dict) else None,
+        "feature_columns_sha256": metadata.get("feature_columns_sha256") if isinstance(metadata, dict) else None,
+        "artifact_hash_count": len(artifact_hashes),
+        "artifact_hashes": artifact_hashes,
+        "missing_artifacts": missing_artifacts,
+        "oos_start": metadata.get("oos_start") if isinstance(metadata, dict) else None,
+        "oos_end": metadata.get("oos_end") if isinstance(metadata, dict) else None,
+        "validation_metrics": metadata.get("validation_metrics", {}) if isinstance(metadata, dict) else {},
+        "retrain_state": {
+            "last_status": last_status,
+            "last_attempt_at": state.get("last_attempt_at"),
+            "last_success_at": state.get("last_success_at"),
+            "last_finished_at": state.get("last_finished_at"),
+            "last_error": last_error,
+            "last_log_path": state.get("last_log_path"),
+            "last_candidate_metadata_path": state.get("last_candidate_metadata_path"),
+        },
+        "latest_retrain_log": latest_log,
+        "latest_retrain_log_file": file_info(latest_log),
+    }
+
+
+def build_observability_snapshot(status):
+    runtime = status.get("runtime", {}) if isinstance(status, dict) else {}
+    model_snapshot = build_model_observability_snapshot()
+    alerts = []
+    if runtime.get("last_error"):
+        alerts.append({"level": "error", "code": "runtime_last_error", "message": runtime.get("last_error")})
+    if model_snapshot.get("health") != "ok":
+        alerts.append({
+            "level": "warning" if model_snapshot.get("health") == "warning" else "error",
+            "code": "model_observability",
+            "message": ",".join(model_snapshot.get("warnings") or []),
+        })
+    return {
+        "health": "error" if any(a["level"] == "error" for a in alerts) else ("warning" if alerts else "ok"),
+        "alerts": alerts,
+        "model": model_snapshot,
+    }
+
+
 def extract_recent_strategy_events(log_lines, limit=DASHBOARD_EVENT_LIMIT):
     events = [line for line in log_lines if EVENT_PATTERN.search(line)]
     return events[-limit:]
@@ -250,6 +359,11 @@ def maybe_parse_bar_progress(log_lines):
     return payload
 
 
+def should_ignore_log_error_message(message):
+    text = str(message or "")
+    return "runtime_dashboard JSON 损坏" in text and "/tmp/" in text
+
+
 def enrich_status_with_fallbacks(status, log_lines, recent_events):
     status = dict(status or {})
     runtime = dict(status.get("runtime") or {})
@@ -272,6 +386,8 @@ def enrich_status_with_fallbacks(status, log_lines, recent_events):
             last_event_iso = log_ts_to_iso(parsed["ts"])
         if parsed["level"] == "ERROR":
             message = parsed["message"]
+            if should_ignore_log_error_message(message):
+                continue
             if fallback_error is None:
                 fallback_error = message
             if not message.startswith("Traceback"):
@@ -679,7 +795,7 @@ def parse_latest_backtest_summary(log_lines):
         return {}
 
     summary = {}
-    relevant = log_lines[latest_idx: latest_idx + 12]
+    relevant = log_lines[latest_idx: latest_idx + 20]
     for line in relevant:
         message = strip_log_prefix(line)
         timestamp = None
@@ -701,6 +817,26 @@ def parse_latest_backtest_summary(log_lines):
         elif "交易次数" in message:
             trade_match = VALUE_WITH_UNIT_PATTERN.search(message)
             summary["trade_count"] = safe_int(trade_match.group(1), 0) if trade_match else None
+        elif "平仓交易数" in message:
+            closed_match = VALUE_WITH_UNIT_PATTERN.search(message)
+            summary["closed_trade_count"] = safe_int(closed_match.group(1), 0) if closed_match else None
+        elif "胜率" in message:
+            win_rate_match = VALUE_WITH_UNIT_PATTERN.search(message)
+            summary["win_rate_pct"] = safe_float(win_rate_match.group(1)) if win_rate_match else None
+        elif "盈利因子" in message:
+            profit_factor_match = VALUE_WITH_UNIT_PATTERN.search(message)
+            summary["profit_factor"] = safe_float(profit_factor_match.group(1)) if profit_factor_match else None
+        elif "平均盈亏比" in message:
+            ratio_match = VALUE_WITH_UNIT_PATTERN.search(message)
+            summary["avg_win_loss_ratio"] = safe_float(ratio_match.group(1)) if ratio_match else None
+        elif "平均平仓净PnL" in message:
+            avg_pnl_match = VALUE_WITH_UNIT_PATTERN.search(message)
+            summary["avg_closed_trade_pnl"] = safe_float(avg_pnl_match.group(1)) if avg_pnl_match else None
+        elif "手续费后收益" in message:
+            net_pnl_match = VALUE_WITH_UNIT_PATTERN.search(message)
+            pct_match = PERCENT_IN_PARENS_PATTERN.search(message)
+            summary["net_pnl_after_costs"] = safe_float(net_pnl_match.group(1)) if net_pnl_match else None
+            summary["net_return_pct_after_costs"] = safe_float(pct_match.group(1)) if pct_match else None
         elif "手续费合计" in message:
             fee_match = VALUE_WITH_UNIT_PATTERN.search(message)
             summary["fees_paid"] = safe_float(fee_match.group(1)) if fee_match else None
@@ -961,6 +1097,8 @@ def build_dashboard_bundle():
     backtest_csv_metrics = parse_latest_backtest_csv_metrics()
     risk_snapshot = build_risk_snapshot(status, history, recent_events)
 
+    observability = build_observability_snapshot(status)
+
     return {
         "generated_at": utc_now_iso(),
         "frontend_built": os.path.isfile(frontend_index),
@@ -973,6 +1111,8 @@ def build_dashboard_bundle():
         "risk_snapshot": risk_snapshot,
         "metrics": build_metrics_snapshot(status, history, risk_snapshot, backtest_summary, backtest_csv_metrics),
         "recent_trades": parse_recent_trade_rows(log_lines, status, limit=DASHBOARD_TRADE_LIMIT),
+        "observability": observability,
+        "model_observability": observability["model"],
         "research_metrics": {
             **backtest_summary,
             **backtest_csv_metrics,
