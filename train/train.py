@@ -186,64 +186,6 @@ def build_time_splits(length):
     return train_end, validation_start, validation_end, oos_start
 
 
-def build_model_estimators():
-    return {
-        "lgb_v1": lgb.LGBMClassifier(
-            n_estimators=500,
-            learning_rate=0.02,
-            max_depth=6,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            reg_alpha=0.1,
-            reg_lambda=1.0,
-            min_child_samples=5,
-            min_split_gain=0.0,
-            force_col_wise=True,
-            random_state=42
-        ),
-        "xgb_v1": xgb.XGBClassifier(
-            n_estimators=500,
-            learning_rate=0.02,
-            max_depth=6,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            reg_alpha=0.1,
-            reg_lambda=1.0,
-            random_state=42
-        ),
-        "rf_v1": RandomForestClassifier(n_estimators=300, max_depth=6, random_state=42),
-    }
-
-
-def train_model_bundle(X_train, y_train):
-    X_balanced, y_balanced = balance_samples(X_train, y_train)
-    X_balanced = pd.DataFrame(X_balanced, columns=X_train.columns)
-
-    models = build_model_estimators()
-    for model in models.values():
-        model.fit(X_balanced, y_balanced)
-    return models, X_balanced, y_balanced
-
-
-def build_time_splits(length):
-    train_ratio = float(config.MODEL_TRAIN_RATIO)
-    validation_ratio = float(config.MODEL_VALIDATION_RATIO)
-    purge_bars = max(0, int(config.MODEL_PURGE_BARS))
-
-    if train_ratio <= 0 or validation_ratio <= 0 or train_ratio + validation_ratio >= 1:
-        raise ValueError("MODEL_TRAIN_RATIO 和 MODEL_VALIDATION_RATIO 必须为正，且总和小于 1")
-
-    train_end = int(length * train_ratio)
-    validation_start = train_end + purge_bars
-    validation_end = int(length * (train_ratio + validation_ratio))
-    oos_start = validation_end + purge_bars
-
-    if train_end <= 0 or validation_start >= validation_end or oos_start >= length:
-        raise ValueError("样本量不足，无法切分 train/validation/oos")
-
-    return train_end, validation_start, validation_end, oos_start
-
-
 def train():
     client = OKXClient()
     data_dict = client.fetch_data()

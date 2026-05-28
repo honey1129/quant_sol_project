@@ -15,7 +15,7 @@ module.exports = {
       env: {
         PYTHONPATH: projectRoot,
         PATH: process.env.PATH,
-        TELEGRAM_ENABLED: process.env.TELEGRAM_ENABLED || "0"
+        TELEGRAM_ENABLED: process.env.TELEGRAM_ENABLED || "1"
       }
     },
     {

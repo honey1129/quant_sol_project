@@ -21,22 +21,6 @@ def _risk_payload(risk_decision):
     }
 
 
-
-def _risk_payload(risk_decision):
-    if risk_decision is None:
-        return None
-    return {
-        "enabled": bool(risk_decision.enabled),
-        "signal_strength": float(risk_decision.signal_strength),
-        "volatility_ratio": float(risk_decision.volatility_ratio),
-        "atr_ratio": float(risk_decision.atr_ratio),
-        "trend_aligned": bool(risk_decision.trend_aligned),
-        "risk_multiplier": float(risk_decision.risk_multiplier),
-        "effective_leverage": int(risk_decision.effective_leverage),
-        "max_position_ratio": float(risk_decision.max_position_ratio),
-    }
-
-
 class StrategyCore:
 
     def __init__(
