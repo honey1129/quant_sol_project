@@ -77,8 +77,10 @@ from core import signal_engine
 
 
 class StubModel:
-    def __init__(self, probability):
+    def __init__(self, probability, classes=None):
         self.probability = probability
+        if classes is not None:
+            self.classes_ = classes
 
     def predict_proba(self, X):
         return [self.probability]
@@ -104,6 +106,21 @@ class WeightedPredictProbaTests(unittest.TestCase):
         expected_long = (0.8 * 0.75 + 0.4 * 1.0) / 1.75
         self.assertAlmostEqual(float(out[0]), expected_short)
         self.assertAlmostEqual(float(out[1]), expected_long)
+
+    def test_multiclass_no_trade_probability_lowers_directional_probs(self):
+        models = {
+            "lgb_v1": StubModel([0.10, 0.30, 0.60], classes=[0, 1, 2]),
+            "xgb_v1": StubModel([0.70, 0.20, 0.10], classes=[2, 0, 1]),
+        }
+
+        out = signal_engine.weighted_predict_proba(
+            models,
+            object(),
+            {"lgb_v1": 1.0, "xgb_v1": 1.0},
+        )
+
+        self.assertAlmostEqual(float(out[0]), 0.15)
+        self.assertAlmostEqual(float(out[1]), 0.20)
 
     def test_empty_models_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "模型列表为空"):

@@ -23,10 +23,19 @@ rf_path  = os.path.join(BASE_DIR, config.MODEL_PATHS.get("rf_v1"))
 feature_path = os.path.join(BASE_DIR, config.FEATURE_LIST_PATH)
 training_metadata_path = os.path.join(BASE_DIR, config.TRAINING_METADATA_PATH)
 
+
+TARGET_SHORT = 0
+TARGET_LONG = 1
+TARGET_NO_TRADE = 2
+TARGET_DIRECTIONS = {
+    TARGET_SHORT: "short",
+    TARGET_LONG: "long",
+    TARGET_NO_TRADE: "no_trade",
+}
+
+
 def _target_direction(target):
-    if int(target) == 1:
-        return "long"
-    return "short"
+    return TARGET_DIRECTIONS.get(int(target), "unknown")
 
 
 def _row_atr_ratio(row):
@@ -64,6 +73,9 @@ def _label_trade_context(row):
 
 def _target_is_tradable(row):
     direction = _target_direction(row["target"])
+    if direction == "no_trade":
+        return True
+
     trend_context, regime_context = _label_trade_context(row)
     regime = regime_context.get("regime")
     trend_bias = trend_context.get("trend_bias")
@@ -103,17 +115,48 @@ def _tradable_label_filter_summary(raw_df, filtered_df, blocked_mask):
     }
 
 
-def create_labels(df, future_window=5, threshold=0.002, tradable_only=None):
+def _label_mode():
+    if bool(config.MODEL_TRAIN_NO_TRADE_LABELS):
+        return "tradable_quality" if bool(config.MODEL_TRAIN_TRADABLE_LABELS) else "raw_quality"
+    return "tradable_binary" if bool(config.MODEL_TRAIN_TRADABLE_LABELS) else "raw_binary"
+
+
+def create_labels(df, future_window=5, threshold=0.002, tradable_only=None, include_no_trade=None):
     df = df.copy()
     df['future_return'] = df['5m_close'].shift(-future_window) / df['5m_close'] - 1
-    df['target'] = np.where(df['future_return'] > threshold, 1,
-                     np.where(df['future_return'] < -threshold, 0, np.nan))
-    df.dropna(subset=['target'], inplace=True)
+    include_no_trade = bool(
+        config.MODEL_TRAIN_NO_TRADE_LABELS
+        if include_no_trade is None
+        else include_no_trade
+    )
+
+    if include_no_trade:
+        df['target'] = np.where(
+            df['future_return'] > threshold,
+            TARGET_LONG,
+            np.where(df['future_return'] < -threshold, TARGET_SHORT, TARGET_NO_TRADE),
+        )
+        df.dropna(subset=['future_return'], inplace=True)
+    else:
+        df['target'] = np.where(df['future_return'] > threshold, TARGET_LONG,
+                         np.where(df['future_return'] < -threshold, TARGET_SHORT, np.nan))
+        df.dropna(subset=['target'], inplace=True)
+
     df["target"] = df["target"].astype(int)
     tradable_only = bool(config.MODEL_TRAIN_TRADABLE_LABELS if tradable_only is None else tradable_only)
     if tradable_only:
         allowed_mask = df.apply(_target_is_tradable, axis=1).astype(bool)
         blocked_mask = ~allowed_mask
+        if include_no_trade:
+            raw_df = df.copy()
+            df.loc[blocked_mask, "target"] = TARGET_NO_TRADE
+            df.attrs["label_filter_summary"] = _tradable_label_filter_summary(
+                raw_df,
+                df,
+                blocked_mask,
+            )
+            return df
+
         filtered_df = df[allowed_mask].copy()
         filtered_df.attrs["label_filter_summary"] = _tradable_label_filter_summary(
             df,
@@ -127,6 +170,14 @@ def create_labels(df, future_window=5, threshold=0.002, tradable_only=None):
         "raw_rows": int(len(df)),
         "kept_rows": int(len(df)),
         "blocked_rows": 0,
+        "raw_direction_counts": {
+            str(k): int(v)
+            for k, v in df["target"].astype(int).map(_target_direction).value_counts().to_dict().items()
+        },
+        "kept_direction_counts": {
+            str(k): int(v)
+            for k, v in df["target"].astype(int).map(_target_direction).value_counts().to_dict().items()
+        },
     }
     return df
 
@@ -298,7 +349,7 @@ def build_training_metadata(*, X, y, feature_cols, train_end, validation_start, 
         "validation_metrics": validation_metrics,
         "label_future_window": int(config.MODEL_LABEL_FUTURE_WINDOW),
         "label_threshold": float(config.MODEL_LABEL_THRESHOLD),
-        "label_mode": "tradable_binary" if bool(config.MODEL_TRAIN_TRADABLE_LABELS) else "raw_binary",
+        "label_mode": _label_mode(),
         "label_filter_summary": label_filter_summary or {},
         "training_balance_strategy": "sample_weight_regime_direction_recency",
         "sample_weight_summary": sample_weight_summary or {},

@@ -235,6 +235,7 @@ TRAINING_METADATA_PATH=models/training_metadata.json
 MODEL_LABEL_FUTURE_WINDOW=5
 MODEL_LABEL_THRESHOLD=0.002
 MODEL_TRAIN_TRADABLE_LABELS=1
+MODEL_TRAIN_NO_TRADE_LABELS=1
 MODEL_RECENT_SAMPLE_WEIGHT_BOOST=0.15
 MODEL_SAMPLE_WEIGHT_MIN=0.25
 MODEL_SAMPLE_WEIGHT_MAX=5.0
@@ -353,7 +354,8 @@ POLL_SEC=10
 - `MIN_ADJUST_AMOUNT=500` / `ADJUST_UNIT=75`：目标仓位变化不够大时不 rebalance，避免小额手续费磨损。
 - `MAX_POSITION_RATIO=0.18` / `LEVERAGE=3`：先降低最大暴露，等测试盘稳定后再逐步放开。
 - `DYNAMIC_RISK_ENABLED=true`：根据波动、信号强弱和趋势一致性缩放仓位。
-- `MODEL_TRAIN_TRADABLE_LABELS=1` / `MODEL_RECENT_SAMPLE_WEIGHT_BOOST=0.15`：训练标签先对齐可交易方向，样本平衡通过 `regime+direction` 权重完成，并轻微提高近期样本权重。
+- `MODEL_TRAIN_TRADABLE_LABELS=1` / `MODEL_TRAIN_NO_TRADE_LABELS=1`：训练标签对齐可交易方向，同时保留 `no_trade` 质量标签，让模型学习何时不该进场。
+- `MODEL_RECENT_SAMPLE_WEIGHT_BOOST=0.15`：样本平衡通过 `regime+direction` 权重完成，并轻微提高近期样本权重。
 - `MODEL_TRAIN_RATIO` / `MODEL_VALIDATION_RATIO` / `MODEL_PURGE_BARS`：训练区、验证区、最终 OOS 回测区按时间切开，中间留 purge gap。
 - `MODEL_WALK_FORWARD_ENABLED=1`：重训准入前会在验证区内做滚动 walk-forward 验证。
 - `MODEL_RETRAIN_MIN_*` / `MODEL_RETRAIN_REGIME_GATE_*`：候选模型必须满足 OOS 交易数、胜率、PF、平均盈亏比、手续费后收益和 regime 偏置门槛；不达标会保留旧模型并回滚。

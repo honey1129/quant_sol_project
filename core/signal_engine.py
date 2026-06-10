@@ -34,7 +34,12 @@ def bayesian_weighted_predict(models, merged_df, feature_cols, model_weights):
 
 
 def weighted_predict_proba(models, X, model_weights=None):
-    """Return a weighted average over the models that actually predict."""
+    """Return weighted [short_prob, long_prob] over the models that actually predict.
+
+    Multiclass models may also expose a no-trade class (label 2). Trading decisions
+    intentionally ignore that column; its probability mass lowers both directional
+    probabilities and lets existing thresholds block low-quality entries.
+    """
     if not models:
         raise ValueError("模型列表为空，无法生成预测概率")
 
@@ -52,11 +57,17 @@ def weighted_predict_proba(models, X, model_weights=None):
         if weight == 0:
             continue
 
-        prob = np.asarray(model.predict_proba(X)[0], dtype=float)
-        if len(prob) < 2:
-            raise ValueError(f"模型 {name} 返回的概率维度不足: {prob!r}")
-        if not all(math.isfinite(float(value)) for value in prob):
-            raise ValueError(f"模型 {name} 返回了非有限概率: {prob!r}")
+        raw_prob = np.asarray(model.predict_proba(X)[0], dtype=float)
+        if len(raw_prob) < 2:
+            raise ValueError(f"模型 {name} 返回的概率维度不足: {raw_prob!r}")
+        if not all(math.isfinite(float(value)) for value in raw_prob):
+            raise ValueError(f"模型 {name} 返回了非有限概率: {raw_prob!r}")
+
+        classes = list(getattr(model, "classes_", range(len(raw_prob))))
+        prob = np.asarray([
+            float(raw_prob[classes.index(0)]) if 0 in classes else 0.0,
+            float(raw_prob[classes.index(1)]) if 1 in classes else 0.0,
+        ], dtype=float)
 
         if weighted_sum is None:
             weighted_sum = np.zeros_like(prob, dtype=float)

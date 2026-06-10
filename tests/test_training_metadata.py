@@ -39,6 +39,7 @@ class TrainingMetadataTests(unittest.TestCase):
         self.assertIn("feature_columns_sha256", metadata)
         self.assertEqual(metadata["validation_metrics"]["lgb_v1"]["accuracy"], 0.55)
         self.assertIn("label_mode", metadata)
+        self.assertEqual(metadata["label_mode"], "tradable_quality")
         self.assertIn("label_filter_summary", metadata)
         self.assertEqual(metadata["training_balance_strategy"], "sample_weight_regime_direction_recency")
         self.assertEqual(metadata["sample_weight_summary"]["method"], "unit")
@@ -47,7 +48,7 @@ class TrainingMetadataTests(unittest.TestCase):
         self.assertEqual(metadata["oos_rows"], 2)
         self.assertTrue(metadata["artifact_hashes"])
 
-    def test_tradable_labels_drop_counter_trend_long(self):
+    def test_tradable_quality_labels_turn_counter_trend_into_no_trade(self):
         index = pd.date_range("2026-01-01", periods=6, freq="5min", tz="UTC")
         close = pd.Series([100, 103, 100, 97, 100, 103], index=index, dtype=float)
         df = pd.DataFrame({
@@ -67,8 +68,30 @@ class TrainingMetadataTests(unittest.TestCase):
         )
 
         self.assertGreater(labeled.attrs["label_filter_summary"]["blocked_rows"], 0)
-        self.assertTrue((labeled["target"] == 0).all())
+        self.assertIn(2, set(labeled["target"].astype(int)))
+        self.assertIn(0, set(labeled["target"].astype(int)))
         self.assertGreater(len(labeled), 0)
+
+    def test_quality_labels_keep_small_moves_as_no_trade(self):
+        index = pd.date_range("2026-01-01", periods=4, freq="5min", tz="UTC")
+        close = pd.Series([100.0, 100.1, 100.0, 100.1], index=index)
+        df = pd.DataFrame({
+            "5m_close": close,
+            "5m_atr": 0.1,
+            "volatility_15": 0.0,
+            "money_flow_ratio": 1.0,
+            "15m_ema_20": close,
+            "15m_ema_60": close,
+        }, index=index)
+
+        labeled = train_module.create_labels(
+            df,
+            future_window=1,
+            threshold=0.01,
+            tradable_only=True,
+        )
+
+        self.assertEqual(set(labeled["target"].astype(int)), {2})
 
     def test_raw_labels_can_keep_counter_trend_long_for_ab(self):
         index = pd.date_range("2026-01-01", periods=3, freq="5min", tz="UTC")
@@ -119,7 +142,7 @@ class TrainingMetadataTests(unittest.TestCase):
             "regime_range_high_vol": [0, 0, 0, 0, 0, 0, 0, 1],
             "is_high_vol": [0, 0, 0, 0, 0, 0, 0, 1],
         }, index=index)
-        y = pd.Series([1, 1, 1, 1, 0, 0, 0, 1], index=index)
+        y = pd.Series([1, 1, 1, 1, 0, 0, 0, 2], index=index)
 
         sample_weight, _ = train_module.build_sample_weights(
             X,

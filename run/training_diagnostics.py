@@ -25,7 +25,7 @@ from train.train import create_labels
 from utils.utils import BASE_DIR, LOGS_DIR, log_info
 
 
-DIRECTION_LABELS = {0: "short", 1: "long"}
+DIRECTION_LABELS = {0: "short", 1: "long", 2: "no_trade"}
 
 
 def json_safe(value):
@@ -88,9 +88,14 @@ def weighted_predict_matrix(models, X, model_weights):
         if weight == 0:
             continue
 
-        probs = np.asarray(model.predict_proba(X), dtype=float)
-        if probs.ndim != 2 or probs.shape[1] < 2:
-            raise ValueError(f"模型 {name} 返回的概率矩阵维度不正确: {probs.shape!r}")
+        raw_probs = np.asarray(model.predict_proba(X), dtype=float)
+        if raw_probs.ndim != 2 or raw_probs.shape[1] < 2:
+            raise ValueError(f"模型 {name} 返回的概率矩阵维度不正确: {raw_probs.shape!r}")
+        classes = list(getattr(model, "classes_", range(raw_probs.shape[1])))
+        probs = np.zeros((len(X), 3), dtype=float)
+        for label in (0, 1, 2):
+            if label in classes:
+                probs[:, label] = raw_probs[:, classes.index(label)]
         if weighted_sum is None:
             weighted_sum = np.zeros_like(probs, dtype=float)
         weighted_sum += probs * weight
@@ -148,7 +153,8 @@ def add_predictions(data, bundle):
     data = data.copy()
     data["short_prob"] = probs[:, 0]
     data["long_prob"] = probs[:, 1]
-    data["pred_label"] = np.where(data["long_prob"] >= data["short_prob"], 1, 0)
+    data["no_trade_prob"] = probs[:, 2]
+    data["pred_label"] = np.argmax(probs, axis=1)
     data["pred_direction"] = data["pred_label"].map(DIRECTION_LABELS)
     data["actual_direction"] = data["target"].astype(int).map(DIRECTION_LABELS)
     data["prob_gap"] = (data["long_prob"] - data["short_prob"]).abs()
@@ -177,14 +183,11 @@ def confusion_payload(y_true, y_pred):
     y_pred = [int(value) for value in y_pred]
     counts = Counter(zip(y_true, y_pred))
     return {
-        "actual_short": {
-            "pred_short": int(counts.get((0, 0), 0)),
-            "pred_long": int(counts.get((0, 1), 0)),
-        },
-        "actual_long": {
-            "pred_short": int(counts.get((1, 0), 0)),
-            "pred_long": int(counts.get((1, 1), 0)),
-        },
+        f"actual_{DIRECTION_LABELS[actual]}": {
+            f"pred_{DIRECTION_LABELS[pred]}": int(counts.get((actual, pred), 0))
+            for pred in (0, 1, 2)
+        }
+        for actual in (0, 1, 2)
     }
 
 
@@ -217,7 +220,7 @@ def classification_metrics(group):
     precision, recall, f1, support = precision_recall_fscore_support(
         y_true,
         y_pred,
-        labels=[0, 1],
+        labels=[0, 1, 2],
         zero_division=0,
     )
     return {
@@ -237,9 +240,16 @@ def classification_metrics(group):
             "f1": float(f1[1]),
             "support": int(support[1]),
         },
+        "no_trade": {
+            "precision": float(precision[2]),
+            "recall": float(recall[2]),
+            "f1": float(f1[2]),
+            "support": int(support[2]),
+        },
         "prob_gap_quantiles": quantiles(group["prob_gap"]),
         "avg_long_prob": float(group["long_prob"].mean()),
         "avg_short_prob": float(group["short_prob"].mean()),
+        "avg_no_trade_prob": float(group["no_trade_prob"].mean()),
     }
 
 
@@ -370,7 +380,11 @@ def build_report(args):
         "end": selected.index.max().isoformat(),
         "label_future_window": int(config.MODEL_LABEL_FUTURE_WINDOW),
         "label_threshold": float(config.MODEL_LABEL_THRESHOLD),
-        "label_mode": "raw_binary" if bool(args.raw_labels) else "tradable_binary",
+        "label_mode": (
+            ("raw_quality" if bool(config.MODEL_TRAIN_NO_TRADE_LABELS) else "raw_binary")
+            if bool(args.raw_labels)
+            else ("tradable_quality" if bool(config.MODEL_TRAIN_NO_TRADE_LABELS) else "tradable_binary")
+        ),
         "label_filter_summary": label_filter_summary,
         "model_weights": bundle["model_weights"],
         "metadata": {
@@ -419,6 +433,8 @@ def print_summary(report, path):
             f"long_recall={metrics['long']['recall']:.3f} "
             f"short_precision={metrics['short']['precision']:.3f} "
             f"short_recall={metrics['short']['recall']:.3f} "
+            f"no_trade_precision={metrics['no_trade']['precision']:.3f} "
+            f"no_trade_recall={metrics['no_trade']['recall']:.3f} "
             f"signals={signal_dist}"
         )
     backtest = report["backtest"]["all"]
