@@ -41,7 +41,7 @@ class TrainingMetadataTests(unittest.TestCase):
         self.assertIn("label_mode", metadata)
         self.assertEqual(metadata["label_mode"], "tradable_quality")
         self.assertIn("label_filter_summary", metadata)
-        self.assertEqual(metadata["training_balance_strategy"], "sample_weight_regime_direction_recency")
+        self.assertEqual(metadata["training_balance_strategy"], "sample_weight_direction_then_regime_recency")
         self.assertEqual(metadata["sample_weight_summary"]["method"], "unit")
         self.assertEqual(metadata["label_distribution"]["all"], {"0": 10, "1": 10})
         self.assertEqual(metadata["validation_rows"], 4)
@@ -132,9 +132,9 @@ class TrainingMetadataTests(unittest.TestCase):
         self.assertEqual(list(sample_weight.index), list(index))
         self.assertEqual(len(X_balanced), len(X))
         self.assertEqual(summary["rows"], len(y))
-        self.assertEqual(summary["method"], "regime_direction_inverse_frequency_with_recency")
+        self.assertEqual(summary["method"], "direction_then_regime_inverse_frequency_with_recency")
 
-    def test_sample_weights_balance_regime_direction_groups(self):
+    def test_sample_weights_balance_directions_before_regime_groups(self):
         index = pd.date_range("2026-01-01", periods=8, freq="5min", tz="UTC")
         X = pd.DataFrame({
             "regime_trend_long": [1, 1, 1, 1, 1, 1, 0, 0],
@@ -153,11 +153,13 @@ class TrainingMetadataTests(unittest.TestCase):
         )
         regimes = train_module.infer_sample_regimes(X)
         directions = y.astype(int).map(train_module._target_direction)
+        direction_totals = sample_weight.groupby(directions).sum()
         group_totals = sample_weight.groupby(regimes + ":" + directions).sum()
 
-        self.assertEqual(len(group_totals), 4)
-        for value in group_totals:
-            self.assertAlmostEqual(value, 2.0)
+        self.assertEqual(len(direction_totals), 3)
+        for value in direction_totals:
+            self.assertAlmostEqual(value, 8 / 3)
+        self.assertAlmostEqual(group_totals["trend_long:short"], group_totals["trend_short:short"])
 
     def test_write_json_atomic_round_trips_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:

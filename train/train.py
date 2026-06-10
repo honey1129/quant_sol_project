@@ -216,7 +216,7 @@ def build_sample_weights(X, y, *, recent_boost=None, min_weight=None, max_weight
     if len(y) == 0:
         return pd.Series(dtype=float, index=y.index, name="sample_weight"), {
             "enabled": True,
-            "method": "regime_direction_inverse_frequency_with_recency",
+            "method": "direction_then_regime_inverse_frequency_with_recency",
             "rows": 0,
         }
 
@@ -229,6 +229,8 @@ def build_sample_weights(X, y, *, recent_boost=None, min_weight=None, max_weight
     max_weight = None if max_weight is None else float(max_weight)
     if max_weight is not None and max_weight < min_weight:
         raise ValueError("MODEL_SAMPLE_WEIGHT_MAX 不能小于 MODEL_SAMPLE_WEIGHT_MIN")
+    trade_multiplier = max(0.0, float(config.MODEL_TRADE_SAMPLE_WEIGHT_MULTIPLIER))
+    no_trade_multiplier = max(0.0, float(config.MODEL_NO_TRADE_SAMPLE_WEIGHT_MULTIPLIER))
 
     regimes = infer_sample_regimes(X).reindex(y.index).fillna("unknown")
     directions = y.map(_target_direction)
@@ -238,10 +240,28 @@ def build_sample_weights(X, y, *, recent_boost=None, min_weight=None, max_weight
     }, index=y.index)
     group_labels = group_df["regime"] + ":" + group_df["direction"]
     group_counts = group_labels.value_counts(sort=False)
-    group_count = max(1, int(len(group_counts)))
-    base_weights = group_labels.map(
-        lambda group: len(y) / (group_count * float(group_counts[group]))
-    ).astype(float)
+    direction_counts = directions.value_counts(sort=False)
+    direction_count = max(1, int(len(direction_counts)))
+    direction_group_counts = group_df.groupby("direction")["regime"].nunique()
+
+    def direction_weight(direction):
+        multiplier = no_trade_multiplier if direction == "no_trade" else trade_multiplier
+        return (len(y) / (direction_count * float(direction_counts[direction]))) * multiplier
+
+    def regime_adjustment(row):
+        direction = row["direction"]
+        group = f"{row['regime']}:{direction}"
+        return float(direction_counts[direction]) / (
+            float(direction_group_counts[direction]) * float(group_counts[group])
+        )
+
+    direction_weights = directions.map(direction_weight).astype(float)
+    regime_weights = group_df.apply(regime_adjustment, axis=1).astype(float)
+    base_weights = pd.Series(
+        direction_weights.to_numpy() * regime_weights.to_numpy(),
+        index=y.index,
+        name="base_sample_weight",
+    )
 
     if len(base_weights) == 1:
         recency_weights = np.array([1.0 + recent_boost], dtype=float)
@@ -257,20 +277,38 @@ def build_sample_weights(X, y, *, recent_boost=None, min_weight=None, max_weight
 
     weighted_groups = group_df.assign(sample_weight=weights)
     group_weight_mean = weighted_groups.groupby(["regime", "direction"])["sample_weight"].mean()
+    direction_weight_mean = weighted_groups.groupby("direction")["sample_weight"].mean()
+    direction_weight_total = weighted_groups.groupby("direction")["sample_weight"].sum()
+    group_weight_total = weighted_groups.groupby(["regime", "direction"])["sample_weight"].sum()
     summary = {
         "enabled": True,
-        "method": "regime_direction_inverse_frequency_with_recency",
+        "method": "direction_then_regime_inverse_frequency_with_recency",
         "rows": int(len(y)),
         "recent_boost": float(recent_boost),
+        "trade_multiplier": float(trade_multiplier),
+        "no_trade_multiplier": float(no_trade_multiplier),
         "clip_min": float(min_weight),
         "clip_max": None if max_weight is None else float(max_weight),
         "mean": float(weights.mean()),
         "min": float(weights.min()),
         "max": float(weights.max()),
+        "direction_counts": {str(k): int(v) for k, v in direction_counts.sort_index().items()},
+        "direction_weight_mean": {
+            str(direction): float(value)
+            for direction, value in direction_weight_mean.sort_index().items()
+        },
+        "direction_weight_total": {
+            str(direction): float(value)
+            for direction, value in direction_weight_total.sort_index().items()
+        },
         "group_counts": {str(k): int(v) for k, v in group_counts.sort_index().items()},
         "group_weight_mean": {
             f"{regime}:{direction}": float(value)
             for (regime, direction), value in group_weight_mean.sort_index().items()
+        },
+        "group_weight_total": {
+            f"{regime}:{direction}": float(value)
+            for (regime, direction), value in group_weight_total.sort_index().items()
         },
     }
     return weights, summary
@@ -351,7 +389,7 @@ def build_training_metadata(*, X, y, feature_cols, train_end, validation_start, 
         "label_threshold": float(config.MODEL_LABEL_THRESHOLD),
         "label_mode": _label_mode(),
         "label_filter_summary": label_filter_summary or {},
-        "training_balance_strategy": "sample_weight_regime_direction_recency",
+        "training_balance_strategy": "sample_weight_direction_then_regime_recency",
         "sample_weight_summary": sample_weight_summary or {},
         "train_ratio": float(config.MODEL_TRAIN_RATIO),
         "validation_ratio": float(config.MODEL_VALIDATION_RATIO),
