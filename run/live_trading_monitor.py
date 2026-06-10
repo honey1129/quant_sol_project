@@ -270,15 +270,7 @@ class LiveTrader:
         X = row[self.feature_cols].values.reshape(1, -1).astype(float)
         X = pd.DataFrame(X, columns=self.feature_cols)
 
-        weighted_sum = np.zeros(2)
-        total_weight = float(sum(self.model_weights.values()))
-
-        for name, model in self.models.items():
-            prob = model.predict_proba(X)[0]
-            w = float(self.model_weights.get(name, 1.0))
-            weighted_sum += prob * w
-
-        avg = weighted_sum / max(total_weight, 1e-9)
+        avg = signal_engine.weighted_predict_proba(self.models, X, self.model_weights)
         long_prob, short_prob = float(avg[1]), float(avg[0])
         return long_prob, short_prob
 

@@ -2,7 +2,6 @@
 
 import os
 import joblib
-import numpy as np
 import pandas as pd
 from config import config
 from core.ml_feature_engineering import merge_multi_period_features, add_advanced_features
@@ -12,6 +11,7 @@ from core.strategy_core import StrategyCore
 from core.dynamic_risk import DynamicRiskController
 from core.trend_filter import derive_trend_context
 from core.regime_filter import derive_market_regime
+from core import signal_engine
 from utils.utils import BASE_DIR
 
 class MultiPeriodSignalPredictor:
@@ -87,15 +87,7 @@ class MultiPeriodSignalPredictor:
         X_live = pd.DataFrame(X_live, columns=feature_cols)
 
         # 多模型融合预测
-        weighted_sum = np.zeros(2)
-        total_weight = sum(self.model_weights.values())
-
-        for name, model in self.models.items():
-            prob = model.predict_proba(X_live)[0]
-            weight = self.model_weights.get(name, 1.0)
-            weighted_sum += prob * weight
-
-        avg_prob = weighted_sum / total_weight
+        avg_prob = signal_engine.weighted_predict_proba(self.models, X_live, self.model_weights)
         long_prob, short_prob = avg_prob[1], avg_prob[0]
         price = float(merged_df["5m_close"].iloc[-1])
         money_flow_ratio = float(merged_df["money_flow_ratio"].iloc[-1])

@@ -659,15 +659,7 @@ class Backtester:
         X_row = row[self.feature_cols].values.reshape(1, -1).astype(float)
         X_row = pd.DataFrame(X_row, columns=self.feature_cols)
 
-        weighted_sum = np.zeros(2)
-        total_weight = sum(self.model_weights.values())
-
-        for name, model in self.models.items():
-            prob = model.predict_proba(X_row)[0]
-            weight = self.model_weights.get(name, 1.0)
-            weighted_sum += prob * weight
-
-        avg_pred = weighted_sum / total_weight
+        avg_pred = signal_engine.weighted_predict_proba(self.models, X_row, self.model_weights)
         long_prob, short_prob = avg_pred[1], avg_pred[0]
         return long_prob, short_prob
 
