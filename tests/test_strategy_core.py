@@ -253,7 +253,7 @@ class StrategyCoreRebalanceTests(unittest.TestCase):
         )
 
         self.assertEqual(out["action"], "HOLD")
-        self.assertEqual(out["reason"], "FlatNoSignal")
+        self.assertEqual(out["reason"], "WeakSignal")
 
     def test_existing_position_ignores_weak_reverse_signal(self):
         core = self.build_core(
@@ -716,7 +716,7 @@ class StrategyCoreRegimeTests(unittest.TestCase):
             market_regime="range",
         )
         self.assertEqual(out["action"], "HOLD")
-        self.assertEqual(out["reason"], "FlatNoSignal")
+        self.assertEqual(out["reason"], "WeakSignal")
 
     def test_range_regime_scales_target_ratio(self):
         core = self.build_core(target_ratio=0.4)

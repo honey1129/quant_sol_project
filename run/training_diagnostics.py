@@ -281,7 +281,14 @@ def compact_backtest_summary(summary):
         "stop_loss_count",
         "decision_action_counts",
         "decision_reason_top",
+        "decision_direction_counts",
+        "decision_regime_counts",
         "decision_regime_signal_summary",
+        "decision_regime_reason_top",
+        "decision_direction_reason_top",
+        "decision_probability_quantiles",
+        "decision_gate_config",
+        "decision_hold_examples",
     ]
     return {key: summary.get(key) for key in keys if key in summary}
 
@@ -445,6 +452,10 @@ def print_summary(report, path):
         f"pf={backtest.get('profit_factor')} "
         f"net={backtest.get('net_pnl_after_costs')}"
     )
+    if backtest.get("decision_reason_top"):
+        log_info(f"交易门槛原因TOP: {backtest.get('decision_reason_top')}")
+    if backtest.get("decision_probability_quantiles"):
+        log_info(f"交易门槛分位: {backtest.get('decision_probability_quantiles')}")
     log_info(f"训练诊断报告: {path}")
 
 

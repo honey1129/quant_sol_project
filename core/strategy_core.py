@@ -648,7 +648,7 @@ class StrategyCore:
                     "next_reset_risk": False,
                 }), risk_decision)
             flat_reason = "FlatNoSignal"
-            if block_reason is not None and expected_net_edge is not None:
+            if block_reason is not None:
                 flat_reason = f"{block_reason}"
             return self._with_risk(attach_signal_diagnostics({
                 "action": "HOLD",

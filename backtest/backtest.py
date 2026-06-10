@@ -163,10 +163,13 @@ class Backtester:
         self.decision_trend_counts = Counter()
         self.decision_regime_counts = Counter()
         self.decision_regime_direction_counts = Counter()
+        self.decision_regime_reason_counts = Counter()
+        self.decision_direction_reason_counts = Counter()
         self.decision_direction_counts = Counter()
         self.decision_max_probs = []
         self.decision_prob_gaps = []
         self.decision_target_ratios = []
+        self.decision_raw_target_ratios = []
         self.decision_edge_values = []
         self.decision_examples = []
 
@@ -387,7 +390,8 @@ class Backtester:
 
     def _record_decision_diagnostic(self, out, signal_row, trend_context, take_profit, stop_loss, regime_context=None):
         self.decision_action_counts[out.get("action", "")] += 1
-        self.decision_reason_counts[out.get("reason", "")] += 1
+        reason = out.get("reason", "")
+        self.decision_reason_counts[reason] += 1
         trend_bias = trend_context.get("trend_bias")
         regime_context = regime_context or {}
         market_regime = str(regime_context.get("regime") or "unknown")
@@ -401,25 +405,39 @@ class Backtester:
         direction = "long" if long_prob >= short_prob else "short"
         self.decision_direction_counts[direction] += 1
         self.decision_regime_direction_counts[(market_regime, direction)] += 1
+        self.decision_regime_reason_counts[(market_regime, reason)] += 1
+        self.decision_direction_reason_counts[(direction, reason)] += 1
         self.decision_max_probs.append(dominant_prob)
         self.decision_prob_gaps.append(prob_gap)
         self.decision_target_ratios.append(abs(float(out.get("target_ratio") or 0.0)))
+        self.decision_raw_target_ratios.append(abs(float(out.get("raw_target_ratio") or 0.0)))
         expected_edge = self.core._expected_net_edge_ratio(dominant_prob, take_profit, stop_loss)
         self.decision_edge_values.append(expected_edge)
 
         if len(self.decision_examples) < 12 and out.get("action") == "HOLD":
             self.decision_examples.append({
                 "ts": signal_row.name.isoformat() if hasattr(signal_row.name, "isoformat") else str(signal_row.name),
-                "reason": out.get("reason"),
+                "reason": reason,
                 "direction": direction,
                 "long_prob": round(long_prob, 4),
                 "short_prob": round(short_prob, 4),
+                "dominant_prob": round(dominant_prob, 4),
                 "prob_gap": round(prob_gap, 4),
                 "trend_bias": trend_bias,
                 "market_regime": market_regime,
                 "target_ratio": round(float(out.get("target_ratio") or 0.0), 4),
+                "raw_target_ratio": round(float(out.get("raw_target_ratio") or 0.0), 4),
                 "expected_edge": round(float(expected_edge), 6),
             })
+
+    def _top_counts_by_primary(self, counter, limit=8):
+        grouped = {}
+        for (primary, secondary), count in counter.items():
+            grouped.setdefault(str(primary), Counter())[str(secondary)] += int(count)
+        return {
+            primary: counts.most_common(limit)
+            for primary, counts in sorted(grouped.items())
+        }
 
     def _log_decision_diagnostics(self):
         if not self.decision_action_counts:
@@ -434,7 +452,10 @@ class Backtester:
         log_info(f"最大概率分位: {_quantiles(self.decision_max_probs)}")
         log_info(f"概率差分位: {_quantiles(self.decision_prob_gaps)}")
         log_info(f"目标仓位比例分位: {_quantiles(self.decision_target_ratios)}")
+        log_info(f"原始目标仓位比例分位: {_quantiles(self.decision_raw_target_ratios)}")
         log_info(f"预期净边际分位: {_quantiles(self.decision_edge_values)}")
+        log_info(f"Regime原因TOP: {self._top_counts_by_primary(self.decision_regime_reason_counts, limit=5)}")
+        log_info(f"方向原因TOP: {self._top_counts_by_primary(self.decision_direction_reason_counts, limit=5)}")
         if self.decision_examples:
             log_info(f"HOLD样例: {self.decision_examples}")
 
@@ -768,7 +789,27 @@ class Backtester:
             "decision_action_counts": dict(self.decision_action_counts),
             "decision_reason_top": self.decision_reason_counts.most_common(15),
             "decision_trend_counts": dict(self.decision_trend_counts),
+            "decision_direction_counts": dict(self.decision_direction_counts),
+            "decision_regime_counts": dict(self.decision_regime_counts),
             "decision_regime_signal_summary": self._decision_regime_signal_summary(),
+            "decision_regime_reason_top": self._top_counts_by_primary(self.decision_regime_reason_counts),
+            "decision_direction_reason_top": self._top_counts_by_primary(self.decision_direction_reason_counts),
+            "decision_probability_quantiles": {
+                "dominant_prob": _quantiles(self.decision_max_probs),
+                "prob_gap": _quantiles(self.decision_prob_gaps),
+                "target_ratio": _quantiles(self.decision_target_ratios),
+                "raw_target_ratio": _quantiles(self.decision_raw_target_ratios),
+                "expected_net_edge": _quantiles(self.decision_edge_values),
+            },
+            "decision_gate_config": {
+                "threshold_long": float(config.THRESHOLD_LONG),
+                "threshold_short": float(config.THRESHOLD_SHORT),
+                "signal_min_prob_diff": float(config.SIGNAL_MIN_PROB_DIFF),
+                "min_signal_target_ratio": float(config.MIN_SIGNAL_TARGET_RATIO),
+                "min_adjust_amount": float(config.MIN_ADJUST_AMOUNT),
+                "min_expected_net_edge": float(config.MIN_EXPECTED_NET_EDGE),
+            },
+            "decision_hold_examples": list(self.decision_examples),
         }
 
     def dump_trade_log_to_csv(self,pnl, drawdown, performance_metrics=None):
