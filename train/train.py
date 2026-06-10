@@ -4,7 +4,6 @@ import pandas as pd
 import numpy as np
 import joblib
 import lightgbm as lgb
-from sklearn.utils import resample
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, classification_report
 from config import config
@@ -131,18 +130,104 @@ def create_labels(df, future_window=5, threshold=0.002, tradable_only=None):
     }
     return df
 
+def infer_sample_regimes(X):
+    if X.empty:
+        return pd.Series(dtype="object", index=X.index)
+
+    explicit_cols = {
+        "regime_trend_long",
+        "regime_trend_short",
+        "regime_range_high_vol",
+        "is_high_vol",
+    }
+    if explicit_cols & set(X.columns):
+        regimes = pd.Series("range", index=X.index, dtype="object")
+
+        def enabled(col):
+            if col not in X.columns:
+                return pd.Series(False, index=X.index)
+            return pd.to_numeric(X[col], errors="coerce").fillna(0.0) >= 0.5
+
+        regimes.loc[enabled("is_high_vol")] = "range_high_vol"
+        regimes.loc[enabled("regime_range_high_vol")] = "range_high_vol"
+        regimes.loc[enabled("regime_trend_long")] = "trend_long"
+        regimes.loc[enabled("regime_trend_short")] = "trend_short"
+        return regimes
+
+    return X.apply(
+        lambda row: str(_label_trade_context(row)[1].get("regime") or "unknown").lower(),
+        axis=1,
+    )
+
+
+def build_sample_weights(X, y, *, recent_boost=None, min_weight=None, max_weight=None):
+    y = y.astype(int)
+    if len(y) == 0:
+        return pd.Series(dtype=float, index=y.index, name="sample_weight"), {
+            "enabled": True,
+            "method": "regime_direction_inverse_frequency_with_recency",
+            "rows": 0,
+        }
+
+    recent_boost = max(
+        0.0,
+        float(config.MODEL_RECENT_SAMPLE_WEIGHT_BOOST if recent_boost is None else recent_boost),
+    )
+    min_weight = float(config.MODEL_SAMPLE_WEIGHT_MIN if min_weight is None else min_weight)
+    max_weight = config.MODEL_SAMPLE_WEIGHT_MAX if max_weight is None else max_weight
+    max_weight = None if max_weight is None else float(max_weight)
+    if max_weight is not None and max_weight < min_weight:
+        raise ValueError("MODEL_SAMPLE_WEIGHT_MAX 不能小于 MODEL_SAMPLE_WEIGHT_MIN")
+
+    regimes = infer_sample_regimes(X).reindex(y.index).fillna("unknown")
+    directions = y.map(_target_direction)
+    group_df = pd.DataFrame({
+        "regime": regimes.astype(str),
+        "direction": directions.astype(str),
+    }, index=y.index)
+    group_labels = group_df["regime"] + ":" + group_df["direction"]
+    group_counts = group_labels.value_counts(sort=False)
+    group_count = max(1, int(len(group_counts)))
+    base_weights = group_labels.map(
+        lambda group: len(y) / (group_count * float(group_counts[group]))
+    ).astype(float)
+
+    if len(base_weights) == 1:
+        recency_weights = np.array([1.0 + recent_boost], dtype=float)
+    else:
+        recency_weights = np.linspace(1.0, 1.0 + recent_boost, len(base_weights))
+    weights = pd.Series(base_weights.to_numpy() * recency_weights, index=y.index, name="sample_weight")
+
+    if min_weight > 0 or max_weight is not None:
+        weights = weights.clip(lower=min_weight, upper=max_weight)
+    mean_weight = float(weights.mean())
+    if mean_weight > 0:
+        weights = weights / mean_weight
+
+    weighted_groups = group_df.assign(sample_weight=weights)
+    group_weight_mean = weighted_groups.groupby(["regime", "direction"])["sample_weight"].mean()
+    summary = {
+        "enabled": True,
+        "method": "regime_direction_inverse_frequency_with_recency",
+        "rows": int(len(y)),
+        "recent_boost": float(recent_boost),
+        "clip_min": float(min_weight),
+        "clip_max": None if max_weight is None else float(max_weight),
+        "mean": float(weights.mean()),
+        "min": float(weights.min()),
+        "max": float(weights.max()),
+        "group_counts": {str(k): int(v) for k, v in group_counts.sort_index().items()},
+        "group_weight_mean": {
+            f"{regime}:{direction}": float(value)
+            for (regime, direction), value in group_weight_mean.sort_index().items()
+        },
+    }
+    return weights, summary
+
+
 def balance_samples(X, y):
-    df = pd.concat([X, y.rename('target')], axis=1)
-    long_df = df[df['target'] == 1]
-    short_df = df[df['target'] == 0]
-    min_count = min(len(long_df), len(short_df))
-    if min_count == 0:
-        return X.copy(), y.copy()
-    long_sample = resample(long_df, n_samples=min_count, replace=False, random_state=42)
-    short_sample = resample(short_df, n_samples=min_count, replace=False, random_state=42)
-    balanced_df = pd.concat([long_sample, short_sample])
-    balanced_df = balanced_df.sample(frac=1, random_state=42)
-    return balanced_df.drop('target', axis=1), balanced_df['target']
+    sample_weight, weight_summary = build_sample_weights(X, y)
+    return X.copy(), y.copy(), sample_weight, weight_summary
 
 def evaluate_model(model, model_name, X_test, y_test):
     y_pred = model.predict(X_test)
@@ -184,7 +269,7 @@ def write_json_atomic(path, payload):
     os.replace(tmp_path, path)
 
 
-def build_training_metadata(*, X, y, feature_cols, train_end, validation_start, validation_end, oos_start, original_train_rows, balanced_train_rows, validation_metrics, artifact_paths, label_filter_summary=None):
+def build_training_metadata(*, X, y, feature_cols, train_end, validation_start, validation_end, oos_start, original_train_rows, balanced_train_rows, validation_metrics, artifact_paths, label_filter_summary=None, sample_weight_summary=None):
     artifact_hashes = {
         os.path.relpath(path, BASE_DIR): sha256_file(path)
         for path in artifact_paths
@@ -215,6 +300,8 @@ def build_training_metadata(*, X, y, feature_cols, train_end, validation_start, 
         "label_threshold": float(config.MODEL_LABEL_THRESHOLD),
         "label_mode": "tradable_binary" if bool(config.MODEL_TRAIN_TRADABLE_LABELS) else "raw_binary",
         "label_filter_summary": label_filter_summary or {},
+        "training_balance_strategy": "sample_weight_regime_direction_recency",
+        "sample_weight_summary": sample_weight_summary or {},
         "train_ratio": float(config.MODEL_TRAIN_RATIO),
         "validation_ratio": float(config.MODEL_VALIDATION_RATIO),
         "purge_bars": int(config.MODEL_PURGE_BARS),
@@ -262,13 +349,13 @@ def build_model_estimators():
 
 
 def train_model_bundle(X_train, y_train):
-    X_balanced, y_balanced = balance_samples(X_train, y_train)
+    X_balanced, y_balanced, sample_weight, sample_weight_summary = balance_samples(X_train, y_train)
     X_balanced = pd.DataFrame(X_balanced, columns=X_train.columns)
 
     models = build_model_estimators()
     for model in models.values():
-        model.fit(X_balanced, y_balanced)
-    return models, X_balanced, y_balanced
+        model.fit(X_balanced, y_balanced, sample_weight=sample_weight)
+    return models, X_balanced, y_balanced, sample_weight_summary
 
 
 def build_time_splits(length):
@@ -321,8 +408,8 @@ def train():
     y_train = y.iloc[:train_end].copy()
     y_test = y.iloc[validation_start:validation_end].copy()
 
-    # 只在训练集内部做类别平衡，避免把未来样本混回训练过程。
-    models, X_train, y_train = train_model_bundle(X_train, y_train)
+    # 只在训练集内部计算样本权重，避免把未来样本混回训练过程。
+    models, X_train, y_train, sample_weight_summary = train_model_bundle(X_train, y_train)
     X_test = pd.DataFrame(X_test, columns=feature_cols)
 
     lgb_model = models["lgb_v1"]
@@ -359,6 +446,7 @@ def train():
         validation_metrics=validation_metrics,
         artifact_paths=[lgb_path, xgb_path, rf_path, feature_path],
         label_filter_summary=label_filter_summary,
+        sample_weight_summary=sample_weight_summary,
     )
     write_json_atomic(training_metadata_path, metadata)
     log_info(f"✅ 训练元数据已保存至: {training_metadata_path}")

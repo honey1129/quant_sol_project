@@ -512,7 +512,7 @@ def run_walk_forward_validation(log_file, context_backtester, metadata, feature_
 
         X_train = train_df[feature_cols].astype(float)
         y_train = train_df["target"]
-        fold_models, _, _ = train_model_bundle(X_train, y_train)
+        fold_models, _, _, _ = train_model_bundle(X_train, y_train)
         fold_data = context_backtester.data.loc[
             (context_backtester.data.index >= validation_df.index.min()) &
             (context_backtester.data.index <= validation_df.index.max())
