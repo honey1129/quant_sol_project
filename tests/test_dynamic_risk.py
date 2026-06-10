@@ -30,6 +30,7 @@ class DynamicRiskControllerTests(unittest.TestCase):
         self.assertEqual(decision.effective_leverage, 3)
         self.assertAlmostEqual(decision.max_position_ratio, 0.45)
         self.assertAlmostEqual(decision.risk_multiplier, 1.0)
+        self.assertEqual(decision.reasons, ("disabled",))
         self.assertAlmostEqual(controller.apply_to_target_ratio(0.4, decision), 0.4)
 
     def test_high_volatility_and_trend_mismatch_reduce_risk(self):
@@ -62,6 +63,9 @@ class DynamicRiskControllerTests(unittest.TestCase):
         self.assertFalse(decision.trend_aligned)
         self.assertLess(decision.risk_multiplier, 0.5)
         self.assertEqual(decision.effective_leverage, 1)
+        self.assertIn("high_volatility", decision.reasons)
+        self.assertIn("weak_signal", decision.reasons)
+        self.assertIn("trend_mismatch", decision.reasons)
         self.assertLess(controller.apply_to_target_ratio(0.5, decision), 0.25)
 
     def test_strong_aligned_signal_cannot_exceed_base_leverage(self):
@@ -154,6 +158,7 @@ class DynamicRiskStrategyCoreTests(unittest.TestCase):
 
         self.assertEqual(out["action"], "OPEN")
         self.assertIn("risk", out)
+        self.assertIn("trend_mismatch", out["risk"]["reasons"])
         self.assertLess(out["target_ratio"], 0.45)
         self.assertLess(out["target_position"], 4.5)
 

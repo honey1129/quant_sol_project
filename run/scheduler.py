@@ -8,32 +8,41 @@ import json
 import signal
 from datetime import datetime, timedelta
 
-from utils.utils import BASE_DIR, DISPLAY_TIMEZONE
+from utils.utils import BASE_DIR, DISPLAY_TIMEZONE, DisplayTimezoneFormatter
 from utils.safe_runner import safe_run
 from config import config
 
 log_dir = os.path.join(BASE_DIR, "logs")
 os.makedirs(log_dir, exist_ok=True)
 
-logging.basicConfig(
-    filename=os.path.join(log_dir, 'scheduler.log'),
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+SCHEDULER_LOG_FILE = os.path.join(log_dir, "scheduler.log")
+logger = logging.getLogger("quant.scheduler")
+logger.setLevel(logging.INFO)
+logger.propagate = False
+if not any(
+    isinstance(handler, logging.FileHandler)
+    and getattr(handler, "baseFilename", "") == SCHEDULER_LOG_FILE
+    for handler in logger.handlers
+):
+    scheduler_handler = logging.FileHandler(SCHEDULER_LOG_FILE, encoding="utf-8")
+    scheduler_handler.setFormatter(
+        DisplayTimezoneFormatter("%(asctime)s - %(levelname)s - %(message)s")
+    )
+    logger.addHandler(scheduler_handler)
 
 PID_FILE = os.path.join(log_dir, "live_trading_monitor.pid")
 MODEL_RETRAIN_STATE_FILE = os.path.join(log_dir, "model_retrain_state.json")
 DAILY_REPORT_STATE_FILE = os.path.join(log_dir, "daily_report_state.json")
 
 def train_job():
-    logging.info("🟢 开始训练任务")
+    logger.info("🟢 开始训练任务")
     subprocess.run([sys.executable, "-m", "train.train"])
-    logging.info("✅ 训练任务完成")
+    logger.info("✅ 训练任务完成")
 
 def backtest_job():
-    logging.info("🟢 开始回测任务")
+    logger.info("🟢 开始回测任务")
     subprocess.run([sys.executable, "-m", "backtest.backtest"])
-    logging.info("✅ 回测任务完成")
+    logger.info("✅ 回测任务完成")
 
 def _pid_is_running(pid: int) -> bool:
     try:
@@ -81,7 +90,7 @@ def stop_live_monitor_for_model_reload():
     if not pid or not _pid_is_running(pid):
         return
 
-    logging.info(f"🟡 模型已更新，准备重启 live monitor 以加载新模型 pid={pid}")
+    logger.info(f"🟡 模型已更新，准备重启 live monitor 以加载新模型 pid={pid}")
     os.kill(pid, signal.SIGTERM)
     deadline = time.time() + 20
     while time.time() < deadline:
@@ -90,14 +99,14 @@ def stop_live_monitor_for_model_reload():
         time.sleep(1)
 
     if _pid_is_running(pid):
-        logging.warning(f"⚠ live monitor 未在20秒内退出，将继续保留当前进程 pid={pid}")
+        logger.warning(f"⚠ live monitor 未在20秒内退出，将继续保留当前进程 pid={pid}")
         return
 
     try:
         os.remove(PID_FILE)
     except FileNotFoundError:
         pass
-    logging.info("✅ live monitor 已停止，下一轮 scheduler 将自动拉起")
+    logger.info("✅ live monitor 已停止，下一轮 scheduler 将自动拉起")
 
 def ensure_live_monitor_running():
     # 1) pidfile存在且进程仍在 -> 不做事
@@ -106,13 +115,13 @@ def ensure_live_monitor_running():
         return
 
     # 2) 不在运行 -> 拉起常驻进程（非阻塞）
-    logging.info("🟡 实盘监控未运行，尝试启动 run.live_trading_monitor")
+    logger.info("🟡 实盘监控未运行，尝试启动 run.live_trading_monitor")
     p = subprocess.Popen([sys.executable, "-m", "run.live_trading_monitor"])
 
     with open(PID_FILE, "w") as f:
         f.write(str(p.pid))
 
-    logging.info(f"✅ 已启动实盘监控进程 pid={p.pid}")
+    logger.info(f"✅ 已启动实盘监控进程 pid={p.pid}")
 
 
 def should_run_model_retrain(now=None):
@@ -143,12 +152,12 @@ def should_run_model_retrain(now=None):
 
 
 def model_retrain_job():
-    logging.info("🟢 开始自动模型重训")
+    logger.info("🟢 开始自动模型重训")
     result = subprocess.run([sys.executable, "-m", "run.retrain_models"], cwd=BASE_DIR)
     if result.returncode != 0:
         raise RuntimeError(f"自动模型重训失败: exit_code={result.returncode}")
 
-    logging.info("✅ 自动模型重训完成")
+    logger.info("✅ 自动模型重训完成")
     if bool(config.MODEL_RETRAIN_RESTART_LIVE_MONITOR):
         stop_live_monitor_for_model_reload()
 
@@ -175,7 +184,7 @@ def should_run_daily_report(now=None):
 
 
 def daily_report_job():
-    logging.info("🟢 开始生成每日交易复盘")
+    logger.info("🟢 开始生成每日交易复盘")
     result = subprocess.run([sys.executable, "-m", "run.daily_trade_report"], cwd=BASE_DIR)
     if result.returncode != 0:
         raise RuntimeError(f"每日交易复盘生成失败: exit_code={result.returncode}")
@@ -183,7 +192,7 @@ def daily_report_job():
     now = datetime.now(DISPLAY_TIMEZONE)
     with open(DAILY_REPORT_STATE_FILE, "w", encoding="utf-8") as f:
         json.dump({"last_report_date": now.strftime("%Y-%m-%d")}, f, ensure_ascii=False, sort_keys=True)
-    logging.info("✅ 每日交易复盘完成")
+    logger.info("✅ 每日交易复盘完成")
 
 def scheduler():
     now = datetime.now()

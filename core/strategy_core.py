@@ -18,6 +18,7 @@ def _risk_payload(risk_decision):
         "risk_multiplier": float(risk_decision.risk_multiplier),
         "effective_leverage": int(risk_decision.effective_leverage),
         "max_position_ratio": float(risk_decision.max_position_ratio),
+        "reasons": list(getattr(risk_decision, "reasons", ())),
     }
 
 

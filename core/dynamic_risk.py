@@ -14,6 +14,7 @@ class DynamicRiskDecision:
     risk_multiplier: float
     effective_leverage: int
     max_position_ratio: float
+    reasons: tuple[str, ...] = ()
 
 
 class DynamicRiskController:
@@ -95,6 +96,7 @@ class DynamicRiskController:
         trend_aligned = _trend_aligned(target_direction, trend_bias)
 
         risk_multiplier = 1.0
+        reasons = []
         if not self.enabled:
             return DynamicRiskDecision(
                 enabled=False,
@@ -105,20 +107,26 @@ class DynamicRiskController:
                 risk_multiplier=risk_multiplier,
                 effective_leverage=self._clip_leverage(self.base_leverage),
                 max_position_ratio=self.base_position_ratio,
+                reasons=("disabled",),
             )
 
         if volatility_ratio > 1.0:
             risk_multiplier *= max(self.high_vol_multiplier, 1.0 / volatility_ratio)
+            reasons.append("high_volatility")
         elif volatility_ratio < 0.65:
             risk_multiplier *= min(1.15, 1.0 / max(volatility_ratio, 0.5))
+            reasons.append("low_volatility")
 
         if signal_strength < self.weak_signal_threshold:
             risk_multiplier *= self.low_signal_multiplier
+            reasons.append("weak_signal")
         elif signal_strength >= self.strong_signal_threshold:
             risk_multiplier *= 1.15
+            reasons.append("strong_signal")
 
         if not trend_aligned:
             risk_multiplier *= self.trend_mismatch_multiplier
+            reasons.append("trend_mismatch")
 
         risk_multiplier = max(0.25, min(1.25, risk_multiplier))
         effective_leverage = self._clip_leverage(round(self.base_leverage * risk_multiplier))
@@ -135,6 +143,7 @@ class DynamicRiskController:
             risk_multiplier=float(risk_multiplier),
             effective_leverage=int(effective_leverage),
             max_position_ratio=float(max_position_ratio),
+            reasons=tuple(reasons) or ("base",),
         )
 
     def apply_to_target_ratio(self, target_ratio, decision):

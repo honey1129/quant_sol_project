@@ -725,6 +725,38 @@ class LiveTrader:
         except (TypeError, ValueError):
             return "-"
 
+    @staticmethod
+    def _fmt_optional_bool(value):
+        if value is None:
+            return "-"
+        return "1" if bool(value) else "0"
+
+    @staticmethod
+    def _risk_reasons_text(risk):
+        reasons = (risk or {}).get("reasons") or []
+        if isinstance(reasons, str):
+            return reasons or "-"
+        return ",".join(str(item) for item in reasons) or "-"
+
+    def _format_risk_fields(self, risk, *, compact=False):
+        risk = risk or {}
+        multiplier_label = "multiplier" if compact else "risk_multiplier"
+        enabled_label = "enabled" if compact else "risk_enabled"
+        leverage_label = "leverage" if compact else "risk_leverage"
+        vol_label = "vol_ratio" if compact else "risk_vol_ratio"
+        trend_label = "trend_aligned" if compact else "risk_trend_aligned"
+        reasons_label = "reasons" if compact else "risk_reasons"
+        leverage = risk.get("effective_leverage")
+        leverage_text = "-" if leverage is None else str(leverage)
+        return (
+            f"{multiplier_label}={self._fmt_optional_float(risk.get('risk_multiplier'), 3)} "
+            f"{enabled_label}={self._fmt_optional_bool(risk.get('enabled'))} "
+            f"{leverage_label}={leverage_text} "
+            f"{vol_label}={self._fmt_optional_float(risk.get('volatility_ratio'), 3)} "
+            f"{trend_label}={self._fmt_optional_bool(risk.get('trend_aligned'))} "
+            f"{reasons_label}={self._risk_reasons_text(risk)}"
+        )
+
     def _format_hold_decision_log(self, decision, out, *, price, equity, pos_qty, entry_price):
         risk = out.get("risk") or {}
         return (
@@ -747,8 +779,7 @@ class LiveTrader:
             f"regime={decision.get('market_regime') or '-'} "
             f"cooldown_next={int(out.get('next_cooldown_bars', 0) or 0)} "
             f"reverse_bars_next={int(out.get('next_reverse_signal_bars', 0) or 0)} "
-            f"risk_scale={self._fmt_optional_float(risk.get('risk_scale'), 3)} "
-            f"risk_reason={risk.get('reason') or '-'}"
+            f"{self._format_risk_fields(risk)}"
         )
 
     def _notify_trade_failure(self, action, reason, detail):
@@ -815,7 +846,7 @@ class LiveTrader:
             f"edge={self._fmt_optional_pct(decision.get('expected_net_edge'))} "
             f"tp/sl={self._fmt_optional_pct(decision.get('take_profit'))}/{self._fmt_optional_pct(decision.get('stop_loss'))}\n"
             f"HOLD原因统计: {top_holds}\n"
-            f"动态风控: scale={self._fmt_optional_float(risk.get('risk_scale'), 3)} reason={risk.get('reason') or '-'}"
+            f"动态风控: {self._format_risk_fields(risk, compact=True)}"
         )
 
     def _maybe_notify_runtime_summary(self, *, bar_ts, price, equity, position_snapshot, signal_snapshot, decision):
