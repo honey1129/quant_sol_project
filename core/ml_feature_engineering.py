@@ -5,6 +5,20 @@ from datetime import timezone
 import numpy as np
 import pandas as pd
 
+from config import config
+from core.regime_filter import derive_market_regime
+from core.trend_filter import derive_trend_context
+
+
+REGIME_TREND_FEATURE_COLUMNS = [
+    "trend_bias_num",
+    "regime_trend_long",
+    "regime_trend_short",
+    "regime_range_high_vol",
+    "is_high_vol",
+    "trend_gap_abs",
+]
+
 # 单周期基础特征工程
 def add_features(df):
     """
@@ -198,6 +212,68 @@ def merge_multi_period_features(data_dict, base_interval=None):
 
     return merged
 
+
+def add_regime_trend_features(df):
+    """
+    Add explicit rule-based trend/regime features used by the trading gate.
+
+    These are intentionally derived from the same trend/regime helpers as live trading
+    so the model does not have to infer the gate state indirectly from EMA/ATR columns.
+    """
+    df = df.copy()
+    rows = []
+    for _, row in df.iterrows():
+        close_price = row.get("5m_close")
+        atr_value = row.get("5m_atr")
+        atr_ratio = None
+        if pd.notna(close_price) and pd.notna(atr_value) and float(close_price) > 0:
+            atr_ratio = float(atr_value) / float(close_price)
+
+        trend_context = derive_trend_context(
+            row,
+            interval=config.TREND_FILTER_INTERVAL,
+            fast_col=config.TREND_FILTER_FAST_COL,
+            slow_col=config.TREND_FILTER_SLOW_COL,
+            min_gap=config.TREND_FILTER_MIN_GAP,
+        )
+        regime_context = derive_market_regime(
+            trend_bias=trend_context.get("trend_bias"),
+            trend_gap=trend_context.get("trend_gap"),
+            volatility=row.get("volatility_15"),
+            atr_ratio=atr_ratio,
+            money_flow_ratio=row.get("money_flow_ratio"),
+            trend_gap_threshold=config.REGIME_TREND_GAP_THRESHOLD,
+            high_vol_atr_threshold=config.REGIME_HIGH_VOL_ATR_THRESHOLD,
+            high_volatility_threshold=config.REGIME_HIGH_VOLATILITY_THRESHOLD,
+            money_flow_extreme_threshold=config.REGIME_MONEY_FLOW_EXTREME_THRESHOLD,
+        )
+
+        trend_bias = str(trend_context.get("trend_bias") or "neutral").lower()
+        regime = str(regime_context.get("regime") or "unknown").lower()
+        trend_gap = trend_context.get("trend_gap")
+        try:
+            trend_gap_abs = abs(float(trend_gap))
+        except (TypeError, ValueError):
+            trend_gap_abs = 0.0
+        if not np.isfinite(trend_gap_abs):
+            trend_gap_abs = 0.0
+
+        rows.append({
+            "trend_bias_num": 1.0 if trend_bias == "long" else (-1.0 if trend_bias == "short" else 0.0),
+            "regime_trend_long": 1.0 if regime == "trend_long" else 0.0,
+            "regime_trend_short": 1.0 if regime == "trend_short" else 0.0,
+            "regime_range_high_vol": 1.0 if regime == "range_high_vol" else 0.0,
+            "is_high_vol": 1.0 if bool(regime_context.get("is_high_vol")) else 0.0,
+            "trend_gap_abs": float(trend_gap_abs),
+        })
+
+    feature_df = pd.DataFrame(rows, index=df.index)
+    for col in REGIME_TREND_FEATURE_COLUMNS:
+        if col not in feature_df:
+            feature_df[col] = 0.0
+    return pd.concat([df, feature_df[REGIME_TREND_FEATURE_COLUMNS]], axis=1)
+
+
 # 多因子衍生特征工程
 def add_advanced_features(df):
     """
@@ -227,6 +303,8 @@ def add_advanced_features(df):
     # === 成交量衍生特征 ===
     df['volume_ma'] = df['5m_volume'].rolling(10).mean()
     df['volume_ratio'] = df['5m_volume'] / (df['volume_ma'] + 1e-6)
+
+    df = add_regime_trend_features(df)
 
     # 避免用未来数据回填到过去，缺失值交给调用方统一裁剪。
     df.replace([np.inf, -np.inf], np.nan, inplace=True)

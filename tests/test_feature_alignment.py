@@ -2,7 +2,11 @@ import unittest
 
 import pandas as pd
 
-from core.ml_feature_engineering import keep_confirmed_bars, merge_multi_period_features
+from core.ml_feature_engineering import (
+    add_regime_trend_features,
+    keep_confirmed_bars,
+    merge_multi_period_features,
+)
 
 
 def build_ohlcv(index, base_price, step):
@@ -69,6 +73,27 @@ class FeatureAlignmentTests(unittest.TestCase):
             merged.loc[pd.Timestamp("2026-04-24 05:45:00"), "15m_close"],
             high_df.loc[pd.Timestamp("2026-04-24 05:30:00"), "close"],
         )
+
+    def test_add_regime_trend_features_exposes_gate_state(self):
+        index = pd.date_range("2026-04-24 00:00:00", periods=3, freq="5min")
+        df = pd.DataFrame({
+            "5m_close": [105.0, 95.0, 100.0],
+            "5m_atr": [0.1, 0.1, 0.1],
+            "volatility_15": [0.0, 0.0, 0.01],
+            "money_flow_ratio": [1.0, 1.0, 1.0],
+            "15m_ema_20": [100.0, 100.0, 100.0],
+            "15m_ema_60": [90.0, 110.0, 100.0],
+        }, index=index)
+
+        out = add_regime_trend_features(df)
+
+        self.assertEqual(out.iloc[0]["trend_bias_num"], 1.0)
+        self.assertEqual(out.iloc[0]["regime_trend_long"], 1.0)
+        self.assertEqual(out.iloc[1]["trend_bias_num"], -1.0)
+        self.assertEqual(out.iloc[1]["regime_trend_short"], 1.0)
+        self.assertEqual(out.iloc[2]["regime_range_high_vol"], 1.0)
+        self.assertEqual(out.iloc[2]["is_high_vol"], 1.0)
+        self.assertGreater(out.iloc[0]["trend_gap_abs"], 0.0)
 
 
 if __name__ == "__main__":
