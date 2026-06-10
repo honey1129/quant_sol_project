@@ -358,7 +358,8 @@ def write_json_atomic(path, payload):
     os.replace(tmp_path, path)
 
 
-def build_training_metadata(*, X, y, feature_cols, train_end, validation_start, validation_end, oos_start, original_train_rows, balanced_train_rows, validation_metrics, artifact_paths, label_filter_summary=None, sample_weight_summary=None):
+def build_training_metadata(*, X, y, feature_cols, train_end, validation_start, validation_end, oos_start, original_train_rows, balanced_train_rows, validation_metrics, artifact_paths, label_filter_summary=None, sample_weight_summary=None, evaluation_sample_weight_summary=None, final_train_end=None):
+    final_train_end = train_end if final_train_end is None else int(final_train_end)
     artifact_hashes = {
         os.path.relpath(path, BASE_DIR): sha256_file(path)
         for path in artifact_paths
@@ -391,16 +392,21 @@ def build_training_metadata(*, X, y, feature_cols, train_end, validation_start, 
         "label_filter_summary": label_filter_summary or {},
         "training_balance_strategy": "sample_weight_direction_then_regime_recency",
         "sample_weight_summary": sample_weight_summary or {},
+        "evaluation_sample_weight_summary": evaluation_sample_weight_summary or {},
         "train_ratio": float(config.MODEL_TRAIN_RATIO),
         "validation_ratio": float(config.MODEL_VALIDATION_RATIO),
         "purge_bars": int(config.MODEL_PURGE_BARS),
+        "final_train_on_validation": bool(config.MODEL_FINAL_TRAIN_ON_VALIDATION),
         "row_count": int(len(X)),
         "train_rows": int(original_train_rows),
         "balanced_train_rows": int(balanced_train_rows),
+        "final_train_rows": int(final_train_end),
         "validation_rows": int(validation_end - validation_start),
         "oos_rows": int(len(X.iloc[oos_start:])),
         "train_start": X.index[0].isoformat(),
         "train_end": X.index[train_end - 1].isoformat(),
+        "final_train_start": X.index[0].isoformat(),
+        "final_train_end": X.index[final_train_end - 1].isoformat(),
         "validation_start": X.index[validation_start].isoformat(),
         "validation_end": X.index[validation_end - 1].isoformat(),
         "oos_start": X.index[oos_start].isoformat(),
@@ -497,9 +503,20 @@ def train():
     y_train = y.iloc[:train_end].copy()
     y_test = y.iloc[validation_start:validation_end].copy()
 
-    # 只在训练集内部计算样本权重，避免把未来样本混回训练过程。
-    models, X_train, y_train, sample_weight_summary = train_model_bundle(X_train, y_train)
+    # 只在训练集内部计算评估模型的样本权重，避免把未来样本混回验证过程。
+    eval_models, X_eval_train, _, evaluation_sample_weight_summary = train_model_bundle(X_train, y_train)
     X_test = pd.DataFrame(X_test, columns=feature_cols)
+
+    validation_metrics = {
+        "lgb_v1": evaluate_model(eval_models["lgb_v1"], "LightGBM", X_test, y_test),
+        "xgb_v1": evaluate_model(eval_models["xgb_v1"], "XGBoost", X_test, y_test),
+        "rf_v1": evaluate_model(eval_models["rf_v1"], "RandomForest", X_test, y_test),
+    }
+
+    final_train_end = validation_end if bool(config.MODEL_FINAL_TRAIN_ON_VALIDATION) else train_end
+    X_final_train = X.iloc[:final_train_end].copy()
+    y_final_train = y.iloc[:final_train_end].copy()
+    models, X_final_train, _, sample_weight_summary = train_model_bundle(X_final_train, y_final_train)
 
     lgb_model = models["lgb_v1"]
     joblib.dump(lgb_model, lgb_path)
@@ -513,12 +530,6 @@ def train():
     joblib.dump(rf_model, rf_path)
     log_info(f"✅ RF 模型已保存至: {rf_path}")
 
-    validation_metrics = {
-        "lgb_v1": evaluate_model(lgb_model, "LightGBM", X_test, y_test),
-        "xgb_v1": evaluate_model(xgb_model, "XGBoost", X_test, y_test),
-        "rf_v1": evaluate_model(rf_model, "RandomForest", X_test, y_test),
-    }
-
     joblib.dump(feature_cols, feature_path)
     log_info(f"✅ 特征列已保存至: {feature_path}")
 
@@ -531,17 +542,20 @@ def train():
         validation_end=validation_end,
         oos_start=oos_start,
         original_train_rows=original_train_rows,
-        balanced_train_rows=len(X_train),
+        balanced_train_rows=len(X_final_train),
         validation_metrics=validation_metrics,
         artifact_paths=[lgb_path, xgb_path, rf_path, feature_path],
         label_filter_summary=label_filter_summary,
         sample_weight_summary=sample_weight_summary,
+        evaluation_sample_weight_summary=evaluation_sample_weight_summary,
+        final_train_end=final_train_end,
     )
     write_json_atomic(training_metadata_path, metadata)
     log_info(f"✅ 训练元数据已保存至: {training_metadata_path}")
     log_info(
         "样本切分: "
         f"train={metadata['train_rows']} validation={metadata['validation_rows']} "
+        f"final_train={metadata['final_train_rows']} "
         f"oos={metadata['oos_rows']} oos_start={metadata['oos_start']}"
     )
 

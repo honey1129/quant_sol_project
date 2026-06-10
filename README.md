@@ -244,6 +244,7 @@ MODEL_SAMPLE_WEIGHT_MAX=20.0
 MODEL_TRAIN_RATIO=0.70
 MODEL_VALIDATION_RATIO=0.15
 MODEL_PURGE_BARS=5
+MODEL_FINAL_TRAIN_ON_VALIDATION=1
 MODEL_WALK_FORWARD_ENABLED=1
 MODEL_WALK_FORWARD_FOLDS=3
 MODEL_WALK_FORWARD_MIN_FOLDS=2
@@ -359,6 +360,7 @@ POLL_SEC=10
 - `MODEL_TRAIN_TRADABLE_LABELS=1` / `MODEL_TRAIN_NO_TRADE_LABELS=1`：训练标签对齐可交易方向，同时保留 `no_trade` 质量标签，让模型学习何时不该进场。
 - `MODEL_RECENT_SAMPLE_WEIGHT_BOOST=0.15`：训练不随机下采样；样本权重先平衡 long/short/no_trade，再在方向内部按 regime 平衡，并轻微提高近期样本权重。
 - `MODEL_TRAIN_RATIO` / `MODEL_VALIDATION_RATIO` / `MODEL_PURGE_BARS`：训练区、验证区、最终 OOS 回测区按时间切开，中间留 purge gap。
+- `MODEL_FINAL_TRAIN_ON_VALIDATION=1`：验证指标仍来自严格时间切分；最终保存的模型用 OOS 之前的 train+validation 历史段重训，减少线上模型滞后。
 - `MODEL_WALK_FORWARD_ENABLED=1`：重训准入前会在验证区内做滚动 walk-forward 验证。
 - `MODEL_RETRAIN_MIN_*` / `MODEL_RETRAIN_REGIME_GATE_*`：候选模型必须满足 OOS 交易数、胜率、PF、平均盈亏比、手续费后收益和 regime 偏置门槛；不达标会保留旧模型并回滚。
 - `TELEGRAM_ENABLED=1`：只播报重要事件，包括开平仓/调仓成交、重训成功或失败回滚、连续实盘异常、手动生成的每日复盘汇总；普通心跳和一般日志只写本地文件。
