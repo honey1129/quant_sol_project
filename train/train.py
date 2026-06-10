@@ -13,6 +13,8 @@ import xgboost as xgb
 
 from core.ml_feature_engineering import merge_multi_period_features, add_advanced_features
 from core.okx_api import OKXClient
+from core.regime_filter import derive_market_regime, regime_allows_direction
+from core.trend_filter import derive_trend_context, trend_allows_direction
 from utils.utils import log_info, BASE_DIR
 
 # 统一拼接绝对路径
@@ -22,11 +24,111 @@ rf_path  = os.path.join(BASE_DIR, config.MODEL_PATHS.get("rf_v1"))
 feature_path = os.path.join(BASE_DIR, config.FEATURE_LIST_PATH)
 training_metadata_path = os.path.join(BASE_DIR, config.TRAINING_METADATA_PATH)
 
-def create_labels(df, future_window=5, threshold=0.002):
+def _target_direction(target):
+    if int(target) == 1:
+        return "long"
+    return "short"
+
+
+def _row_atr_ratio(row):
+    close_price = row.get("5m_close")
+    atr_value = row.get("5m_atr")
+    if pd.isna(close_price) or pd.isna(atr_value):
+        return None
+    close_price = float(close_price)
+    if close_price <= 0:
+        return None
+    return float(atr_value) / close_price
+
+
+def _label_trade_context(row):
+    trend_context = derive_trend_context(
+        row,
+        interval=config.TREND_FILTER_INTERVAL,
+        fast_col=config.TREND_FILTER_FAST_COL,
+        slow_col=config.TREND_FILTER_SLOW_COL,
+        min_gap=config.TREND_FILTER_MIN_GAP,
+    )
+    regime_context = derive_market_regime(
+        trend_bias=trend_context.get("trend_bias"),
+        trend_gap=trend_context.get("trend_gap"),
+        volatility=row.get("volatility_15"),
+        atr_ratio=_row_atr_ratio(row),
+        money_flow_ratio=row.get("money_flow_ratio"),
+        trend_gap_threshold=config.REGIME_TREND_GAP_THRESHOLD,
+        high_vol_atr_threshold=config.REGIME_HIGH_VOL_ATR_THRESHOLD,
+        high_volatility_threshold=config.REGIME_HIGH_VOLATILITY_THRESHOLD,
+        money_flow_extreme_threshold=config.REGIME_MONEY_FLOW_EXTREME_THRESHOLD,
+    )
+    return trend_context, regime_context
+
+
+def _target_is_tradable(row):
+    direction = _target_direction(row["target"])
+    trend_context, regime_context = _label_trade_context(row)
+    regime = regime_context.get("regime")
+    trend_bias = trend_context.get("trend_bias")
+
+    if bool(config.REGIME_FILTER_ENABLED):
+        if (
+            bool(config.REGIME_TREND_AGAINST_BLOCK)
+            or str(regime or "").lower() not in {"trend_long", "trend_short"}
+        ):
+            if not regime_allows_direction(
+                regime,
+                direction,
+                allow_range=bool(config.REGIME_RANGE_ALLOW_TRADES),
+                allow_high_vol=bool(config.REGIME_HIGH_VOL_ALLOW_TRADES),
+            ):
+                return False
+
+    if bool(config.TREND_FILTER_ENABLED) and not trend_allows_direction(direction, trend_bias):
+        return False
+
+    return True
+
+
+def _tradable_label_filter_summary(raw_df, filtered_df, blocked_mask):
+    raw_counts = raw_df["target"].astype(int).map(_target_direction).value_counts().to_dict()
+    kept_counts = filtered_df["target"].astype(int).map(_target_direction).value_counts().to_dict()
+    blocked_df = raw_df[blocked_mask].copy()
+    blocked_counts = blocked_df["target"].astype(int).map(_target_direction).value_counts().to_dict()
+    return {
+        "enabled": True,
+        "raw_rows": int(len(raw_df)),
+        "kept_rows": int(len(filtered_df)),
+        "blocked_rows": int(len(blocked_df)),
+        "raw_direction_counts": {str(k): int(v) for k, v in raw_counts.items()},
+        "kept_direction_counts": {str(k): int(v) for k, v in kept_counts.items()},
+        "blocked_direction_counts": {str(k): int(v) for k, v in blocked_counts.items()},
+    }
+
+
+def create_labels(df, future_window=5, threshold=0.002, tradable_only=None):
+    df = df.copy()
     df['future_return'] = df['5m_close'].shift(-future_window) / df['5m_close'] - 1
     df['target'] = np.where(df['future_return'] > threshold, 1,
                      np.where(df['future_return'] < -threshold, 0, np.nan))
     df.dropna(subset=['target'], inplace=True)
+    df["target"] = df["target"].astype(int)
+    tradable_only = bool(config.MODEL_TRAIN_TRADABLE_LABELS if tradable_only is None else tradable_only)
+    if tradable_only:
+        allowed_mask = df.apply(_target_is_tradable, axis=1).astype(bool)
+        blocked_mask = ~allowed_mask
+        filtered_df = df[allowed_mask].copy()
+        filtered_df.attrs["label_filter_summary"] = _tradable_label_filter_summary(
+            df,
+            filtered_df,
+            blocked_mask,
+        )
+        return filtered_df
+
+    df.attrs["label_filter_summary"] = {
+        "enabled": False,
+        "raw_rows": int(len(df)),
+        "kept_rows": int(len(df)),
+        "blocked_rows": 0,
+    }
     return df
 
 def balance_samples(X, y):
@@ -82,7 +184,7 @@ def write_json_atomic(path, payload):
     os.replace(tmp_path, path)
 
 
-def build_training_metadata(*, X, y, feature_cols, train_end, validation_start, validation_end, oos_start, original_train_rows, balanced_train_rows, validation_metrics, artifact_paths):
+def build_training_metadata(*, X, y, feature_cols, train_end, validation_start, validation_end, oos_start, original_train_rows, balanced_train_rows, validation_metrics, artifact_paths, label_filter_summary=None):
     artifact_hashes = {
         os.path.relpath(path, BASE_DIR): sha256_file(path)
         for path in artifact_paths
@@ -111,6 +213,8 @@ def build_training_metadata(*, X, y, feature_cols, train_end, validation_start, 
         "validation_metrics": validation_metrics,
         "label_future_window": int(config.MODEL_LABEL_FUTURE_WINDOW),
         "label_threshold": float(config.MODEL_LABEL_THRESHOLD),
+        "label_mode": "tradable_binary" if bool(config.MODEL_TRAIN_TRADABLE_LABELS) else "raw_binary",
+        "label_filter_summary": label_filter_summary or {},
         "train_ratio": float(config.MODEL_TRAIN_RATIO),
         "validation_ratio": float(config.MODEL_VALIDATION_RATIO),
         "purge_bars": int(config.MODEL_PURGE_BARS),
@@ -197,6 +301,9 @@ def train():
         future_window=int(config.MODEL_LABEL_FUTURE_WINDOW),
         threshold=float(config.MODEL_LABEL_THRESHOLD),
     )
+    label_filter_summary = merged_df.attrs.get("label_filter_summary", {})
+    if label_filter_summary:
+        log_info(f"标签过滤摘要: {json.dumps(label_filter_summary, ensure_ascii=False, sort_keys=True)}")
 
     feature_cols = [col for col in merged_df.columns if col not in ['future_return', 'target']]
     X = merged_df[feature_cols].astype(float)
@@ -251,6 +358,7 @@ def train():
         balanced_train_rows=len(X_train),
         validation_metrics=validation_metrics,
         artifact_paths=[lgb_path, xgb_path, rf_path, feature_path],
+        label_filter_summary=label_filter_summary,
     )
     write_json_atomic(training_metadata_path, metadata)
     log_info(f"✅ 训练元数据已保存至: {training_metadata_path}")

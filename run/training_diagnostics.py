@@ -352,7 +352,9 @@ def build_report(args):
         seed_bt.data.copy(),
         future_window=int(config.MODEL_LABEL_FUTURE_WINDOW),
         threshold=float(config.MODEL_LABEL_THRESHOLD),
+        tradable_only=not bool(args.raw_labels),
     )
+    label_filter_summary = labeled.attrs.get("label_filter_summary", {})
     labeled = enrich_regime_context(labeled)
     labeled = add_predictions(labeled, bundle)
     selected = select_split(labeled, bundle["metadata"], args.split, args.rows)
@@ -368,6 +370,8 @@ def build_report(args):
         "end": selected.index.max().isoformat(),
         "label_future_window": int(config.MODEL_LABEL_FUTURE_WINDOW),
         "label_threshold": float(config.MODEL_LABEL_THRESHOLD),
+        "label_mode": "raw_binary" if bool(args.raw_labels) else "tradable_binary",
+        "label_filter_summary": label_filter_summary,
         "model_weights": bundle["model_weights"],
         "metadata": {
             "created_at": bundle["metadata"].get("created_at"),
@@ -435,6 +439,7 @@ def parse_args(argv=None):
     parser.add_argument("--rows", type=int, default=int(os.getenv("TRAIN_DIAG_ROWS", "3000")), help="使用切片尾部 N 行；<=0 表示全量")
     parser.add_argument("--min-regime-backtest-rows", type=int, default=30, help="分 regime 回测最少样本数")
     parser.add_argument("--no-regime-backtests", action="store_true", help="只跑整体回测，不跑分 regime 过滤回测")
+    parser.add_argument("--raw-labels", action="store_true", help="使用原始涨跌标签，不按交易门禁过滤")
     parser.add_argument("--output", default=None, help="报告 JSON 输出路径")
     return parser.parse_args(argv)
 

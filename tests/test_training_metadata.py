@@ -37,10 +37,57 @@ class TrainingMetadataTests(unittest.TestCase):
         self.assertEqual(metadata["feature_count"], 2)
         self.assertIn("feature_columns_sha256", metadata)
         self.assertEqual(metadata["validation_metrics"]["lgb_v1"]["accuracy"], 0.55)
+        self.assertIn("label_mode", metadata)
+        self.assertIn("label_filter_summary", metadata)
         self.assertEqual(metadata["label_distribution"]["all"], {"0": 10, "1": 10})
         self.assertEqual(metadata["validation_rows"], 4)
         self.assertEqual(metadata["oos_rows"], 2)
         self.assertTrue(metadata["artifact_hashes"])
+
+    def test_tradable_labels_drop_counter_trend_long(self):
+        index = pd.date_range("2026-01-01", periods=6, freq="5min", tz="UTC")
+        close = pd.Series([100, 103, 100, 97, 100, 103], index=index, dtype=float)
+        df = pd.DataFrame({
+            "5m_close": close,
+            "5m_atr": 0.1,
+            "volatility_15": 0.0,
+            "money_flow_ratio": 1.0,
+            "15m_ema_20": close * 1.01,
+            "15m_ema_60": close * 1.05,
+        }, index=index)
+
+        labeled = train_module.create_labels(
+            df,
+            future_window=1,
+            threshold=0.01,
+            tradable_only=True,
+        )
+
+        self.assertGreater(labeled.attrs["label_filter_summary"]["blocked_rows"], 0)
+        self.assertTrue((labeled["target"] == 0).all())
+        self.assertGreater(len(labeled), 0)
+
+    def test_raw_labels_can_keep_counter_trend_long_for_ab(self):
+        index = pd.date_range("2026-01-01", periods=3, freq="5min", tz="UTC")
+        close = pd.Series([100, 103, 100], index=index, dtype=float)
+        df = pd.DataFrame({
+            "5m_close": close,
+            "5m_atr": 0.1,
+            "volatility_15": 0.0,
+            "money_flow_ratio": 1.0,
+            "15m_ema_20": close * 1.01,
+            "15m_ema_60": close * 1.05,
+        }, index=index)
+
+        labeled = train_module.create_labels(
+            df,
+            future_window=1,
+            threshold=0.01,
+            tradable_only=False,
+        )
+
+        self.assertEqual(set(labeled["target"].astype(int)), {0, 1})
+        self.assertFalse(labeled.attrs["label_filter_summary"]["enabled"])
 
     def test_write_json_atomic_round_trips_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:
