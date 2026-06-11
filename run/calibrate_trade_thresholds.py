@@ -417,8 +417,10 @@ def write_report(report, output_path=None):
             f"trade_threshold_calibration_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
         )
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as file:
+    tmp_path = f"{output_path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as file:
         json.dump(td.json_safe(report), file, ensure_ascii=False, indent=2, sort_keys=True)
+    os.replace(tmp_path, output_path)
     return output_path
 
 

@@ -1,4 +1,6 @@
 import unittest
+import os
+import tempfile
 
 import pandas as pd
 
@@ -70,6 +72,17 @@ class TradeThresholdCalibrationTests(unittest.TestCase):
         self.assertEqual(float(out.loc[0, "long_prob"]), 0.7)
         self.assertEqual(float(out.loc[0, "short_prob"]), 0.2)
         self.assertEqual(out.loc[0, "pred_direction"], "long")
+
+    def test_write_report_replaces_atomically_without_tmp_leftover(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "report.json")
+
+            calibration.write_report({"ok": True}, path)
+            calibration.write_report({"ok": False}, path)
+
+            with open(path, "r", encoding="utf-8") as file:
+                self.assertIn('"ok": false', file.read())
+            self.assertFalse(os.path.exists(f"{path}.tmp"))
 
 
 if __name__ == "__main__":
