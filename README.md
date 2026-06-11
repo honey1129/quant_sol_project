@@ -394,7 +394,21 @@ python -m run.tune_adaptive_tp_sl
 
 脚本会输出多组候选参数的回测对比，并给出 `recommended_overrides`。
 
-### 4. 测试盘启动前预检
+### 4. 校准交易阈值和概率
+
+```bash
+python -m run.calibrate_trade_thresholds --split oos --asymmetric \
+  --long-thresholds 0.45,0.50,0.55,0.60 \
+  --short-thresholds 0.45,0.50,0.55,0.60,0.65 \
+  --gaps 0.08,0.12,0.16 \
+  --min-target-ratios 0.01,0.015,0.02 \
+  --probability-calibration isotonic \
+  --probability-calibration-source validation
+```
+
+脚本会把原始/校准后 Brier、ECE、概率分桶、候选阈值回测结果写入 `logs/trade_threshold_calibration_*.json`。概率校准默认用 validation 拟合，再在指定 split 上验证，避免拿 OOS 反向拟合。
+
+### 5. 测试盘启动前预检
 
 ```bash
 PYTHONPATH=. TELEGRAM_ENABLED=0 python run/check_okx_paper_ready.py
@@ -410,13 +424,13 @@ leverage=3
 ...
 ```
 
-### 5. 启动本地测试盘监控
+### 6. 启动本地测试盘监控
 
 ```bash
 PYTHONPATH=. TELEGRAM_ENABLED=0 python -m run.live_trading_monitor
 ```
 
-### 6. 启动守护调度器
+### 7. 启动守护调度器
 
 ```bash
 python -m run.scheduler
@@ -427,7 +441,7 @@ python -m run.scheduler
 - 每天凌晨 2 点自动训练和回测
 - 其他时间确保 `run.live_trading_monitor` 常驻
 
-### 7. 本地启动 Dashboard
+### 8. 本地启动 Dashboard
 
 先启动 Python 数据接口：
 

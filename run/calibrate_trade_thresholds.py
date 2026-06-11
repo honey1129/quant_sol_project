@@ -20,6 +20,20 @@ from run import training_diagnostics as td
 from utils.utils import LOGS_DIR, log_info
 
 
+PROBABILITY_DIRECTIONS = {
+    "long": {
+        "label": 1,
+        "raw_col": "long_prob",
+        "calibrated_col": "long_prob_calibrated",
+    },
+    "short": {
+        "label": 0,
+        "raw_col": "short_prob",
+        "calibrated_col": "short_prob_calibrated",
+    },
+}
+
+
 def parse_float_list(value, default):
     if value is None or str(value).strip() == "":
         return list(default)
@@ -46,6 +60,14 @@ def restore_overrides(originals):
 
 
 def load_diagnostic_data(model_root, split, rows, raw_labels=False):
+    bundle, seed_bt, labeled = load_all_diagnostic_data(model_root, raw_labels=raw_labels)
+    selected = td.select_split(labeled, bundle["metadata"], split, rows)
+    if selected.empty:
+        raise RuntimeError("校准样本为空，请调整 --split 或 --rows")
+    return bundle, seed_bt, selected
+
+
+def load_all_diagnostic_data(model_root, raw_labels=False):
     bundle = td.load_model_bundle(model_root)
     seed_bt = td.create_seed_backtester(bundle)
     labeled = td.create_labels(
@@ -56,15 +78,12 @@ def load_diagnostic_data(model_root, split, rows, raw_labels=False):
     )
     labeled = td.enrich_regime_context(labeled)
     labeled = td.add_predictions(labeled, bundle)
-    selected = td.select_split(labeled, bundle["metadata"], split, rows)
-    if selected.empty:
-        raise RuntimeError("校准样本为空，请调整 --split 或 --rows")
-    return bundle, seed_bt, selected
+    return bundle, seed_bt, labeled
 
 
-def calibration_bins(data, direction, bins):
-    label = 1 if direction == "long" else 0
-    prob_col = "long_prob" if direction == "long" else "short_prob"
+def calibration_bins(data, direction, bins, prob_col=None):
+    label = PROBABILITY_DIRECTIONS[direction]["label"]
+    prob_col = prob_col or PROBABILITY_DIRECTIONS[direction]["raw_col"]
     target = (data["target"].astype(int) == label).astype(float)
     probs = data[prob_col].astype(float)
     brier = float(np.mean((probs.to_numpy() - target.to_numpy()) ** 2))
@@ -102,20 +121,175 @@ def calibration_bins(data, direction, bins):
 
 
 def build_probability_calibration_report(data, bins):
+    return build_probability_calibration_report_for_columns(
+        data,
+        bins,
+        {
+            "long": PROBABILITY_DIRECTIONS["long"]["raw_col"],
+            "short": PROBABILITY_DIRECTIONS["short"]["raw_col"],
+        },
+    )
+
+
+def build_probability_calibration_report_for_columns(data, bins, prob_cols):
     report = {
         "all": {
-            "long": calibration_bins(data, "long", bins),
-            "short": calibration_bins(data, "short", bins),
+            "long": calibration_bins(data, "long", bins, prob_cols["long"]),
+            "short": calibration_bins(data, "short", bins, prob_cols["short"]),
         },
         "by_regime": {},
     }
     for regime, group in data.groupby("diag_regime", dropna=False):
         regime = str(regime or "unknown")
         report["by_regime"][regime] = {
-            "long": calibration_bins(group, "long", bins),
-            "short": calibration_bins(group, "short", bins),
+            "long": calibration_bins(group, "long", bins, prob_cols["long"]),
+            "short": calibration_bins(group, "short", bins, prob_cols["short"]),
         }
     return report
+
+
+class ProbabilityCalibrator:
+    def __init__(self, direction, method, model=None, fallback_reason=None, fitted_rows=0, positive_rows=0):
+        self.direction = direction
+        self.method = method
+        self.model = model
+        self.fallback_reason = fallback_reason
+        self.fitted_rows = int(fitted_rows)
+        self.positive_rows = int(positive_rows)
+
+    @property
+    def active(self):
+        return self.model is not None and self.fallback_reason is None
+
+    def predict(self, values):
+        values = np.asarray(values, dtype=float)
+        if not self.active:
+            return np.clip(values, 0.0, 1.0)
+        if self.method == "sigmoid":
+            calibrated = self.model.predict_proba(values.reshape(-1, 1))[:, 1]
+        else:
+            calibrated = self.model.predict(values)
+        return np.clip(np.asarray(calibrated, dtype=float), 0.0, 1.0)
+
+    def summary(self):
+        payload = {
+            "direction": self.direction,
+            "method": self.method,
+            "active": bool(self.active),
+            "fallback_reason": self.fallback_reason,
+            "fitted_rows": int(self.fitted_rows),
+            "positive_rows": int(self.positive_rows),
+            "negative_rows": int(self.fitted_rows - self.positive_rows),
+        }
+        if self.active and self.method == "isotonic":
+            payload["x_thresholds"] = [float(value) for value in self.model.X_thresholds_]
+            payload["y_thresholds"] = [float(value) for value in self.model.y_thresholds_]
+        elif self.active and self.method == "sigmoid":
+            payload["coef"] = float(self.model.coef_[0][0])
+            payload["intercept"] = float(self.model.intercept_[0])
+        return payload
+
+
+def fit_direction_probability_calibrator(data, direction, method):
+    if method == "none":
+        return ProbabilityCalibrator(direction, method, fallback_reason="disabled")
+
+    prob_col = PROBABILITY_DIRECTIONS[direction]["raw_col"]
+    label = PROBABILITY_DIRECTIONS[direction]["label"]
+    cleaned = data[[prob_col, "target"]].replace([np.inf, -np.inf], np.nan).dropna()
+    if cleaned.empty:
+        return ProbabilityCalibrator(direction, method, fallback_reason="empty_calibration_data")
+
+    y = (cleaned["target"].astype(int) == label).astype(int).to_numpy()
+    probs = cleaned[prob_col].astype(float).to_numpy()
+    positive_rows = int(y.sum())
+    fitted_rows = int(len(y))
+    if positive_rows == 0 or positive_rows == fitted_rows:
+        return ProbabilityCalibrator(
+            direction,
+            method,
+            fallback_reason="single_class_calibration_data",
+            fitted_rows=fitted_rows,
+            positive_rows=positive_rows,
+        )
+
+    if method == "isotonic":
+        from sklearn.isotonic import IsotonicRegression
+
+        model = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
+        model.fit(probs, y)
+    elif method == "sigmoid":
+        from sklearn.linear_model import LogisticRegression
+
+        model = LogisticRegression(solver="lbfgs")
+        model.fit(probs.reshape(-1, 1), y)
+    else:
+        raise ValueError(f"不支持的概率校准方法: {method}")
+
+    return ProbabilityCalibrator(
+        direction,
+        method,
+        model=model,
+        fitted_rows=fitted_rows,
+        positive_rows=positive_rows,
+    )
+
+
+def fit_probability_calibrators(data, method):
+    return {
+        direction: fit_direction_probability_calibrator(data, direction, method)
+        for direction in PROBABILITY_DIRECTIONS
+    }
+
+
+def apply_probability_calibrators(data, calibrators):
+    calibrated = data.copy()
+    for direction, spec in PROBABILITY_DIRECTIONS.items():
+        raw_values = calibrated[spec["raw_col"]].astype(float).to_numpy()
+        calibrated[spec["calibrated_col"]] = calibrators[direction].predict(raw_values)
+    return calibrated
+
+
+def use_calibrated_probability_columns(data):
+    calibrated = data.copy()
+    calibrated["long_prob_raw"] = calibrated["long_prob"]
+    calibrated["short_prob_raw"] = calibrated["short_prob"]
+    calibrated["long_prob"] = calibrated["long_prob_calibrated"]
+    calibrated["short_prob"] = calibrated["short_prob_calibrated"]
+    calibrated["prob_gap"] = (calibrated["long_prob"] - calibrated["short_prob"]).abs()
+    calibrated["pred_label"] = np.where(
+        calibrated["long_prob"] >= calibrated["short_prob"],
+        1,
+        0,
+    )
+    calibrated["pred_direction"] = calibrated["pred_label"].map(td.DIRECTION_LABELS)
+    return calibrated
+
+
+def split_metadata_available(metadata, split):
+    if split == "all":
+        return True
+    if split == "validation":
+        return bool(metadata.get("validation_start") and metadata.get("validation_end"))
+    if split == "oos":
+        return bool(metadata.get("oos_start"))
+    return False
+
+
+def select_probability_calibration_source(labeled, metadata, source, selected_data, rows=None):
+    fallback_reason = None
+    if source == "selected":
+        calibration_data = selected_data.copy()
+    elif not split_metadata_available(metadata, source):
+        calibration_data = selected_data.copy()
+        fallback_reason = f"{source}_metadata_missing_used_selected"
+    else:
+        calibration_data = td.select_split(labeled, metadata, source, rows)
+        if calibration_data.empty:
+            calibration_data = selected_data.copy()
+            fallback_reason = f"{source}_empty_used_selected"
+
+    return calibration_data, fallback_reason
 
 
 def weak_signal_gate_counts(data, threshold_long, threshold_short, signal_min_prob_diff):
@@ -289,6 +463,24 @@ def parse_args(argv=None):
     parser.add_argument("--min-target-ratios", default=os.getenv("THRESHOLD_CALIBRATION_MIN_TARGET_RATIOS"), help="逗号分隔 MIN_SIGNAL_TARGET_RATIO 值")
     parser.add_argument("--bins", default=os.getenv("THRESHOLD_CALIBRATION_BINS"), help="逗号分隔概率校准 bin 边界")
     parser.add_argument("--asymmetric", action="store_true", help="跑 long/short 阈值笛卡尔积；默认使用对称阈值")
+    parser.add_argument(
+        "--probability-calibration",
+        choices=["none", "isotonic", "sigmoid"],
+        default=os.getenv("THRESHOLD_CALIBRATION_PROBABILITY_METHOD", "none"),
+        help="是否先用校准集拟合概率校准器，再用校准后概率跑阈值 sweep",
+    )
+    parser.add_argument(
+        "--probability-calibration-source",
+        choices=["validation", "all", "selected"],
+        default=os.getenv("THRESHOLD_CALIBRATION_PROBABILITY_SOURCE", "validation"),
+        help="概率校准器拟合来源；默认 validation，避免用 OOS 拟合",
+    )
+    parser.add_argument(
+        "--probability-calibration-rows",
+        type=int,
+        default=int(os.getenv("THRESHOLD_CALIBRATION_PROBABILITY_ROWS", "0")),
+        help="概率校准拟合来源尾部 N 行；<=0 表示全量",
+    )
     parser.add_argument("--raw-labels", action="store_true", help="使用原始涨跌标签，不按交易门禁过滤")
     parser.add_argument("--min-closed-trades", type=int, default=int(os.getenv("THRESHOLD_CALIBRATION_MIN_CLOSED_TRADES", "5")), help="推荐排序最低平仓笔数")
     parser.add_argument("--output", default=None, help="报告 JSON 输出路径")
@@ -299,6 +491,9 @@ def main(argv=None):
     args = parse_args(argv)
     if args.rows is not None and args.rows <= 0:
         args.rows = None
+    calibration_rows = None
+    if args.probability_calibration_rows and args.probability_calibration_rows > 0:
+        calibration_rows = int(args.probability_calibration_rows)
 
     default_thresholds = [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, float(config.THRESHOLD_LONG)]
     default_gaps = [0.08, 0.12, 0.16, 0.20, float(config.SIGNAL_MIN_PROB_DIFF)]
@@ -309,7 +504,27 @@ def main(argv=None):
     min_target_ratios = parse_float_list(args.min_target_ratios, default_min_target_ratios)
     bins = parse_float_list(args.bins, [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
 
-    bundle, seed_bt, data = load_diagnostic_data(args.model_root, args.split, args.rows, raw_labels=args.raw_labels)
+    bundle, seed_bt, labeled = load_all_diagnostic_data(args.model_root, raw_labels=args.raw_labels)
+    raw_data = td.select_split(labeled, bundle["metadata"], args.split, args.rows)
+    if raw_data.empty:
+        raise RuntimeError("校准样本为空，请调整 --split 或 --rows")
+
+    probability_source, probability_source_fallback = select_probability_calibration_source(
+        labeled,
+        bundle["metadata"],
+        args.probability_calibration_source,
+        raw_data,
+        rows=calibration_rows,
+    )
+    calibrators = fit_probability_calibrators(probability_source, args.probability_calibration)
+    probability_data = apply_probability_calibrators(raw_data, calibrators)
+    using_calibrated_probabilities = args.probability_calibration != "none"
+    data = (
+        use_calibrated_probability_columns(probability_data)
+        if using_calibrated_probabilities
+        else raw_data
+    )
+
     candidates = build_candidates(
         long_thresholds,
         short_thresholds,
@@ -342,7 +557,33 @@ def main(argv=None):
             "live_min_adjust_amount": float(config.MIN_ADJUST_AMOUNT),
             "min_expected_net_edge": float(config.MIN_EXPECTED_NET_EDGE),
         },
-        "probability_calibration": build_probability_calibration_report(data, bins),
+        "probability_calibration": {
+            "method": args.probability_calibration,
+            "source": args.probability_calibration_source,
+            "source_rows": int(len(probability_source)),
+            "source_start": probability_source.index.min().isoformat() if not probability_source.empty else None,
+            "source_end": probability_source.index.max().isoformat() if not probability_source.empty else None,
+            "source_fallback_reason": probability_source_fallback,
+            "used_for_threshold_sweep": bool(using_calibrated_probabilities),
+            "calibrators": {
+                direction: calibrator.summary()
+                for direction, calibrator in calibrators.items()
+            },
+            "raw": build_probability_calibration_report(raw_data, bins),
+            "calibrated": (
+                build_probability_calibration_report_for_columns(
+                    probability_data,
+                    bins,
+                    {
+                        "long": PROBABILITY_DIRECTIONS["long"]["calibrated_col"],
+                        "short": PROBABILITY_DIRECTIONS["short"]["calibrated_col"],
+                    },
+                )
+                if using_calibrated_probabilities
+                else None
+            ),
+        },
+        "threshold_probability_mode": "calibrated" if using_calibrated_probabilities else "raw",
         "candidates": [],
     }
 
