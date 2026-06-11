@@ -203,7 +203,7 @@ def score_candidate(item, min_closed_trades):
     return (enough_trades, net, pf, -drawdown, closed)
 
 
-def build_candidates(long_thresholds, short_thresholds, gaps, asymmetric=False):
+def build_candidates(long_thresholds, short_thresholds, gaps, min_target_ratios, asymmetric=False):
     candidates = []
     if asymmetric:
         threshold_pairs = [(long, short) for long in long_thresholds for short in short_thresholds]
@@ -213,14 +213,26 @@ def build_candidates(long_thresholds, short_thresholds, gaps, asymmetric=False):
 
     for long_threshold, short_threshold in threshold_pairs:
         for gap in gaps:
-            candidates.append({
-                "name": f"tl{long_threshold:.2f}_ts{short_threshold:.2f}_gap{gap:.2f}",
-                "overrides": {
-                    "THRESHOLD_LONG": float(long_threshold),
-                    "THRESHOLD_SHORT": float(short_threshold),
-                    "SIGNAL_MIN_PROB_DIFF": float(gap),
-                },
-            })
+            for min_target_ratio in min_target_ratios:
+                backtest_min_adjust = min(
+                    float(config.MIN_ADJUST_AMOUNT),
+                    float(config.INITIAL_BALANCE) * float(min_target_ratio),
+                )
+                candidates.append({
+                    "name": (
+                        f"tl{long_threshold:.2f}_ts{short_threshold:.2f}_"
+                        f"gap{gap:.2f}_mt{min_target_ratio:.3f}"
+                    ),
+                    "overrides": {
+                        "THRESHOLD_LONG": float(long_threshold),
+                        "THRESHOLD_SHORT": float(short_threshold),
+                        "SIGNAL_MIN_PROB_DIFF": float(gap),
+                        "MIN_SIGNAL_TARGET_RATIO": float(min_target_ratio),
+                        "REGIME_RANGE_MIN_SIGNAL_TARGET_RATIO": float(min_target_ratio),
+                        "REGIME_HIGH_VOL_MIN_SIGNAL_TARGET_RATIO": float(min_target_ratio),
+                        "BACKTEST_MIN_ADJUST_AMOUNT": float(backtest_min_adjust),
+                    },
+                })
     return candidates
 
 
@@ -274,6 +286,7 @@ def parse_args(argv=None):
     parser.add_argument("--long-thresholds", default=os.getenv("THRESHOLD_CALIBRATION_LONGS"), help="逗号分隔 long 阈值")
     parser.add_argument("--short-thresholds", default=os.getenv("THRESHOLD_CALIBRATION_SHORTS"), help="逗号分隔 short 阈值")
     parser.add_argument("--gaps", default=os.getenv("THRESHOLD_CALIBRATION_GAPS"), help="逗号分隔 SIGNAL_MIN_PROB_DIFF 值")
+    parser.add_argument("--min-target-ratios", default=os.getenv("THRESHOLD_CALIBRATION_MIN_TARGET_RATIOS"), help="逗号分隔 MIN_SIGNAL_TARGET_RATIO 值")
     parser.add_argument("--bins", default=os.getenv("THRESHOLD_CALIBRATION_BINS"), help="逗号分隔概率校准 bin 边界")
     parser.add_argument("--asymmetric", action="store_true", help="跑 long/short 阈值笛卡尔积；默认使用对称阈值")
     parser.add_argument("--raw-labels", action="store_true", help="使用原始涨跌标签，不按交易门禁过滤")
@@ -289,13 +302,21 @@ def main(argv=None):
 
     default_thresholds = [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, float(config.THRESHOLD_LONG)]
     default_gaps = [0.08, 0.12, 0.16, 0.20, float(config.SIGNAL_MIN_PROB_DIFF)]
+    default_min_target_ratios = [0.01, 0.02, 0.04, float(config.MIN_SIGNAL_TARGET_RATIO)]
     long_thresholds = parse_float_list(args.long_thresholds, default_thresholds)
     short_thresholds = parse_float_list(args.short_thresholds, default_thresholds)
     gaps = parse_float_list(args.gaps, default_gaps)
+    min_target_ratios = parse_float_list(args.min_target_ratios, default_min_target_ratios)
     bins = parse_float_list(args.bins, [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
 
     bundle, seed_bt, data = load_diagnostic_data(args.model_root, args.split, args.rows, raw_labels=args.raw_labels)
-    candidates = build_candidates(long_thresholds, short_thresholds, gaps, asymmetric=bool(args.asymmetric))
+    candidates = build_candidates(
+        long_thresholds,
+        short_thresholds,
+        gaps,
+        min_target_ratios,
+        asymmetric=bool(args.asymmetric),
+    )
 
     report = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -317,7 +338,8 @@ def main(argv=None):
             "threshold_short": float(config.THRESHOLD_SHORT),
             "signal_min_prob_diff": float(config.SIGNAL_MIN_PROB_DIFF),
             "min_signal_target_ratio": float(config.MIN_SIGNAL_TARGET_RATIO),
-            "min_adjust_amount": float(config.MIN_ADJUST_AMOUNT),
+            "backtest_min_adjust_amount": float(config.BACKTEST_MIN_ADJUST_AMOUNT),
+            "live_min_adjust_amount": float(config.MIN_ADJUST_AMOUNT),
             "min_expected_net_edge": float(config.MIN_EXPECTED_NET_EDGE),
         },
         "probability_calibration": build_probability_calibration_report(data, bins),
