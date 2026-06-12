@@ -19,6 +19,57 @@ REGIME_TREND_FEATURE_COLUMNS = [
     "trend_gap_abs",
 ]
 
+# 每个周期里随价格水位整体漂移的绝对量级列。树模型直接吃这些列会把
+# “当前价格处在某个绝对区间”当成信号，一旦实盘价格离开训练价位带就失效。
+# 我们保留这些原始列供下游撮合/趋势判断使用，但用 stationary 派生列喂模型。
+_PRICE_LEVEL_SUFFIXES = (
+    "open", "high", "low", "close", "vwap",
+    "boll_mid", "boll_upper", "boll_lower",
+    "ema_10", "ema_20", "ema_30", "ema_60",
+)
+# 量纲与价格成正比、需除以 close 归一化的列。
+_PRICE_SCALED_SUFFIXES = (
+    "macd", "macd_signal", "macd_hist",
+    "tr", "atr", "atr_14",
+    "boll_std", "volatility_20", "rolling_atr_std", "momentum_10",
+)
+
+# 喂给模型时需要排除的列：标签、内部布尔标志、以及所有非平稳的绝对量级列。
+# 原始列仍保留在 DataFrame 中（下游 predict/backtest/live 直接读取），
+# 仅从模型输入里剔除，改用其 stationary 派生版本。
+MODEL_FEATURE_EXCLUDE_EXACT = {
+    "future_return", "target",
+    # 跨周期之外的绝对量级列
+    "ema_12", "ema_26",
+    "money_flow", "money_flow_ma", "volume_ma",
+}
+MODEL_FEATURE_EXCLUDE_SUFFIXES = tuple(
+    f"_{suffix}" for suffix in (_PRICE_LEVEL_SUFFIXES + _PRICE_SCALED_SUFFIXES)
+) + (
+    "_obv",            # 累计量，保留 obv_zscore 派生版
+    "_volume",         # 绝对成交量，保留 volume_ratio
+    "_confirm",        # 收盘确认标志，过滤后近似常数
+    "_is_confirmed",
+)
+
+
+def _is_excluded_model_feature(col):
+    col = str(col)
+    if col in MODEL_FEATURE_EXCLUDE_EXACT:
+        return True
+    return col.endswith(MODEL_FEATURE_EXCLUDE_SUFFIXES)
+
+
+def model_feature_columns(df):
+    """Return the stationary subset of columns to feed the model.
+
+    Absolute price-level / raw-magnitude columns drift with SOL's price and make
+    tree models memorize the training-period price band instead of patterns. They
+    stay in the DataFrame for downstream matching/trend logic, but are excluded
+    here so training and live inference share one stationary feature set.
+    """
+    return [col for col in df.columns if not _is_excluded_model_feature(col)]
+
 # 单周期基础特征工程
 def add_features(df):
     """
@@ -274,6 +325,51 @@ def add_regime_trend_features(df):
     return pd.concat([df, feature_df[REGIME_TREND_FEATURE_COLUMNS]], axis=1)
 
 
+def add_stationary_features(df):
+    """Add dimensionless versions of absolute price-level / magnitude columns.
+
+    Tree models trained on raw `ema_60`, `boll_mid`, `vwap`, `macd`, `atr`, `obv`...
+    learn the training-period price band rather than transferable shape. These
+    derived columns are scale-free, so they stay valid as price drifts. Raw columns
+    are kept untouched for downstream matching/trend logic.
+    """
+    df = df.copy()
+    new_cols = {}
+
+    for interval in config.INTERVALS:
+        prefix = str(interval)
+        close_col = f"{prefix}_close"
+        if close_col not in df.columns:
+            continue
+        close = df[close_col].replace(0, np.nan)
+
+        # 价格水位类 → 相对当周期 close 的距离比（围绕 0 平稳）
+        for suffix in _PRICE_LEVEL_SUFFIXES:
+            if suffix == "close":
+                continue  # close/close-1 恒为 0，无信息
+            col = f"{prefix}_{suffix}"
+            if col in df.columns:
+                new_cols[f"{col}_rel"] = df[col] / close - 1.0
+
+        # 与价格成正比的量级列 → 除以 close 归一化
+        for suffix in _PRICE_SCALED_SUFFIXES:
+            col = f"{prefix}_{suffix}"
+            if col in df.columns:
+                new_cols[f"{col}_norm"] = df[col] / close
+
+        # OBV 是累计量，本身随时间发散 → 用差分后的滚动 z-score
+        obv_col = f"{prefix}_obv"
+        if obv_col in df.columns:
+            obv_delta = df[obv_col].diff()
+            roll_mean = obv_delta.rolling(20).mean()
+            roll_std = obv_delta.rolling(20).std()
+            new_cols[f"{obv_col}_zscore"] = (obv_delta - roll_mean) / (roll_std + 1e-9)
+
+    if new_cols:
+        df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+    return df
+
+
 # 多因子衍生特征工程
 def add_advanced_features(df):
     """
@@ -303,6 +399,9 @@ def add_advanced_features(df):
     # === 成交量衍生特征 ===
     df['volume_ma'] = df['5m_volume'].rolling(10).mean()
     df['volume_ratio'] = df['5m_volume'] / (df['volume_ma'] + 1e-6)
+
+    # === 绝对量级特征的无量纲（平稳）版本 ===
+    df = add_stationary_features(df)
 
     df = add_regime_trend_features(df)
 
