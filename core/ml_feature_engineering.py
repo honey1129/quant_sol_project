@@ -42,6 +42,9 @@ MODEL_FEATURE_EXCLUDE_EXACT = {
     # 跨周期之外的绝对量级列
     "ema_12", "ema_26",
     "money_flow", "money_flow_ma", "volume_ma",
+    # Rubik 原始绝对量级(OI/taker 成交量),只用其平稳派生版,绝对值随市值漂移
+    "rubik_open_interest", "rubik_oi_volume",
+    "rubik_taker_sell_vol", "rubik_taker_buy_vol",
 }
 MODEL_FEATURE_EXCLUDE_SUFFIXES = tuple(
     f"_{suffix}" for suffix in (_PRICE_LEVEL_SUFFIXES + _PRICE_SCALED_SUFFIXES)
@@ -325,6 +328,83 @@ def add_regime_trend_features(df):
     return pd.concat([df, feature_df[REGIME_TREND_FEATURE_COLUMNS]], axis=1)
 
 
+# Rubik(OI / taker / 多空比)派生的平稳特征列。绝对量级不进模型,只用变化率/失衡比。
+RUBIK_FEATURE_COLUMNS = [
+    "rubik_oi_change",        # OI 环比变化率
+    "rubik_oi_vol_ratio",     # 成交量/OI,换手强度
+    "rubik_taker_imbalance",  # (买-卖)/(买+卖),主动方向压力
+    "rubik_taker_buy_share",  # 买量占比
+    "rubik_ls_ratio",         # 多空账户比(已是比值,近似平稳)
+    "rubik_ls_ratio_change",  # 多空比环比变化
+]
+
+
+def add_rubik_features(df, rubik_data):
+    """Merge 1H Rubik stats (OI / taker / long-short) onto the 5m frame.
+
+    Rubik 仅 1H 粒度且只有 ~30 天历史。为防前视:1H 统计 bar 的时间戳 T 代表
+    [T, T+1H),要等该小时收盘后才可见,故先把 ts 前移一个周期再 merge_asof,
+    与 merge_multi_period_features 对高周期 shift(1) 的口径一致。
+
+    只产出无量纲平稳列(OI 变化率、taker 失衡比、多空比)。绝对 OI/成交量不进模型。
+    rubik_data 缺失或为空时,所有 rubik 列填 0(模型当作无信息)。
+    """
+    df = df.copy()
+    # rubik_data 未提供 = 特征关闭。此时不添加任何 rubik 列,避免常数零列污染
+    # feature_list(A/B 实测 rubik 特征不改善 OOS,默认关闭)。
+    if not rubik_data:
+        return df
+    for col in RUBIK_FEATURE_COLUMNS:
+        df[col] = 0.0
+
+    idx = pd.DatetimeIndex(df.index)
+    if idx.tz is None:
+        idx = idx.tz_localize("UTC")
+    else:
+        idx = idx.tz_convert("UTC")
+    # 保留原始行序:base 按 ts 升序排,但记下原位置 __pos__ 以便写回。
+    base = pd.DataFrame({"__pos__": np.arange(len(df)), "__ts__": idx})
+    base = base.sort_values("__ts__").reset_index(drop=True)
+
+    period = pd.Timedelta(hours=1)  # 1H rubik
+
+    def merge_block(series_df, derive, out_cols):
+        if series_df is None or series_df.empty:
+            return
+        s = series_df.sort_values("ts").reset_index(drop=True).copy()
+        s["ts"] = pd.to_datetime(s["ts"], utc=True)
+        derive(s)
+        s["__avail__"] = s["ts"] + period  # 收盘后才可见,防前视
+        merged = pd.merge_asof(
+            base, s[["__avail__"] + out_cols],
+            left_on="__ts__", right_on="__avail__", direction="backward",
+        )
+        for col in out_cols:
+            vals = np.zeros(len(df), dtype=float)
+            vals[merged["__pos__"].to_numpy()] = merged[col].to_numpy()
+            df[col] = vals
+
+    def _oi(s):
+        s["rubik_oi_change"] = s["open_interest"].pct_change()
+        s["rubik_oi_vol_ratio"] = s["oi_volume"] / (s["open_interest"].abs() + 1e-9)
+
+    def _taker(s):
+        total = s["taker_buy_vol"] + s["taker_sell_vol"]
+        s["rubik_taker_imbalance"] = (s["taker_buy_vol"] - s["taker_sell_vol"]) / (total + 1e-9)
+        s["rubik_taker_buy_share"] = s["taker_buy_vol"] / (total + 1e-9)
+
+    def _ls(s):
+        s["rubik_ls_ratio"] = s["long_short_ratio"]
+        s["rubik_ls_ratio_change"] = s["long_short_ratio"].pct_change()
+
+    merge_block(rubik_data.get("open_interest"), _oi, ["rubik_oi_change", "rubik_oi_vol_ratio"])
+    merge_block(rubik_data.get("taker_volume"), _taker, ["rubik_taker_imbalance", "rubik_taker_buy_share"])
+    merge_block(rubik_data.get("long_short_ratio"), _ls, ["rubik_ls_ratio", "rubik_ls_ratio_change"])
+
+    df[RUBIK_FEATURE_COLUMNS] = df[RUBIK_FEATURE_COLUMNS].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    return df
+
+
 def add_stationary_features(df):
     """Add dimensionless versions of absolute price-level / magnitude columns.
 
@@ -371,9 +451,12 @@ def add_stationary_features(df):
 
 
 # 多因子衍生特征工程
-def add_advanced_features(df):
+def add_advanced_features(df, rubik_data=None):
     """
     融入资金流、波动率、微结构等衍生高阶特征
+
+    rubik_data(可选):{"open_interest","taker_volume","long_short_ratio"} -> DataFrame,
+    传入则接入 OI/taker/多空比的平稳派生特征;不传则这些列恒为 0(等价于关闭)。
     """
     # === 资金流指标 ===
     df['money_flow'] = df['5m_close'] * df['5m_volume']
@@ -404,6 +487,9 @@ def add_advanced_features(df):
     df = add_stationary_features(df)
 
     df = add_regime_trend_features(df)
+
+    # === Rubik(OI / taker / 多空比)平稳特征,可选 ===
+    df = add_rubik_features(df, rubik_data)
 
     # 避免用未来数据回填到过去，缺失值交给调用方统一裁剪。
     df.replace([np.inf, -np.inf], np.nan, inplace=True)

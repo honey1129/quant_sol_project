@@ -7,6 +7,7 @@ import okx.Account as Account
 import okx.Trade as Trade
 import okx.MarketData as Market
 import okx.PublicData as Public
+import okx.TradingData as TradingData
 from utils.utils import log_info, log_error
 
 
@@ -89,6 +90,8 @@ class OKXClient:
         self.trade_api = Trade.TradeAPI(config.OKX_API_KEY, config.OKX_SECRET, config.OKX_PASSWORD, use_server_time=True, flag=config.USE_SERVER)
         self.market_api = Market.MarketAPI(config.OKX_API_KEY, config.OKX_SECRET, config.OKX_PASSWORD, use_server_time=True, flag=config.USE_SERVER)
         self.public_api = Public.PublicAPI(config.OKX_API_KEY, config.OKX_SECRET, config.OKX_PASSWORD, use_server_time=True,flag=config.USE_SERVER)
+        # Rubik 交易大数据(OI / taker / 多空比)。仅做只读统计,无需签名,但沿用同一 flag。
+        self.trading_data_api = TradingData.TradingDataAPI(flag=config.USE_SERVER, debug=False)
 
     def _call_with_retry(self, label, func, *, max_retry=None, sleep_sec=None, backoff=None):
         max_retry = max(1, int(max_retry if max_retry is not None else config.OKX_API_MAX_RETRY))
@@ -552,6 +555,86 @@ class OKXClient:
         df.sort_values('funding_time', inplace=True)
         df.reset_index(drop=True, inplace=True)
         return df[['funding_time', 'funding_rate']]
+
+    @staticmethod
+    def _ccy_from_symbol(symbol):
+        # Rubik 统计接口按币种(ccy)而非合约 instId 查询,例如 SOL-USDT-SWAP -> SOL。
+        return str(symbol).split('-')[0]
+
+    def _fetch_rubik_series(self, label, fetch_fn, value_cols, *, period='1H', max_retry=3, sleep_sec=1):
+        """通用 Rubik 历史拉取。
+
+        Rubik 端点单次返回约 720 行(1H 约 30 天)、时间倒序、每行是数组。
+        这里统一成时间正序的 DataFrame,首列为 ts,其余按 value_cols 命名。
+        无历史(快照型)或拉取失败时返回空表,调用方需容忍缺列。
+        """
+        rows = None
+        for attempt in range(max_retry):
+            try:
+                resp = fetch_fn()
+                if str(resp.get('code')) != '0':
+                    raise ValueError(f"code={resp.get('code')} msg={resp.get('msg')}")
+                rows = resp.get('data', [])
+                break
+            except Exception as e:
+                print(f"⚠️ 拉取 {label} 失败，重试中 ({attempt + 1}/{max_retry}): {e}")
+                time.sleep(sleep_sec)
+        else:
+            print(f"❌ 超过最大重试次数，跳过 {label}")
+            rows = None
+
+        cols = ['ts'] + list(value_cols)
+        if not rows:
+            return pd.DataFrame(columns=cols)
+
+        # 防御:实际列数可能与预期不符(OKX 偶尔加列),按最小长度对齐。
+        width = min(len(cols), len(rows[0]))
+        df = pd.DataFrame([r[:width] for r in rows], columns=cols[:width])
+        df['ts'] = pd.to_datetime(df['ts'].astype('int64'), unit='ms', utc=True)
+        for col in cols[1:width]:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        df.drop_duplicates(subset=['ts'], keep='last', inplace=True)
+        df.sort_values('ts', inplace=True)  # Rubik 默认倒序,这里转正序
+        df.reset_index(drop=True, inplace=True)
+        return df
+
+    def fetch_open_interest_history(self, symbol=config.SYMBOL, period='1H', max_retry=3, sleep_sec=1):
+        """合约持仓量(OI)+ 成交量历史。行格式 [ts, oi, volume]。"""
+        ccy = self._ccy_from_symbol(symbol)
+        return self._fetch_rubik_series(
+            "OI 历史",
+            lambda: self.trading_data_api.get_contracts_interest_volume(ccy=ccy, period=period),
+            ['open_interest', 'oi_volume'],
+            period=period, max_retry=max_retry, sleep_sec=sleep_sec,
+        )
+
+    def fetch_taker_volume_history(self, symbol=config.SYMBOL, period='1H', max_retry=3, sleep_sec=1):
+        """主动买卖(taker)成交量历史。OKX 行格式 [ts, sellVol, buyVol]。"""
+        ccy = self._ccy_from_symbol(symbol)
+        return self._fetch_rubik_series(
+            "taker 成交量历史",
+            lambda: self.trading_data_api.get_taker_volume(ccy=ccy, instType='CONTRACTS', period=period),
+            ['taker_sell_vol', 'taker_buy_vol'],
+            period=period, max_retry=max_retry, sleep_sec=sleep_sec,
+        )
+
+    def fetch_long_short_ratio_history(self, symbol=config.SYMBOL, period='1H', max_retry=3, sleep_sec=1):
+        """多空账户比历史。行格式 [ts, ratio]。"""
+        ccy = self._ccy_from_symbol(symbol)
+        return self._fetch_rubik_series(
+            "多空比历史",
+            lambda: self.trading_data_api.get_long_short_ratio(ccy=ccy, period=period),
+            ['long_short_ratio'],
+            period=period, max_retry=max_retry, sleep_sec=sleep_sec,
+        )
+
+    def fetch_rubik_data(self, symbol=config.SYMBOL, period='1H'):
+        """一次性拉取 OI / taker / 多空比,返回 add_rubik_features 期望的 dict。"""
+        return {
+            "open_interest": self.fetch_open_interest_history(symbol=symbol, period=period),
+            "taker_volume": self.fetch_taker_volume_history(symbol=symbol, period=period),
+            "long_short_ratio": self.fetch_long_short_ratio_history(symbol=symbol, period=period),
+        }
 
     ### 封装开仓/平仓逻辑(按usdt开仓)
     def place_order_with_leverage(self, side, posSide, usd_amount, leverage, reduce_only=False, max_retry=3, sleep_sec=1, fill_timeout_sec=5.0):

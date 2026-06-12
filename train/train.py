@@ -476,7 +476,11 @@ def train():
     client = OKXClient()
     data_dict = client.fetch_data()
     merged_df = merge_multi_period_features(data_dict)
-    merged_df = add_advanced_features(merged_df)
+    rubik_data = None
+    if bool(config.MODEL_USE_RUBIK_FEATURES):
+        rubik_data = client.fetch_rubik_data(period=config.MODEL_RUBIK_PERIOD)
+        log_info(f"已拉取 Rubik 特征数据 (period={config.MODEL_RUBIK_PERIOD})")
+    merged_df = add_advanced_features(merged_df, rubik_data=rubik_data)
     merged_df = merged_df.dropna().copy()
     merged_df = create_labels(
         merged_df,
