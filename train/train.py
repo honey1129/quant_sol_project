@@ -10,7 +10,7 @@ from config import config
 import os
 import xgboost as xgb
 
-from core.ml_feature_engineering import merge_multi_period_features, add_advanced_features
+from core.ml_feature_engineering import merge_multi_period_features, add_advanced_features, model_feature_columns
 from core.okx_api import OKXClient
 from core.regime_filter import derive_market_regime, regime_allows_direction
 from core.trend_filter import derive_trend_context, trend_allows_direction
@@ -487,7 +487,9 @@ def train():
     if label_filter_summary:
         log_info(f"标签过滤摘要: {json.dumps(label_filter_summary, ensure_ascii=False, sort_keys=True)}")
 
-    feature_cols = [col for col in merged_df.columns if col not in ['future_return', 'target']]
+    # 只把平稳特征喂给模型；绝对价格/量级列与 confirm 标志保留在 df 中供下游使用，
+    # 但通过 model_feature_columns 排除，避免模型记忆训练期价位带。
+    feature_cols = model_feature_columns(merged_df)
     X = merged_df[feature_cols].astype(float)
     y = merged_df['target']
 

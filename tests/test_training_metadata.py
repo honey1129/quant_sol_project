@@ -39,7 +39,9 @@ class TrainingMetadataTests(unittest.TestCase):
         self.assertIn("feature_columns_sha256", metadata)
         self.assertEqual(metadata["validation_metrics"]["lgb_v1"]["accuracy"], 0.55)
         self.assertIn("label_mode", metadata)
-        self.assertEqual(metadata["label_mode"], "tradable_quality")
+        # label_mode 由 .env 的 tradable/no_trade 开关决定;断言它与当前配置一致,
+        # 而非硬编码某个值,避免随 .env 变更而误报。
+        self.assertEqual(metadata["label_mode"], train_module._label_mode())
         self.assertIn("label_filter_summary", metadata)
         self.assertEqual(metadata["training_balance_strategy"], "sample_weight_direction_then_regime_recency")
         self.assertEqual(metadata["sample_weight_summary"]["method"], "unit")
