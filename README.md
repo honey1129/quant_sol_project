@@ -3,6 +3,8 @@
 基于 OKX 永续合约的量化交易项目，覆盖训练、回测、测试盘联调与 VPS 常驻运行。当前代码主流程围绕 OKX，重点已经补齐以下几块：
 
 - 多周期特征工程：`5m / 15m / 1H`
+- 平稳化模型特征：绝对价格/成交量列保留下游使用，但不会直接喂给模型，避免模型记忆训练期价格带
+- 可选 Rubik 特征：OI、taker 主动成交量、多空账户比默认关闭，确认 OOS 有效后再启用
 - 多模型集成：LightGBM、XGBoost、RandomForest
 - 更真实的回测撮合：盯市净值、手续费、滑点、资金费、bar 内 TP/SL
 - 基于 ATR / 波动率的自适应止盈止损
@@ -15,8 +17,8 @@
 推荐使用顺序：
 
 1. 训练模型
-2. 跑回测
-3. 调参自适应 TP/SL
+2. 跑模型概率诊断与 OOS 回测
+3. 校准交易阈值 / 自适应 TP/SL
 4. 本地测试盘联调
 5. VPS 常驻运行测试盘
 
@@ -42,9 +44,14 @@ quant_sol_project/
 ### 1. 训练
 
 - 从 OKX 拉取多周期历史数据
-- 生成多周期特征与高级特征
+- 生成多周期特征、高级特征、regime/trend 显式特征和平稳化派生特征
+- 训练时通过 `model_feature_columns()` 排除绝对价格水位、原始成交量、累计 OBV、confirm 标志等非平稳列
+- `.env.example` 默认使用 `MODEL_LABEL_FUTURE_WINDOW=8` / `MODEL_LABEL_THRESHOLD=0.004`，让标签避开 5m 小噪声
+- 默认关闭 label 阶段 tradable 过滤：`MODEL_TRAIN_TRADABLE_LABELS=0`，regime/trend 闸仍在交易决策层生效
+- 默认启用三分类质量标签：short / long / no_trade
+- 可选接入 Rubik OI/taker/多空比平稳特征：`MODEL_USE_RUBIK_FEATURES=1` 时才拉取
 - 按时间顺序切分训练集 / 验证集 / 最终 OOS 回测集，中间留 purge gap，避免未来数据泄漏
-- 在训练集内部做类别平衡
+- 使用 sample weight 平衡 long / short / no_trade，并在方向内部按 regime 平衡，不再随机下采样破坏时间序列
 - 产出模型文件、特征列表和训练元数据
 
 默认模型输出：
@@ -204,15 +211,15 @@ POSITION_SIZE=50
 
 # 多周期
 INTERVALS=5m,15m,1H
-WINDOWS=5m:5000,15m:5000,1H:2000
+WINDOWS=5m:15000,15m:6000,1H:2000
 
 # 风控参数
-TAKE_PROFIT=0.028
-STOP_LOSS=0.012
+TAKE_PROFIT=0.02
+STOP_LOSS=0.01
 
 # 策略阈值
-THRESHOLD_LONG=0.74
-THRESHOLD_SHORT=0.68
+THRESHOLD_LONG=0.56
+THRESHOLD_SHORT=0.56
 
 # 合约配置
 LOT_SIZE=0.01
@@ -232,10 +239,12 @@ MODEL_WEIGHTS=lgb_v1:0.5,xgb_v1:0.3,rf_v1:0.2
 
 # 训练/验证/OOS 样本切分
 TRAINING_METADATA_PATH=models/training_metadata.json
-MODEL_LABEL_FUTURE_WINDOW=5
-MODEL_LABEL_THRESHOLD=0.002
-MODEL_TRAIN_TRADABLE_LABELS=1
+MODEL_LABEL_FUTURE_WINDOW=8
+MODEL_LABEL_THRESHOLD=0.004
+MODEL_TRAIN_TRADABLE_LABELS=0
 MODEL_TRAIN_NO_TRADE_LABELS=1
+MODEL_USE_RUBIK_FEATURES=0
+MODEL_RUBIK_PERIOD=1H
 MODEL_RECENT_SAMPLE_WEIGHT_BOOST=0.15
 MODEL_TRADE_SAMPLE_WEIGHT_MULTIPLIER=1.0
 MODEL_NO_TRADE_SAMPLE_WEIGHT_MULTIPLIER=1.0
@@ -243,7 +252,7 @@ MODEL_SAMPLE_WEIGHT_MIN=0.25
 MODEL_SAMPLE_WEIGHT_MAX=20.0
 MODEL_TRAIN_RATIO=0.70
 MODEL_VALIDATION_RATIO=0.15
-MODEL_PURGE_BARS=5
+MODEL_PURGE_BARS=8
 MODEL_FINAL_TRAIN_ON_VALIDATION=1
 MODEL_WALK_FORWARD_ENABLED=1
 MODEL_WALK_FORWARD_FOLDS=3
@@ -252,52 +261,60 @@ MODEL_WALK_FORWARD_MIN_VALIDATION_ROWS=100
 
 # 仓位边界
 POSITION_MIN=0.08
-POSITION_MAX=0.30
-BASE_POSITION_RATIO=0.08
-MAX_POSITION_RATIO=0.18
-MIN_ADJUST_AMOUNT=500
-ADJUST_UNIT=75
-TRADE_COOLDOWN_BARS=18
+POSITION_MAX=0.45
+BASE_POSITION_RATIO=0.12
+MAX_POSITION_RATIO=0.45
+MIN_ADJUST_AMOUNT=150
+ADJUST_UNIT=50
+TRADE_COOLDOWN_BARS=6
 ADD_THRESHOLD=0.25
 MAX_REBALANCE_RATIO=0.25
-SIGNAL_MIN_PROB_DIFF=0.24
-MIN_SIGNAL_TARGET_RATIO=0.08
-REVERSE_SIGNAL_MIN_PROB_DIFF=0.28
-REVERSE_MIN_TARGET_RATIO=0.12
+BLOCK_LOSING_POSITION_ADDS=1
+SIGNAL_MIN_PROB_DIFF=0.12
+MIN_SIGNAL_TARGET_RATIO=0.04
+REGIME_RANGE_MIN_SIGNAL_TARGET_RATIO=0.05
+REGIME_HIGH_VOL_MIN_SIGNAL_TARGET_RATIO=0.05
+REVERSE_SIGNAL_MIN_PROB_DIFF=0.18
+REVERSE_MIN_TARGET_RATIO=0.08
+REVERSE_EXIT_CONSECUTIVE_BARS=2
+REVERSE_EXIT_MIN_PROB_DIFF=0.28
 
 # Kelly 盈亏比
 KELLY_REWARD_RISK=2.8
 
 # 动态风险预算目标波动
 TARGET_VOL=0.02
-MIN_HOLD_BARS=8
+MIN_HOLD_BARS=4
 TRAILING_EXIT=0.02
-DYNAMIC_RISK_ENABLED=true
-TAKE_PROFIT_COOLDOWN_BARS=12
-STOP_LOSS_COOLDOWN_BARS=36
+DYNAMIC_RISK_ENABLED=0
+DYNAMIC_LEVERAGE_MIN=1
+DYNAMIC_LEVERAGE_MAX=3
+DYNAMIC_POSITION_MAX=0.45
+DYNAMIC_RISK_HIGH_VOL_MULTIPLIER=0.65
+DYNAMIC_RISK_LOW_SIGNAL_MULTIPLIER=0.60
+DYNAMIC_RISK_TREND_MISMATCH_MULTIPLIER=0.50
+DYNAMIC_RISK_STRONG_SIGNAL_THRESHOLD=0.30
+DYNAMIC_RISK_WEAK_SIGNAL_THRESHOLD=0.16
 
-MAX_POSITION=0.30
+MAX_POSITION=0.4
 INITIAL_BALANCE=1000
+BACKTEST_MIN_ADJUST_AMOUNT=40
 
 # 手续费/滑点感知
 FEE_RATE=0.0005
-ESTIMATED_SLIPPAGE_BPS=5.0
-BACKTEST_SLIPPAGE_BPS=5.0
-COST_BUFFER_MULTIPLIER=2.0
-MIN_EXPECTED_NET_EDGE=0.001
+BACKTEST_INTRABAR_TP_SL=0
 
 # TP/SL
-ADAPTIVE_TP_SL_ENABLED=true
-ATR_TAKE_PROFIT_MULTIPLIER=6.0
-ATR_STOP_LOSS_MULTIPLIER=2.4
-VOLATILITY_TAKE_PROFIT_MULTIPLIER=8.0
-VOLATILITY_STOP_LOSS_MULTIPLIER=2.8
-ADAPTIVE_TAKE_PROFIT_MIN=0.012
-ADAPTIVE_TAKE_PROFIT_MAX=0.05
-ADAPTIVE_STOP_LOSS_MIN=0.0065
-ADAPTIVE_STOP_LOSS_MAX=0.022
-MIN_TAKE_PROFIT_TO_STOP_LOSS_RATIO=2.2
-MIN_TAKE_PROFIT_COST_MULTIPLIER=6.0
+ADAPTIVE_TP_SL_ENABLED=1
+ATR_TAKE_PROFIT_MULTIPLIER=5.0
+ATR_STOP_LOSS_MULTIPLIER=2.2
+VOLATILITY_TAKE_PROFIT_MULTIPLIER=7.0
+VOLATILITY_STOP_LOSS_MULTIPLIER=2.6
+ADAPTIVE_TAKE_PROFIT_MIN=0.009
+ADAPTIVE_TAKE_PROFIT_MAX=0.045
+ADAPTIVE_STOP_LOSS_MIN=0.0055
+ADAPTIVE_STOP_LOSS_MAX=0.025
+REGIME_HIGH_VOL_STOP_LOSS_MIN=0.009
 
 # 自动重训准入
 MODEL_RETRAIN_ENABLED=1
@@ -305,12 +322,14 @@ MODEL_RETRAIN_HOUR=3
 MODEL_RETRAIN_MINUTE=10
 MODEL_RETRAIN_INTERVAL_HOURS=24
 MODEL_RETRAIN_VALIDATE_BACKTEST=1
+MODEL_RETRAIN_MIN_RETURN_PCT=0.0
+MODEL_RETRAIN_MAX_DRAWDOWN_PCT=-5.0
 MODEL_RETRAIN_MIN_CLOSED_TRADES=10
 MODEL_RETRAIN_MIN_WIN_RATE_PCT=45.0
-MODEL_RETRAIN_MIN_PROFIT_FACTOR=1.15
-MODEL_RETRAIN_MIN_AVG_WIN_LOSS_RATIO=0.9
-MODEL_RETRAIN_MIN_NET_PNL_AFTER_COSTS=1.0
-MODEL_RETRAIN_MIN_OOS_ROWS=120
+MODEL_RETRAIN_MIN_PROFIT_FACTOR=1.05
+MODEL_RETRAIN_MIN_AVG_WIN_LOSS_RATIO=0.8
+MODEL_RETRAIN_MIN_NET_PNL_AFTER_COSTS=0.0
+MODEL_RETRAIN_MIN_OOS_ROWS=100
 MODEL_RETRAIN_REGIME_GATE_ENABLED=1
 MODEL_RETRAIN_REGIME_GATE_MIN_ROWS=30
 MODEL_RETRAIN_MAX_TREND_SHORT_LONG_DOMINANCE_PCT=80.0
@@ -331,9 +350,17 @@ REGIME_HIGH_VOL_THRESHOLD_BONUS=0.06
 REGIME_TREND_AGAINST_BLOCK=true
 REGIME_RANGE_TARGET_MULTIPLIER=0.60
 REGIME_HIGH_VOL_TARGET_MULTIPLIER=0.35
-REGIME_HIGH_VOL_STOP_LOSS_MIN=0.009
-REGIME_RANGE_MIN_SIGNAL_TARGET_RATIO=0.05
-REGIME_HIGH_VOL_MIN_SIGNAL_TARGET_RATIO=0.05
+
+# 实盘/模拟盘保护；默认强制模拟盘，防止复制示例后误连实盘。
+LIVE_REQUIRE_SIMULATED_TRADING=1
+LIVE_AUTO_SET_POSITION_MODE=1
+LIVE_AUTO_SET_LEVERAGE=1
+LIVE_RECONCILE_PENDING_ORDERS=1
+LIVE_PERSIST_LAST_BAR=1
+LIVE_USE_AVAILABLE_MARGIN_FOR_SIZING=1
+LIVE_MARGIN_USAGE_RATIO=0.85
+LIVE_MIN_FREE_MARGIN_USDT=30
+LIVE_REWARD_RISK_MIN=1.2
 
 # Telegram 通知
 TELEGRAM_BOT_TOKEN=这里填你的token
@@ -351,13 +378,15 @@ POLL_SEC=10
 
 参数含义重点：
 
-- `THRESHOLD_LONG=0.74` / `THRESHOLD_SHORT=0.68` / `SIGNAL_MIN_PROB_DIFF=0.24`：当前纸盘观察采用更高做多门槛，降低模型偏多时的误开仓概率。
+- `WINDOWS=5m:15000,15m:6000,1H:2000`：拉长训练窗口；模型输入已平稳化，跨价位段样本更可复用。
+- `MODEL_LABEL_FUTURE_WINDOW=8` / `MODEL_LABEL_THRESHOLD=0.004`：当前标签口径来自 OOS 扫描，目标是避开 5m 细碎噪声。
+- `MODEL_TRAIN_TRADABLE_LABELS=0` / `MODEL_TRAIN_NO_TRADE_LABELS=1`：训练标签保留原始方向和 no_trade 质量标签；regime/trend 过滤留在交易决策层执行。
+- `MODEL_USE_RUBIK_FEATURES=0`：Rubik OI/taker/多空比特征默认关闭。开启前应重新训练并用 OOS 回测确认收益质量。
+- `THRESHOLD_LONG=0.56` / `THRESHOLD_SHORT=0.56` / `SIGNAL_MIN_PROB_DIFF=0.12`：当前示例阈值配合新版标签和模型概率尺度，复制旧模型时不要盲目套用。
 - `REGIME_HIGH_VOL_ALLOW_TRADES=false` / `REGIME_TREND_AGAINST_BLOCK=true`：高波动趋势区间不放行逆势交易，尤其防止 `trend_short` 中强行开多。
-- `TRADE_COOLDOWN_BARS=18` / `STOP_LOSS_COOLDOWN_BARS=36`：交易后延长冷却，止损后更久暂停，减少连续亏损。
-- `MIN_ADJUST_AMOUNT=500` / `ADJUST_UNIT=75`：目标仓位变化不够大时不 rebalance，避免小额手续费磨损。
-- `MAX_POSITION_RATIO=0.18` / `LEVERAGE=3`：先降低最大暴露，等测试盘稳定后再逐步放开。
-- `DYNAMIC_RISK_ENABLED=true`：根据波动、信号强弱和趋势一致性缩放仓位。
-- `MODEL_TRAIN_TRADABLE_LABELS=1` / `MODEL_TRAIN_NO_TRADE_LABELS=1`：训练标签对齐可交易方向，同时保留 `no_trade` 质量标签，让模型学习何时不该进场。
+- `MIN_ADJUST_AMOUNT=150` / `BACKTEST_MIN_ADJUST_AMOUNT=40`：实盘最小调仓和回测最小调仓分开配置，避免小额回测收益被线上最小交易额吞掉。
+- `MAX_POSITION_RATIO=0.45` / `LEVERAGE=3`：示例仍是测试盘参数，真实资金前要重新按账户权益调小。
+- `DYNAMIC_RISK_ENABLED=0`：新版示例先关闭动态风险缩放，避免和阈值校准同时改变；需要时再单独 A/B。
 - `MODEL_RECENT_SAMPLE_WEIGHT_BOOST=0.15`：训练不随机下采样；样本权重先平衡 long/short/no_trade，再在方向内部按 regime 平衡，并轻微提高近期样本权重。
 - `MODEL_TRAIN_RATIO` / `MODEL_VALIDATION_RATIO` / `MODEL_PURGE_BARS`：训练区、验证区、最终 OOS 回测区按时间切开，中间留 purge gap。
 - `MODEL_FINAL_TRAIN_ON_VALIDATION=1`：验证指标仍来自严格时间切分；最终保存的模型用 OOS 之前的 train+validation 历史段重训，减少线上模型滞后。
@@ -380,13 +409,21 @@ pm2 restart quant_okx_dashboard
 python -m train.train
 ```
 
-### 2. 跑回测
+### 2. 诊断模型概率
+
+```bash
+python -m run.diagnose_model_probs --bars 1500
+```
+
+这个脚本会输出最近样本的 long/short 概率分布、方向命中率、预测多空占比，以及当前阈值下通过 long/short gate 的 bar 数量。它适合在每次改特征、标签或重训后先看模型是否又学偏了。
+
+### 3. 跑回测
 
 ```bash
 python -m backtest.backtest
 ```
 
-### 3. 扫描自适应 TP/SL 参数
+### 4. 扫描自适应 TP/SL 参数
 
 ```bash
 python -m run.tune_adaptive_tp_sl
@@ -394,21 +431,25 @@ python -m run.tune_adaptive_tp_sl
 
 脚本会输出多组候选参数的回测对比，并给出 `recommended_overrides`。
 
-### 4. 校准交易阈值和概率
+### 5. 校准交易阈值和概率
 
 ```bash
 python -m run.calibrate_trade_thresholds --split oos --asymmetric \
   --long-thresholds 0.45,0.50,0.55,0.60 \
-  --short-thresholds 0.45,0.50,0.55,0.60,0.65 \
-  --gaps 0.08,0.12,0.16 \
-  --min-target-ratios 0.01,0.015,0.02 \
-  --probability-calibration isotonic \
-  --probability-calibration-source validation
+  --short-thresholds 0.40,0.45,0.50,0.55,0.60 \
+  --gaps 0.04,0.08,0.12 \
+  --min-target-ratios 0.01,0.02,0.04
 ```
 
-脚本会把原始/校准后 Brier、ECE、概率分桶、候选阈值回测结果写入 `logs/trade_threshold_calibration_*.json`。概率校准默认用 validation 拟合，再在指定 split 上验证，避免拿 OOS 反向拟合。
+脚本会把 Brier、ECE、概率分桶、候选阈值回测结果写入 `logs/trade_threshold_calibration_*.json`。如需验证概率校准器，可额外加：
 
-### 5. 测试盘启动前预检
+```bash
+--probability-calibration sigmoid --probability-calibration-source validation
+```
+
+概率校准器必须先用 validation 拟合，再在 OOS 上验证；不要用 OOS 反向拟合。最近一轮验证里 raw 概率优于 isotonic/sigmoid，因此当前默认不启用概率校准，只把它作为诊断工具。
+
+### 6. 测试盘启动前预检
 
 ```bash
 PYTHONPATH=. TELEGRAM_ENABLED=0 python run/check_okx_paper_ready.py
@@ -424,13 +465,13 @@ leverage=3
 ...
 ```
 
-### 6. 启动本地测试盘监控
+### 7. 启动本地测试盘监控
 
 ```bash
 PYTHONPATH=. TELEGRAM_ENABLED=0 python -m run.live_trading_monitor
 ```
 
-### 7. 启动守护调度器
+### 8. 启动守护调度器
 
 ```bash
 python -m run.scheduler
@@ -438,10 +479,11 @@ python -m run.scheduler
 
 调度器逻辑：
 
-- 每天凌晨 2 点自动训练和回测
+- 到达 `MODEL_RETRAIN_HOUR` / `MODEL_RETRAIN_MINUTE` 后触发自动重训；候选模型需通过 walk-forward、OOS 回测和 regime 偏置门禁才会替换旧模型
+- 到达 `DAILY_REPORT_HOUR` / `DAILY_REPORT_MINUTE` 后生成每日交易复盘
 - 其他时间确保 `run.live_trading_monitor` 常驻
 
-### 8. 本地启动 Dashboard
+### 9. 本地启动 Dashboard
 
 先启动 Python 数据接口：
 
@@ -692,6 +734,8 @@ PYTHONPATH=. .venv/bin/python -m run.daily_trade_report
 - `logs/runtime_dashboard_history.json`: dashboard 曲线历史
 - `logs/runtime_dashboard_baseline.json`: Dashboard 收益基线
 - `logs/backtest_*.csv`: 回测交易记录与汇总
+- `logs/training_diagnostics_*.json`: regime 分层分类指标、混淆矩阵、信号方向占比与回测诊断
+- `logs/trade_threshold_calibration_*.json`: 阈值 sweep、Brier/ECE、概率分桶和候选交易质量报告
 
 ## 单元测试
 
@@ -704,7 +748,10 @@ python -m unittest \
   tests.test_strategy_core \
   tests.test_live_runtime_state \
   tests.test_runtime_dashboard \
-  tests.test_trade_audit
+  tests.test_trade_audit \
+  tests.test_stationary_features \
+  tests.test_rubik_features \
+  tests.test_calibrate_trade_thresholds
 ```
 
 这些测试主要覆盖：
@@ -715,6 +762,9 @@ python -m unittest \
 - `clOrdId` 辅助逻辑
 - `last_bar_ts` 持久化与恢复
 - 真实成交记录与每日复盘汇总
+- 平稳特征不会泄漏绝对价格水位进模型
+- Rubik 特征无前视、默认关闭、启用后只进入平稳派生列
+- 阈值/概率校准报告可复现且写入安全
 
 ## 风险说明
 
