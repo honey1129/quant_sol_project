@@ -758,6 +758,12 @@ class LiveTrader:
         return labels.get(key, direction or "-")
 
     @staticmethod
+    def _equity_label():
+        if str(getattr(config, "USE_SERVER", "1")) == "1":
+            return "模拟盘权益（虚拟资金）"
+        return "实盘权益"
+
+    @staticmethod
     def _humanize_action(action):
         labels = {
             "HOLD": "暂不交易",
@@ -942,7 +948,8 @@ class LiveTrader:
         return (
             "[实盘运行摘要]\n"
             f"时间: {format_display_ts(bar_ts)}\n"
-            f"行情/账户: {config.SYMBOL} 价格 {fmt_optional(price, 4)}，账户权益 {fmt_optional(equity, 2)} USDT\n"
+            f"行情/账户: {config.SYMBOL} 价格 {fmt_optional(price, 4)}，"
+            f"{self._equity_label()} {fmt_optional(equity, 2)} USDT\n"
             f"当前仓位: {self._format_position_summary(position_snapshot)}\n"
             f"模型判断: 做多 {self._fmt_optional_pct_brief(signal_snapshot.get('long_prob'))}，"
             f"做空 {self._fmt_optional_pct_brief(signal_snapshot.get('short_prob'))}；"

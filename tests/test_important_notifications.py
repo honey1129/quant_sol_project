@@ -137,6 +137,7 @@ class ImportantNotificationTests(unittest.TestCase):
 
         self.assertIn("本轮动作: 暂不交易", message)
         self.assertIn("冷却中，剩余 27 根K线", message)
+        self.assertIn("模拟盘权益（虚拟资金） 93854.22 USDT", message)
         self.assertIn("做多 86.8%", message)
         self.assertIn("行情 高波动震荡，趋势 中性", message)
         self.assertIn("最近HOLD原因: 冷却中，避免刚交易完立刻反复进出 10次", message)
