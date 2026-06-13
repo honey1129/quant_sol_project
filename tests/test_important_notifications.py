@@ -9,7 +9,9 @@ if "joblib" not in sys.modules:
     fake_joblib.load = lambda path: object()
     sys.modules["joblib"] = fake_joblib
 
-if "numpy" not in sys.modules:
+try:
+    import numpy  # noqa: F401
+except ModuleNotFoundError:
     fake_numpy = types.ModuleType("numpy")
     fake_numpy.log = lambda value: value
     fake_numpy.asarray = lambda value, dtype=None: value
@@ -57,6 +59,7 @@ except ModuleNotFoundError:
             return self
 
     fake_pandas.Timestamp = FakeTimestamp
+    fake_pandas.Series = type("Series", (), {})
     sys.modules["pandas"] = fake_pandas
 
 from run import retrain_models
