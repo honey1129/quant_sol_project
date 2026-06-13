@@ -738,6 +738,116 @@ class LiveTrader:
             return reasons or "-"
         return ",".join(str(item) for item in reasons) or "-"
 
+    @staticmethod
+    def _fmt_optional_pct_brief(value, digits=1):
+        if value is None:
+            return "-"
+        try:
+            return f"{float(value) * 100:.{digits}f}%"
+        except (TypeError, ValueError):
+            return "-"
+
+    @staticmethod
+    def _humanize_position_direction(direction):
+        labels = {
+            "flat": "空仓",
+            "long": "多头",
+            "short": "空头",
+        }
+        key = str(direction or "").lower()
+        return labels.get(key, direction or "-")
+
+    @staticmethod
+    def _humanize_action(action):
+        labels = {
+            "HOLD": "暂不交易",
+            "OPEN": "开仓",
+            "CLOSE": "平仓",
+            "REBALANCE": "调仓",
+            "ADD": "加仓",
+            "REDUCE": "减仓",
+        }
+        key = str(action or "").upper()
+        return labels.get(key, action or "-")
+
+    @staticmethod
+    def _humanize_regime(regime):
+        labels = {
+            "trend_long": "上涨趋势",
+            "trend_short": "下跌趋势",
+            "range_high_vol": "高波动震荡",
+            "range_low_vol": "低波动震荡",
+            "range": "震荡",
+            "unknown": "未知",
+        }
+        key = str(regime or "").lower()
+        return labels.get(key, regime or "-")
+
+    @staticmethod
+    def _humanize_trend(trend):
+        labels = {
+            "long": "偏多",
+            "short": "偏空",
+            "neutral": "中性",
+            "trend_long": "偏多",
+            "trend_short": "偏空",
+        }
+        key = str(trend or "").lower()
+        return labels.get(key, trend or "-")
+
+    @staticmethod
+    def _humanize_reason(reason):
+        raw = str(reason or "-")
+        key = raw.split("(", 1)[0]
+        labels = {
+            "Cooldown": "冷却中，避免刚交易完立刻反复进出",
+            "WeakSignal": "信号不够强，暂不交易",
+            "CostGate": "预期优势不足以覆盖手续费和滑点",
+            "RegimeFilter": "行情过滤器不允许当前方向",
+            "TrendFilter": "趋势过滤器不允许当前方向",
+            "SmallTarget": "目标仓位变化太小，未调仓",
+            "NoSignal": "没有有效交易信号",
+            "PositionLimit": "触及仓位限制",
+        }
+        text = labels.get(key, raw)
+        if key == "Cooldown" and "(" in raw and ")" in raw:
+            remaining = raw.split("(", 1)[1].split(")", 1)[0]
+            text = f"冷却中，剩余 {remaining} 根K线，避免刚交易完立刻反复进出"
+        return text
+
+    def _format_hold_reason_counts(self):
+        parts = []
+        for reason, count in self.hold_reason_counts.most_common(5):
+            parts.append(f"{self._humanize_reason(reason)} {count}次")
+        return "，".join(parts) or "暂无"
+
+    def _format_position_summary(self, position_snapshot):
+        position_snapshot = position_snapshot or {}
+        direction = self._humanize_position_direction(position_snapshot.get("direction"))
+        qty = fmt_optional(position_snapshot.get("net_qty"), 6)
+        entry = fmt_optional(position_snapshot.get("entry_price"), 4)
+        notional = fmt_optional(position_snapshot.get("notional"), 2)
+        if str(position_snapshot.get("direction") or "").lower() == "flat":
+            return f"{direction}（数量 {qty}，名义金额 {notional} USDT）"
+        return f"{direction}（数量 {qty}，开仓价 {entry}，名义金额 {notional} USDT）"
+
+    def _format_risk_summary_text(self, risk):
+        risk = risk or {}
+        if not risk:
+            return "暂无动态风控数据"
+
+        enabled = risk.get("enabled")
+        enabled_text = "-" if enabled is None else ("开启" if bool(enabled) else "关闭")
+        leverage = risk.get("effective_leverage")
+        leverage_text = "-" if leverage is None else str(leverage)
+        trend_aligned = risk.get("trend_aligned")
+        trend_text = "-" if trend_aligned is None else ("是" if bool(trend_aligned) else "否")
+        return (
+            f"状态 {enabled_text}，风险倍数 {self._fmt_optional_float(risk.get('risk_multiplier'), 3)}，"
+            f"杠杆 {leverage_text}，波动比 {self._fmt_optional_float(risk.get('volatility_ratio'), 3)}，"
+            f"顺势 {trend_text}，原因 {self._risk_reasons_text(risk)}"
+        )
+
     def _format_risk_fields(self, risk, *, compact=False):
         risk = risk or {}
         multiplier_label = "multiplier" if compact else "risk_multiplier"
@@ -825,28 +935,28 @@ class LiveTrader:
         return key in TELEGRAM_HOLD_ALERT_REASONS
 
     def _format_runtime_summary_notification(self, *, bar_ts, price, equity, position_snapshot, signal_snapshot, decision):
-        top_holds = ", ".join(
-            f"{reason}:{count}"
-            for reason, count in self.hold_reason_counts.most_common(5)
-        ) or "无"
         position_snapshot = position_snapshot or {}
         signal_snapshot = signal_snapshot or {}
         decision = decision or {}
         risk = decision.get("risk") or {}
         return (
             "[实盘运行摘要]\n"
-            f"最近bar: {format_display_ts(bar_ts)}\n"
-            f"价格: {fmt_optional(price, 4)}  权益: {fmt_optional(equity, 2)} USDT\n"
-            f"仓位: {position_snapshot.get('direction', '-')} qty={fmt_optional(position_snapshot.get('net_qty'), 6)} "
-            f"entry={fmt_optional(position_snapshot.get('entry_price'), 4)} notional={fmt_optional(position_snapshot.get('notional'), 2)}\n"
-            f"信号: long={fmt_optional(signal_snapshot.get('long_prob'), 3)} short={fmt_optional(signal_snapshot.get('short_prob'), 3)} "
-            f"regime={signal_snapshot.get('regime') or '-'} trend={signal_snapshot.get('trend_bias') or '-'}\n"
-            f"最近决策: {decision.get('action') or '-'} / {decision.get('reason') or '-'} "
-            f"target={fmt_optional(decision.get('target_ratio'), 4)} raw={fmt_optional(decision.get('raw_target_ratio'), 4)} "
-            f"edge={self._fmt_optional_pct(decision.get('expected_net_edge'))} "
-            f"tp/sl={self._fmt_optional_pct(decision.get('take_profit'))}/{self._fmt_optional_pct(decision.get('stop_loss'))}\n"
-            f"HOLD原因统计: {top_holds}\n"
-            f"动态风控: {self._format_risk_fields(risk, compact=True)}"
+            f"时间: {format_display_ts(bar_ts)}\n"
+            f"行情/账户: {config.SYMBOL} 价格 {fmt_optional(price, 4)}，账户权益 {fmt_optional(equity, 2)} USDT\n"
+            f"当前仓位: {self._format_position_summary(position_snapshot)}\n"
+            f"模型判断: 做多 {self._fmt_optional_pct_brief(signal_snapshot.get('long_prob'))}，"
+            f"做空 {self._fmt_optional_pct_brief(signal_snapshot.get('short_prob'))}；"
+            f"行情 {self._humanize_regime(signal_snapshot.get('regime'))}，"
+            f"趋势 {self._humanize_trend(signal_snapshot.get('trend_bias'))}\n"
+            f"本轮动作: {self._humanize_action(decision.get('action'))}；"
+            f"原因: {self._humanize_reason(decision.get('reason'))}\n"
+            f"仓位建议: 最终 {self._fmt_optional_pct_brief(decision.get('target_ratio'), 2)}，"
+            f"模型原始 {self._fmt_optional_pct_brief(decision.get('raw_target_ratio'), 2)}；"
+            f"预期净优势 {self._fmt_optional_pct_brief(decision.get('expected_net_edge'), 2)}\n"
+            f"止盈/止损参考: {self._fmt_optional_pct_brief(decision.get('take_profit'), 2)} / "
+            f"{self._fmt_optional_pct_brief(decision.get('stop_loss'), 2)}\n"
+            f"最近HOLD原因: {self._format_hold_reason_counts()}\n"
+            f"动态风控: {self._format_risk_summary_text(risk)}"
         )
 
     def _maybe_notify_runtime_summary(self, *, bar_ts, price, equity, position_snapshot, signal_snapshot, decision):
