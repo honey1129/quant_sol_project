@@ -187,6 +187,7 @@ class LiveTrader:
         self.consecutive_loop_errors = 0
         self.last_error_notified_count = 0
         self.last_runtime_summary_notified_at = None
+        self.last_runtime_summary_equity = None
         self.hold_reason_counts = Counter()
         self.recent_hold_decisions = []
         self.consecutive_abnormal_hold_reason = None
@@ -872,6 +873,24 @@ class LiveTrader:
             return f"{direction}（数量 {qty}，名义金额 {notional} USDT）"
         return f"{direction}（数量 {qty}，开仓价 {entry}，名义金额 {notional} USDT）"
 
+    def _format_equity_change(self, equity):
+        prev = getattr(self, "last_runtime_summary_equity", None)
+        try:
+            current = float(equity)
+        except (TypeError, ValueError):
+            return "本次新增统计"
+        if prev is None:
+            return "本次新增统计"
+        try:
+            delta = current - float(prev)
+        except (TypeError, ValueError):
+            return "本次新增统计"
+        sign = "+" if delta >= 0 else "-"
+        pct = ""
+        if prev:
+            pct = f"（{sign}{abs(delta) / abs(float(prev)) * 100:.2f}%）"
+        return f"{sign}{abs(delta):.2f} USDT{pct}"
+
     def _format_risk_summary_text(self, risk):
         risk = risk or {}
         if not risk:
@@ -984,7 +1003,8 @@ class LiveTrader:
             "[实盘运行摘要]\n"
             f"时间: {format_display_ts(bar_ts)}\n"
             f"行情/账户: {config.SYMBOL} 价格 {fmt_optional(price, 4)}，"
-            f"{self._equity_label()} {fmt_optional(equity, 2)} USDT\n"
+            f"{self._equity_label()} {fmt_optional(equity, 2)} USDT，"
+            f"权益变化 {self._format_equity_change(equity)}\n"
             f"当前仓位: {self._format_position_summary(position_snapshot)}\n"
             f"模型判断: 做多 {self._fmt_optional_pct_brief(signal_snapshot.get('long_prob'))}，"
             f"做空 {self._fmt_optional_pct_brief(signal_snapshot.get('short_prob'))}；"
@@ -1017,6 +1037,10 @@ class LiveTrader:
             signal_snapshot=signal_snapshot,
             decision=decision,
         ))
+        try:
+            self.last_runtime_summary_equity = float(equity)
+        except (TypeError, ValueError):
+            pass
 
     def _maybe_notify_abnormal_hold(self, *, bar_ts, price, equity, decision, signal_snapshot):
         reason = decision.get("reason")
