@@ -6,30 +6,59 @@
 - 平稳化模型特征：绝对价格/成交量列保留下游使用，但不会直接喂给模型，避免模型记忆训练期价格带
 - 可选 Rubik 特征：OI、taker 主动成交量、多空账户比默认关闭，确认 OOS 有效后再启用
 - 多模型集成：LightGBM、XGBoost、RandomForest
+- **简单规则模式**：可选绕过ML模型，直接基于趋势过滤做交易决策
 - 更真实的回测撮合：盯市净值、手续费、滑点、资金费、bar 内 TP/SL
 - 基于 ATR / 波动率的自适应止盈止损
 - 高周期趋势过滤与 regime 分层过滤，避免在高波动趋势行情里逆势开仓
-- 动态风险缩放、冷却期、最小调仓金额和亏损加仓拦截，减少手续费/滑点磨损
+- 动态风险缩scaling、冷却期、最小调仓金额和亏损加仓拦截，减少手续费/滑点磨损
+- **每小时性能监控**：自动统计胜率并推送Telegram报告
 - 测试盘保护：强制模拟盘、自动校验持仓模式、自动设置杠杆、启动前清挂单
 - 实盘状态保护：`clOrdId` 幂等下单、`last_bar_ts` / 冷却状态持久化，避免重启后重复处理同一根 K 线或立刻连续交易
 - 自动重训带 walk-forward、OOS 回测、regime 偏置门禁和旧模型回滚保护
 
 推荐使用顺序：
 
-1. 训练模型
+1. 训练模型（可选，如使用简单规则模式可跳过）
 2. 跑模型概率诊断与 OOS 回测
 3. 校准交易阈值 / 自适应 TP/SL
 4. 本地测试盘联调
 5. VPS 常驻运行测试盘
+6. 启用每小时性能监控
+
+## 交易模式
+
+项目支持两种交易模式：
+
+### ML模式（默认）
+- 使用 LightGBM/XGBoost/RandomForest 集成模型预测方向
+- 需要先训练模型
+- 适合有大量历史数据和计算资源的情况
+
+### 简单规则模式（推荐用于验证框架）
+- 绕过ML模型，直接基于趋势过滤（EMA交叉）做交易决策
+- 无需训练模型即可运行
+- 适合验证框架正确性和建立性能基线
+- 回测胜率约35%（相比ML模式的12.5%）
+
+启用简单规则模式：在 `.env` 中设置
+```bash
+USE_SIMPLE_RULE_MODE=1
+SIMPLE_RULE_POSITION_SIZE=0.15  # 15%仓位
+```
 
 ## 项目结构
 
 ```text
 quant_sol_project/
 ├── backtest/                  # 回测逻辑
+│   ├── backtest.py           # 主回测引擎
+│   └── simple_rule_backtest.py  # 简单规则策略回测
 ├── config/                    # .env 与全局配置解析
 ├── core/                      # 交易所接口、策略核心、特征工程、仓位管理
 ├── dashboard-ui/              # React + Vite 运行状态面板
+├── monitoring/                # 性能监控
+│   ├── hourly_performance_report.py  # 每小时胜率统计
+│   └── run_hourly_report.sh         # Cron定时任务
 ├── run/                       # 启动脚本、测试盘检查、VPS bootstrap、参数扫描
 ├── tests/                     # 核心单测
 ├── train/                     # 模型训练
@@ -149,6 +178,51 @@ quant_sol_project/
 
 每日复盘会按动作、原因、多空方向分别归因，方便判断当天亏损来自模型方向、TP/SL、反向平仓、rebalance、手续费还是滑点。
 
+### 6. 每小时性能监控
+
+项目提供自动化性能监控脚本，每小时统计交易胜率并推送Telegram报告：
+
+**功能**：
+- 统计最近24小时和当日的交易表现
+- 计算胜率、止盈止损次数、累计盈亏
+- 显示最近3笔交易详情
+- 对比回测基线，自动告警（胜率<20%警告，>40%表扬）
+- 通过Telegram推送报告
+
+**手动运行**：
+```bash
+python -m monitoring.hourly_performance_report
+```
+
+**设置定时任务（VPS）**：
+```bash
+# 编辑crontab，每小时第5分钟运行
+crontab -e
+
+# 添加以下行
+5 * * * * /root/quant_sol_project/monitoring/run_hourly_report.sh >> /root/quant_sol_project/logs/monitoring.log 2>&1
+```
+
+**报告示例**：
+```
+🤖 简单规则模式 性能报告
+⏰ 2026-06-15 18:05
+
+📊 最近24小时
+• 总交易: 5 笔
+• 止盈: 2 笔
+• 止损: 3 笔
+• 胜率: 40.0%
+• 累计盈亏: +1.20%
+
+📝 最近3笔交易
+• 17:30 ✅ TakeProfit +2.75%
+• 15:45 ❌ StopLoss -1.18%
+• 14:20 ❌ StopLoss -1.22%
+
+🎉 优秀: 胜率超过40%！
+```
+
 ## 环境准备
 
 ### Python
@@ -179,6 +253,8 @@ cp .env.example .env
 | `SYMBOL` | 交易标的 | 默认 `SOL-USDT-SWAP` |
 | `LEVERAGE` | 杠杆倍数 | 先保守，小杠杆测试 |
 | `POSITION_SIZE` | 单次目标资金量 | 先用最小可测仓位 |
+| `USE_SIMPLE_RULE_MODE` | `1`=简单规则模式，`0`=ML模式 | 验证框架时用 `1` |
+| `SIMPLE_RULE_POSITION_SIZE` | 简单规则模式仓位比例 | 默认 `0.15` (15%) |
 | `MODEL_PATHS` | 集成模型路径 | 保持和训练输出一致 |
 | `MODEL_WEIGHTS` | 各模型权重 | 和 `MODEL_PATHS` 对齐 |
 | `ADAPTIVE_TP_SL_ENABLED` | 是否启用自适应 TP/SL | 建议保持 `1` |
