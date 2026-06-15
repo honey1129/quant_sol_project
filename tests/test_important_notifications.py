@@ -141,8 +141,51 @@ class ImportantNotificationTests(unittest.TestCase):
         self.assertIn("做多 86.8%", message)
         self.assertIn("行情 高波动震荡，趋势 中性", message)
         self.assertIn("最近HOLD原因: 冷却中，避免刚交易完立刻反复进出 10次", message)
+        self.assertIn("权益变化 本次新增统计", message)
         self.assertNotIn("long=0.868", message)
         self.assertNotIn("target=0.0000", message)
+
+    def test_runtime_summary_shows_equity_change_against_last_summary(self):
+        trader = LiveTrader.__new__(LiveTrader)
+        trader.hold_reason_counts = Counter()
+        trader.last_runtime_summary_equity = 93000.00
+
+        message = trader._format_runtime_summary_notification(
+            bar_ts="2026-06-10T18:20:00+00:00",
+            price=63.74,
+            equity=93870.50,
+            position_snapshot={
+                "direction": "flat",
+                "net_qty": 0,
+                "entry_price": 0,
+                "notional": 0,
+            },
+            signal_snapshot={},
+            decision={"action": "HOLD", "reason": "Cooldown(5)", "risk": {}},
+        )
+
+        self.assertIn("权益变化 +870.50 USDT（+0.94%）", message)
+
+    def test_runtime_summary_shows_negative_equity_change(self):
+        trader = LiveTrader.__new__(LiveTrader)
+        trader.hold_reason_counts = Counter()
+        trader.last_runtime_summary_equity = 94000.00
+
+        message = trader._format_runtime_summary_notification(
+            bar_ts="2026-06-10T18:20:00+00:00",
+            price=63.74,
+            equity=93530.00,
+            position_snapshot={
+                "direction": "flat",
+                "net_qty": 0,
+                "entry_price": 0,
+                "notional": 0,
+            },
+            signal_snapshot={},
+            decision={"action": "HOLD", "reason": "Cooldown(5)", "risk": {}},
+        )
+
+        self.assertIn("权益变化 -470.00 USDT（-0.50%）", message)
 
 
 if __name__ == "__main__":
