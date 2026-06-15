@@ -24,11 +24,13 @@ feature_path = os.path.join(BASE_DIR, config.FEATURE_LIST_PATH)
 training_metadata_path = os.path.join(BASE_DIR, config.TRAINING_METADATA_PATH)
 
 
-TARGET_NO_TRADE = 0
-TARGET_TRADE = 1
+TARGET_SHORT = 0
+TARGET_LONG = 1
+TARGET_NO_TRADE = 2
 TARGET_DIRECTIONS = {
+    TARGET_SHORT: "short",
+    TARGET_LONG: "long",
     TARGET_NO_TRADE: "no_trade",
-    TARGET_TRADE: "trade",
 }
 
 
@@ -114,126 +116,54 @@ def _tradable_label_filter_summary(raw_df, filtered_df, blocked_mask):
 
 
 def _label_mode():
-    use_realistic = bool(int(os.getenv("MODEL_LABEL_USE_REALISTIC", "1")))
-    return "binary_realistic" if use_realistic else "binary_threshold"
-
-
-def _check_tp_sl_outcome(entry_price, future_bars, direction, take_profit_pct, stop_loss_pct):
-    """
-    检查从entry_price开仓,在future_bars期间,能否先触达止盈而不先触发止损
-
-    Returns:
-        'TP': 先触达止盈
-        'SL': 先触发止损
-        'TIMEOUT': 在给定时间内都没触达
-    """
-    if len(future_bars) == 0:
-        return 'TIMEOUT'
-
-    highs = future_bars['5m_high'].values
-    lows = future_bars['5m_low'].values
-
-    if direction == 'long':
-        tp_price = entry_price * (1 + take_profit_pct)
-        sl_price = entry_price * (1 - stop_loss_pct)
-
-        for high, low in zip(highs, lows):
-            # 悲观假设:同一根K线内,先看止损再看止盈
-            if low <= sl_price:
-                return 'SL'
-            if high >= tp_price:
-                return 'TP'
-        return 'TIMEOUT'
-
-    else:  # short
-        tp_price = entry_price * (1 - take_profit_pct)
-        sl_price = entry_price * (1 + stop_loss_pct)
-
-        for high, low in zip(highs, lows):
-            # 悲观假设:同一根K线内,先看止损再看止盈
-            if high >= sl_price:
-                return 'SL'
-            if low <= tp_price:
-                return 'TP'
-        return 'TIMEOUT'
+    if bool(config.MODEL_TRAIN_NO_TRADE_LABELS):
+        return "tradable_quality" if bool(config.MODEL_TRAIN_TRADABLE_LABELS) else "raw_quality"
+    return "tradable_binary" if bool(config.MODEL_TRAIN_TRADABLE_LABELS) else "raw_binary"
 
 
 def create_labels(df, future_window=5, threshold=0.002, tradable_only=None, include_no_trade=None):
-    """
-    创建训练标签,二分类版本: trade vs no_trade
-
-    逻辑:
-        - 根据当前 trend_bias 确定交易方向
-        - 检查该方向未来能否先触达止盈(不先止损)
-        - 如果能止盈 -> TARGET_TRADE (1)
-        - 否则 -> TARGET_NO_TRADE (0)
-
-    这样模型只需要学习"什么时候该交易",方向由 trend filter 决定
-    """
     df = df.copy()
-    use_realistic = bool(int(os.getenv("MODEL_LABEL_USE_REALISTIC", "1")))
+    df['future_return'] = df['5m_close'].shift(-future_window) / df['5m_close'] - 1
+    include_no_trade = bool(
+        config.MODEL_TRAIN_NO_TRADE_LABELS
+        if include_no_trade is None
+        else include_no_trade
+    )
 
-    if use_realistic:
-        # 二分类realistic标签
-        lookahead_bars = int(os.getenv("MODEL_LABEL_LOOKAHEAD_BARS", "48"))
-        take_profit_pct = float(os.getenv("MODEL_LABEL_TAKE_PROFIT", str(config.TAKE_PROFIT)))
-        stop_loss_pct = float(os.getenv("MODEL_LABEL_STOP_LOSS", str(config.STOP_LOSS)))
-
-        log_info(f"使用二分类realistic标签: lookahead={lookahead_bars}根K线, TP={take_profit_pct:.2%}, SL={stop_loss_pct:.2%}")
-
-        labels = []
-        for i in range(len(df)):
-            if i + lookahead_bars >= len(df):
-                labels.append(np.nan)
-                continue
-
-            entry_price = df.iloc[i]['5m_close']
-            future_bars = df.iloc[i+1:i+lookahead_bars+1]
-
-            # 从特征推断 trend_bias
-            trend_context, _ = _label_trade_context(df.iloc[i])
-            trend_bias = trend_context.get('trend_bias', 'neutral')
-
-            # 根据 trend 决定交易方向
-            if trend_bias == 'long':
-                direction = 'long'
-            elif trend_bias == 'short':
-                direction = 'short'
-            else:
-                # neutral 时不交易
-                labels.append(TARGET_NO_TRADE)
-                continue
-
-            # 检查该方向能否止盈
-            outcome = _check_tp_sl_outcome(entry_price, future_bars, direction, take_profit_pct, stop_loss_pct)
-
-            if outcome == 'TP':
-                labels.append(TARGET_TRADE)
-            else:
-                labels.append(TARGET_NO_TRADE)
-
-        df['target'] = labels
-        df = df[~df['target'].isna()].copy()
-
-    else:
-        # 旧逻辑保留兼容(但改成二分类)
-        log_info(f"使用threshold标签(二分类): future_window={future_window}, threshold={threshold:.2%}")
-        df['future_return'] = df['5m_close'].shift(-future_window) / df['5m_close'] - 1
-
-        # 任何方向超过threshold都算 trade
+    if include_no_trade:
         df['target'] = np.where(
-            (df['future_return'] > threshold) | (df['future_return'] < -threshold),
-            TARGET_TRADE,
-            TARGET_NO_TRADE
+            df['future_return'] > threshold,
+            TARGET_LONG,
+            np.where(df['future_return'] < -threshold, TARGET_SHORT, TARGET_NO_TRADE),
         )
         df.dropna(subset=['future_return'], inplace=True)
+    else:
+        df['target'] = np.where(df['future_return'] > threshold, TARGET_LONG,
+                         np.where(df['future_return'] < -threshold, TARGET_SHORT, np.nan))
+        df.dropna(subset=['target'], inplace=True)
 
     df["target"] = df["target"].astype(int)
-
-    # tradable_only filter 不再需要(已经在标签生成时考虑了 trend)
     tradable_only = bool(config.MODEL_TRAIN_TRADABLE_LABELS if tradable_only is None else tradable_only)
     if tradable_only:
-        log_info("⚠️ 二分类模式下 tradable_only filter 已集成到标签生成,跳过额外过滤")
+        allowed_mask = df.apply(_target_is_tradable, axis=1).astype(bool)
+        blocked_mask = ~allowed_mask
+        if include_no_trade:
+            raw_df = df.copy()
+            df.loc[blocked_mask, "target"] = TARGET_NO_TRADE
+            df.attrs["label_filter_summary"] = _tradable_label_filter_summary(
+                raw_df,
+                df,
+                blocked_mask,
+            )
+            return df
+
+        filtered_df = df[allowed_mask].copy()
+        filtered_df.attrs["label_filter_summary"] = _tradable_label_filter_summary(
+            df,
+            filtered_df,
+            blocked_mask,
+        )
+        return filtered_df
 
     df.attrs["label_filter_summary"] = {
         "enabled": False,
@@ -252,19 +182,41 @@ def create_labels(df, future_window=5, threshold=0.002, tradable_only=None, incl
     return df
 
 def infer_sample_regimes(X):
-    """二分类模式下不需要按regime分组,直接返回统一regime"""
-    return pd.Series("all", index=X.index, dtype="object")
+    if X.empty:
+        return pd.Series(dtype="object", index=X.index)
+
+    explicit_cols = {
+        "regime_trend_long",
+        "regime_trend_short",
+        "regime_range_high_vol",
+        "is_high_vol",
+    }
+    if explicit_cols & set(X.columns):
+        regimes = pd.Series("range", index=X.index, dtype="object")
+
+        def enabled(col):
+            if col not in X.columns:
+                return pd.Series(False, index=X.index)
+            return pd.to_numeric(X[col], errors="coerce").fillna(0.0) >= 0.5
+
+        regimes.loc[enabled("is_high_vol")] = "range_high_vol"
+        regimes.loc[enabled("regime_range_high_vol")] = "range_high_vol"
+        regimes.loc[enabled("regime_trend_long")] = "trend_long"
+        regimes.loc[enabled("regime_trend_short")] = "trend_short"
+        return regimes
+
+    return X.apply(
+        lambda row: str(_label_trade_context(row)[1].get("regime") or "unknown").lower(),
+        axis=1,
+    )
 
 
 def build_sample_weights(X, y, *, recent_boost=None, min_weight=None, max_weight=None):
-    """
-    二分类样本权重: 简化为按类别反频率加权 + 时间衰减
-    """
     y = y.astype(int)
     if len(y) == 0:
         return pd.Series(dtype=float, index=y.index, name="sample_weight"), {
             "enabled": True,
-            "method": "binary_inverse_frequency_with_recency",
+            "method": "direction_then_regime_inverse_frequency_with_recency",
             "rows": 0,
         }
 
@@ -277,20 +229,39 @@ def build_sample_weights(X, y, *, recent_boost=None, min_weight=None, max_weight
     max_weight = None if max_weight is None else float(max_weight)
     if max_weight is not None and max_weight < min_weight:
         raise ValueError("MODEL_SAMPLE_WEIGHT_MAX 不能小于 MODEL_SAMPLE_WEIGHT_MIN")
-
-    # 二分类: 只有 trade 和 no_trade
     trade_multiplier = max(0.0, float(config.MODEL_TRADE_SAMPLE_WEIGHT_MULTIPLIER))
     no_trade_multiplier = max(0.0, float(config.MODEL_NO_TRADE_SAMPLE_WEIGHT_MULTIPLIER))
 
+    regimes = infer_sample_regimes(X).reindex(y.index).fillna("unknown")
     directions = y.map(_target_direction)
+    group_df = pd.DataFrame({
+        "regime": regimes.astype(str),
+        "direction": directions.astype(str),
+    }, index=y.index)
+    group_labels = group_df["regime"] + ":" + group_df["direction"]
+    group_counts = group_labels.value_counts(sort=False)
     direction_counts = directions.value_counts(sort=False)
     direction_count = max(1, int(len(direction_counts)))
+    direction_group_counts = group_df.groupby("direction")["regime"].nunique()
 
     def direction_weight(direction):
         multiplier = no_trade_multiplier if direction == "no_trade" else trade_multiplier
         return (len(y) / (direction_count * float(direction_counts[direction]))) * multiplier
 
-    base_weights = directions.map(direction_weight).astype(float)
+    def regime_adjustment(row):
+        direction = row["direction"]
+        group = f"{row['regime']}:{direction}"
+        return float(direction_counts[direction]) / (
+            float(direction_group_counts[direction]) * float(group_counts[group])
+        )
+
+    direction_weights = directions.map(direction_weight).astype(float)
+    regime_weights = group_df.apply(regime_adjustment, axis=1).astype(float)
+    base_weights = pd.Series(
+        direction_weights.to_numpy() * regime_weights.to_numpy(),
+        index=y.index,
+        name="base_sample_weight",
+    )
 
     if len(base_weights) == 1:
         recency_weights = np.array([1.0 + recent_boost], dtype=float)
@@ -304,12 +275,14 @@ def build_sample_weights(X, y, *, recent_boost=None, min_weight=None, max_weight
     if mean_weight > 0:
         weights = weights / mean_weight
 
-    direction_weight_mean = pd.DataFrame({"direction": directions, "sample_weight": weights}).groupby("direction")["sample_weight"].mean()
-    direction_weight_total = pd.DataFrame({"direction": directions, "sample_weight": weights}).groupby("direction")["sample_weight"].sum()
-
+    weighted_groups = group_df.assign(sample_weight=weights)
+    group_weight_mean = weighted_groups.groupby(["regime", "direction"])["sample_weight"].mean()
+    direction_weight_mean = weighted_groups.groupby("direction")["sample_weight"].mean()
+    direction_weight_total = weighted_groups.groupby("direction")["sample_weight"].sum()
+    group_weight_total = weighted_groups.groupby(["regime", "direction"])["sample_weight"].sum()
     summary = {
         "enabled": True,
-        "method": "binary_inverse_frequency_with_recency",
+        "method": "direction_then_regime_inverse_frequency_with_recency",
         "rows": int(len(y)),
         "recent_boost": float(recent_boost),
         "trade_multiplier": float(trade_multiplier),
@@ -327,6 +300,15 @@ def build_sample_weights(X, y, *, recent_boost=None, min_weight=None, max_weight
         "direction_weight_total": {
             str(direction): float(value)
             for direction, value in direction_weight_total.sort_index().items()
+        },
+        "group_counts": {str(k): int(v) for k, v in group_counts.sort_index().items()},
+        "group_weight_mean": {
+            f"{regime}:{direction}": float(value)
+            for (regime, direction), value in group_weight_mean.sort_index().items()
+        },
+        "group_weight_total": {
+            f"{regime}:{direction}": float(value)
+            for (regime, direction), value in group_weight_total.sort_index().items()
         },
     }
     return weights, summary
@@ -406,10 +388,6 @@ def build_training_metadata(*, X, y, feature_cols, train_end, validation_start, 
         "validation_metrics": validation_metrics,
         "label_future_window": int(config.MODEL_LABEL_FUTURE_WINDOW),
         "label_threshold": float(config.MODEL_LABEL_THRESHOLD),
-        "label_use_realistic": bool(int(os.getenv("MODEL_LABEL_USE_REALISTIC", "1"))),
-        "label_lookahead_bars": int(os.getenv("MODEL_LABEL_LOOKAHEAD_BARS", "48")),
-        "label_take_profit": float(os.getenv("MODEL_LABEL_TAKE_PROFIT", str(config.TAKE_PROFIT))),
-        "label_stop_loss": float(os.getenv("MODEL_LABEL_STOP_LOSS", str(config.STOP_LOSS))),
         "label_mode": _label_mode(),
         "label_filter_summary": label_filter_summary or {},
         "training_balance_strategy": "sample_weight_direction_then_regime_recency",
