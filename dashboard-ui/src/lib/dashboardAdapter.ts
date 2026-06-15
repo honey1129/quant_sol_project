@@ -399,7 +399,15 @@ function deriveDailyPnlFromCurve(curve: EquityPoint[]): number {
   }
   const latest = curve[curve.length - 1];
   const latestTs = new Date(latest.timestamp).getTime();
-  const dailyAnchor = curve.find((point) => latestTs - new Date(point.timestamp).getTime() <= ONE_DAY_MS) || curve[0];
+
+  // 找24小时前的数据点
+  const dailyAnchor = curve.find((point) => latestTs - new Date(point.timestamp).getTime() >= ONE_DAY_MS);
+
+  // 如果历史数据不足24小时，返回0（避免用curve[0]导致虚高）
+  if (!dailyAnchor) {
+    return 0;
+  }
+
   return latest.equity - dailyAnchor.equity;
 }
 

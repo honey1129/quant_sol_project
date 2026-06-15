@@ -777,12 +777,19 @@ def compute_daily_pnl(history):
 
     normalized.sort(key=lambda item: item[0])
     latest_dt, latest_eq = normalized[-1]
-    anchor_eq = normalized[0][1]
     threshold = latest_dt - timedelta(days=1)
+
+    # 找24小时前的锚点
+    anchor_eq = None
     for dt, eq in normalized:
         if dt >= threshold:
             anchor_eq = eq
             break
+
+    # 如果历史数据不足24小时，返回0（避免用第一个点导致虚高）
+    if anchor_eq is None:
+        return 0.0
+
     return latest_eq - anchor_eq
 
 
