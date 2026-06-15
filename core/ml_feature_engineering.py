@@ -137,7 +137,8 @@ def add_features(df):
     df['return_5'] = df['close'].pct_change(5)
     df['return_10'] = df['close'].pct_change(10)
 
-    df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    with pd.option_context("future.no_silent_downcasting", True):
+        df = df.replace([np.inf, -np.inf], np.nan).infer_objects(copy=False)
     return df  # ❗ 注意：这里不做 dropna，留到融合时统一处理
 
 
@@ -255,7 +256,8 @@ def merge_multi_period_features(data_dict, base_interval=None):
         merged = merged.join(prepared[interval], how="left")
 
     merged = merged.sort_index()
-    merged.ffill(inplace=True)
+    with pd.option_context("future.no_silent_downcasting", True):
+        merged = merged.ffill().infer_objects(copy=False)
 
     # 高周期长窗口特征在样本不足时可能整列为空，不能因此把整个结果表清空。
     merged.dropna(axis=1, how="all", inplace=True)
@@ -492,7 +494,8 @@ def add_advanced_features(df, rubik_data=None):
     df = add_rubik_features(df, rubik_data)
 
     # 避免用未来数据回填到过去，缺失值交给调用方统一裁剪。
-    df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    with pd.option_context("future.no_silent_downcasting", True):
+        df = df.replace([np.inf, -np.inf], np.nan).infer_objects(copy=False)
     return df
 
 

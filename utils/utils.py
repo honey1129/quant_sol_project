@@ -57,7 +57,8 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-_telegram_disabled_for_process = False
+_telegram_consecutive_failures = 0
+_telegram_last_reset_time = None
 
 # ✅ 统一日志封装
 def log_info(msg):
@@ -75,9 +76,22 @@ def notify_important(message):
 
 # ✅ Telegram 通知模块
 def send_telegram(message):
-    global _telegram_disabled_for_process
+    import time
+    global _telegram_consecutive_failures, _telegram_last_reset_time
 
-    if _telegram_disabled_for_process or not getattr(config, "TELEGRAM_ENABLED", True):
+    # 每小时重置失败计数器
+    now = time.time()
+    if _telegram_last_reset_time is None:
+        _telegram_last_reset_time = now
+    elif now - _telegram_last_reset_time >= 3600:
+        _telegram_consecutive_failures = 0
+        _telegram_last_reset_time = now
+
+    # 连续失败 3 次后静默
+    if _telegram_consecutive_failures >= 3:
+        return
+
+    if not getattr(config, "TELEGRAM_ENABLED", True):
         return
 
     bot_token = str(getattr(config, "TELEGRAM_BOT_TOKEN", "") or "").strip()
@@ -97,6 +111,8 @@ def send_telegram(message):
     try:
         response = requests.post(url, data=payload, timeout=5)
         response.raise_for_status()
+        # 发送成功,重置失败计数
+        _telegram_consecutive_failures = 0
     except Exception as e:
-        _telegram_disabled_for_process = True
-        print(f"Telegram通知失败，当前进程后续已静默: {e}")
+        _telegram_consecutive_failures += 1
+        log_error(f"Telegram通知失败 ({_telegram_consecutive_failures}/3): {e}")
