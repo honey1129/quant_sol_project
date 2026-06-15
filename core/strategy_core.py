@@ -160,6 +160,10 @@ class StrategyCore:
         self.current_take_profit = self.take_profit
         self.current_stop_loss = self.stop_loss
 
+        # 简单规则模式标志
+        self._simple_rule_mode = False
+        self._simple_rule_position_size = 0.15
+
     def reset_risk_thresholds(self):
         self.current_take_profit = self.take_profit
         self.current_stop_loss = self.stop_loss
@@ -406,6 +410,37 @@ class StrategyCore:
         long_prob = float(long_prob)
         short_prob = float(short_prob)
         prob_gap = abs(long_prob - short_prob)
+
+        # 简单规则模式 - 直接返回固定仓位
+        if hasattr(self, '_simple_rule_mode') and self._simple_rule_mode:
+            # trend_long -> long_prob=0.9, short_prob=0.1
+            # trend_short -> long_prob=0.1, short_prob=0.9
+            # neutral -> long_prob=0.5, short_prob=0.5
+
+            if long_prob >= short_prob:
+                direction = "long"
+                dominant_prob = long_prob
+
+                # neutral 时不交易
+                if long_prob <= 0.6:  # 说明是 neutral (0.5, 0.5)
+                    return 0.0, prob_gap, dominant_prob, "Neutral", None, 0.0
+
+                # trend_long 时做多
+                target_ratio = self._simple_rule_position_size
+                return target_ratio, prob_gap, dominant_prob, None, None, target_ratio
+            else:
+                direction = "short"
+                dominant_prob = short_prob
+
+                # neutral 时不交易
+                if short_prob <= 0.6:
+                    return 0.0, prob_gap, dominant_prob, "Neutral", None, 0.0
+
+                # trend_short 时做空
+                target_ratio = self._simple_rule_position_size
+                return -target_ratio, prob_gap, dominant_prob, None, None, -target_ratio
+
+        # 正常ML模式
         blocked_reason = None
         threshold_bonus, target_multiplier = self._regime_adjustments(market_regime)
         min_signal_target_ratio = self._min_signal_target_ratio_for_regime(market_regime)

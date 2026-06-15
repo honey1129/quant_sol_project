@@ -7,7 +7,7 @@ import traceback
 import numpy as np
 import pandas as pd
 from collections import Counter
-from core import ml_feature_engineering, signal_engine
+from core import ml_feature_engineering, signal_engine, trend_filter
 from core.reward_risk import get_configured_reward_risk
 from core.strategy_core import StrategyCore
 from core.dynamic_risk import DynamicRiskController
@@ -255,6 +255,12 @@ class LiveTrader:
             dynamic_risk_controller=self.dynamic_risk_controller,
         )
 
+        # 启用简单规则模式
+        if bool(config.USE_SIMPLE_RULE_MODE):
+            self.core._simple_rule_mode = True
+            self.core._simple_rule_position_size = float(config.SIMPLE_RULE_POSITION_SIZE)
+            log_info(f"✅ 简单规则模式已启用 - 仓位: {config.SIMPLE_RULE_POSITION_SIZE:.0%}, 绕过ML模型")
+
         if self.last_bar_ts is not None:
             log_info(f"已恢复最近处理 bar: {format_display_ts(self.last_bar_ts)}")
 
@@ -267,6 +273,35 @@ class LiveTrader:
         return reward_risk
 
     def _predict_latest_probs(self, row: pd.Series):
+        """
+        预测 long_prob 和 short_prob
+
+        如果开启简单规则模式(USE_SIMPLE_RULE_MODE=True):
+            - 绕过ML模型
+            - 根据 trend_bias 返回固定概率
+            - trend_long -> long_prob=0.9, short_prob=0.1
+            - trend_short -> long_prob=0.1, short_prob=0.9
+            - neutral -> long_prob=0.5, short_prob=0.5
+        """
+        if bool(config.USE_SIMPLE_RULE_MODE):
+            # 简单规则模式 - 从特征推断 trend
+            trend_context = trend_filter.derive_trend_context(
+                row,
+                interval=config.TREND_FILTER_INTERVAL,
+                fast_col=config.TREND_FILTER_FAST_COL,
+                slow_col=config.TREND_FILTER_SLOW_COL,
+                min_gap=config.TREND_FILTER_MIN_GAP,
+            )
+            trend_bias = trend_context.get('trend_bias', 'neutral')
+
+            if trend_bias == 'long':
+                return 0.90, 0.10
+            elif trend_bias == 'short':
+                return 0.10, 0.90
+            else:
+                return 0.50, 0.50
+
+        # 正常ML模式
         X = row[self.feature_cols].values.reshape(1, -1).astype(float)
         X = pd.DataFrame(X, columns=self.feature_cols)
 
