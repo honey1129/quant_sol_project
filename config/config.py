@@ -142,6 +142,10 @@ TREND_FILTER_FAST_COL = os.getenv("TREND_FILTER_FAST_COL", "ema_20")
 TREND_FILTER_SLOW_COL = os.getenv("TREND_FILTER_SLOW_COL", "ema_60")
 TREND_FILTER_MIN_GAP = float(os.getenv("TREND_FILTER_MIN_GAP", 0.003))
 
+# ✅ 简单规则模式 - 绕过ML模型,只用trend决定方向
+USE_SIMPLE_RULE_MODE = parse_env_bool(os.getenv("USE_SIMPLE_RULE_MODE"), False)
+SIMPLE_RULE_POSITION_SIZE = float(os.getenv("SIMPLE_RULE_POSITION_SIZE", 0.15))  # 15% 仓位
+
 # ✅ Regime 分层过滤（先用同一模型，按行情状态调整阈值/仓位/方向）
 REGIME_FILTER_ENABLED = parse_env_bool(os.getenv("REGIME_FILTER_ENABLED"), True)
 REGIME_TREND_GAP_THRESHOLD = float(os.getenv("REGIME_TREND_GAP_THRESHOLD", TREND_FILTER_MIN_GAP))
