@@ -844,17 +844,23 @@ class LiveTrader:
         labels = {
             "Cooldown": "冷却中，避免刚交易完立刻反复进出",
             "WeakSignal": "信号不够强，暂不交易",
-            "CostGate": "预期优势不足以覆盖手续费和滑点",
-            "RegimeFilter": "行情过滤器不允许当前方向",
-            "TrendFilter": "趋势过滤器不允许当前方向",
-            "SmallTarget": "目标仓位变化太小，未调仓",
-            "NoSignal": "没有有效交易信号",
-            "PositionLimit": "触及仓位限制",
+            "CostGate": "预期收益不够覆盖手续费，不划算",
+            "RegimeFilter": "当前行情环境不适合这个方向",
+            "TrendFilter": "与大趋势方向冲突，放弃交易",
+            "SmallTarget": "需要调整的量太小，不值得操作",
+            "NoSignal": "没有明确的交易信号",
+            "PositionLimit": "已达到最大仓位限制",
+            "SameDirNoRebalance": "方向一致且仓位接近目标，继续持有",
+            "Neutral": "多空信号持平，观望不动",
+            "SameClosedBarSkip": "这根K线已处理过，等下一根",
         }
         text = labels.get(key, raw)
         if key == "Cooldown" and "(" in raw and ")" in raw:
             remaining = raw.split("(", 1)[1].split(")", 1)[0]
-            text = f"冷却中，剩余 {remaining} 根K线，避免刚交易完立刻反复进出"
+            text = f"冷却中，还需等 {remaining} 根K线才能交易"
+        if key == "MinHold" and "(" in raw and ")" in raw:
+            hold_info = raw.split("(", 1)[1].split(")", 1)[0]
+            text = f"最短持仓期未到（已持{hold_info}根K线），继续持有"
         return text
 
     def _format_hold_reason_counts(self):
@@ -897,16 +903,67 @@ class LiveTrader:
             return "暂无动态风控数据"
 
         enabled = risk.get("enabled")
-        enabled_text = "-" if enabled is None else ("开启" if bool(enabled) else "关闭")
+        enabled_text = "-" if enabled is None else ("已开启" if bool(enabled) else "已关闭")
         leverage = risk.get("effective_leverage")
-        leverage_text = "-" if leverage is None else str(leverage)
+        leverage_text = "-" if leverage is None else f"{leverage}倍"
         trend_aligned = risk.get("trend_aligned")
-        trend_text = "-" if trend_aligned is None else ("是" if bool(trend_aligned) else "否")
+        trend_text = "-" if trend_aligned is None else ("✓ 顺势" if bool(trend_aligned) else "✗ 逆势")
+
+        multiplier = risk.get("risk_multiplier")
+        if multiplier is not None:
+            try:
+                m = float(multiplier)
+                if m > 1.0:
+                    multiplier_text = f"{m:.2f}（放大仓位）"
+                elif m < 1.0:
+                    multiplier_text = f"{m:.2f}（缩小仓位）"
+                else:
+                    multiplier_text = f"{m:.2f}（标准）"
+            except (TypeError, ValueError):
+                multiplier_text = "-"
+        else:
+            multiplier_text = "-"
+
+        vol_ratio = risk.get("volatility_ratio")
+        if vol_ratio is not None:
+            try:
+                v = float(vol_ratio)
+                if v < 0.3:
+                    vol_text = f"{v:.3f}（低波动，适合交易）"
+                elif v < 0.7:
+                    vol_text = f"{v:.3f}（中等波动）"
+                else:
+                    vol_text = f"{v:.3f}（高波动，注意风险）"
+            except (TypeError, ValueError):
+                vol_text = "-"
+        else:
+            vol_text = "-"
+
         return (
-            f"状态 {enabled_text}，风险倍数 {self._fmt_optional_float(risk.get('risk_multiplier'), 3)}，"
-            f"杠杆 {leverage_text}，波动比 {self._fmt_optional_float(risk.get('volatility_ratio'), 3)}，"
-            f"顺势 {trend_text}，原因 {self._risk_reasons_text(risk)}"
+            f"风控{enabled_text}，仓位系数 {multiplier_text}，"
+            f"杠杆 {leverage_text}，波动水平 {vol_text}，"
+            f"方向 {trend_text}，判断依据 {self._humanize_risk_reasons(risk)}"
         )
+
+    @staticmethod
+    def _humanize_risk_reasons(risk):
+        reasons = (risk or {}).get("reasons") or []
+        if isinstance(reasons, str):
+            reasons = [r.strip() for r in reasons.split(",") if r.strip()]
+        if not reasons:
+            return "-"
+        labels = {
+            "low_volatility": "波动低（利于交易）",
+            "high_volatility": "波动高（缩减仓位）",
+            "strong_signal": "信号强",
+            "weak_signal": "信号弱",
+            "trend_aligned": "顺势交易",
+            "counter_trend": "逆势（缩减仓位）",
+            "max_leverage_cap": "触及杠杆上限",
+            "drawdown_protection": "回撤保护中",
+        }
+        parts = [labels.get(r, r) for r in reasons]
+        return "，".join(parts)
 
     def _format_risk_fields(self, risk, *, compact=False):
         risk = risk or {}
@@ -999,26 +1056,55 @@ class LiveTrader:
         signal_snapshot = signal_snapshot or {}
         decision = decision or {}
         risk = decision.get("risk") or {}
+
+        # 浮盈浮亏计算
+        unrealized_pnl_text = ""
+        if str(position_snapshot.get("direction") or "").lower() != "flat":
+            entry = position_snapshot.get("entry_price")
+            qty = position_snapshot.get("net_qty")
+            try:
+                if entry and qty and price:
+                    direction = str(position_snapshot.get("direction") or "").lower()
+                    if direction == "long":
+                        pnl = (float(price) - float(entry)) * float(qty)
+                    else:
+                        pnl = (float(entry) - float(price)) * float(qty)
+                    pnl_pct = (float(price) - float(entry)) / float(entry) * 100
+                    if direction == "short":
+                        pnl_pct = -pnl_pct
+                    sign = "+" if pnl >= 0 else ""
+                    unrealized_pnl_text = f"，浮盈 {sign}{pnl:.2f} USDT（{sign}{pnl_pct:.2f}%）"
+            except (TypeError, ValueError):
+                pass
+
         return (
             "[实盘运行摘要]\n"
-            f"时间: {format_display_ts(bar_ts)}\n"
-            f"行情/账户: {config.SYMBOL} 价格 {fmt_optional(price, 4)}，"
-            f"{self._equity_label()} {fmt_optional(equity, 2)} USDT，"
-            f"权益变化 {self._format_equity_change(equity)}\n"
-            f"当前仓位: {self._format_position_summary(position_snapshot)}\n"
-            f"模型判断: 做多 {self._fmt_optional_pct_brief(signal_snapshot.get('long_prob'))}，"
-            f"做空 {self._fmt_optional_pct_brief(signal_snapshot.get('short_prob'))}；"
-            f"行情 {self._humanize_regime(signal_snapshot.get('regime'))}，"
+            f"⏰ 时间: {format_display_ts(bar_ts)}\n"
+            f"\n"
+            f"📈 行情: {config.SYMBOL} 当前价 ${fmt_optional(price, 4)}\n"
+            f"💰 账户: {self._equity_label()} {fmt_optional(equity, 2)} USDT，"
+            f"变化 {self._format_equity_change(equity)}\n"
+            f"\n"
+            f"📦 持仓: {self._format_position_summary(position_snapshot)}{unrealized_pnl_text}\n"
+            f"\n"
+            f"🤖 AI判断: 看涨概率 {self._fmt_optional_pct_brief(signal_snapshot.get('long_prob'))}，"
+            f"看跌概率 {self._fmt_optional_pct_brief(signal_snapshot.get('short_prob'))}\n"
+            f"🌊 市场环境: {self._humanize_regime(signal_snapshot.get('regime'))}，"
             f"趋势 {self._humanize_trend(signal_snapshot.get('trend_bias'))}\n"
-            f"本轮动作: {self._humanize_action(decision.get('action'))}；"
-            f"原因: {self._humanize_reason(decision.get('reason'))}\n"
-            f"仓位建议: 最终 {self._fmt_optional_pct_brief(decision.get('target_ratio'), 2)}，"
-            f"模型原始 {self._fmt_optional_pct_brief(decision.get('raw_target_ratio'), 2)}；"
-            f"预期净优势 {self._fmt_optional_pct_brief(decision.get('expected_net_edge'), 2)}\n"
-            f"止盈/止损参考: {self._fmt_optional_pct_brief(decision.get('take_profit'), 2)} / "
+            f"\n"
+            f"🎬 本轮决策: {self._humanize_action(decision.get('action'))}\n"
+            f"   └ 原因: {self._humanize_reason(decision.get('reason'))}\n"
+            f"\n"
+            f"📐 仓位管理:\n"
+            f"   · 风控调整后目标仓位: {self._fmt_optional_pct_brief(decision.get('target_ratio'), 2)}\n"
+            f"   · 模型建议原始仓位: {self._fmt_optional_pct_brief(decision.get('raw_target_ratio'), 2)}\n"
+            f"   · 预期每笔净赚(扣除手续费): {self._fmt_optional_pct_brief(decision.get('expected_net_edge'), 2)}\n"
+            f"   · 止盈线/止损线: {self._fmt_optional_pct_brief(decision.get('take_profit'), 2)} / "
             f"{self._fmt_optional_pct_brief(decision.get('stop_loss'), 2)}\n"
-            f"最近HOLD原因: {self._format_hold_reason_counts()}\n"
-            f"动态风控: {self._format_risk_summary_text(risk)}"
+            f"\n"
+            f"⏸️ 最近不交易的原因统计: {self._format_hold_reason_counts()}\n"
+            f"\n"
+            f"🛡️ 动态风控: {self._format_risk_summary_text(risk)}"
         )
 
     def _maybe_notify_runtime_summary(self, *, bar_ts, price, equity, position_snapshot, signal_snapshot, decision):
