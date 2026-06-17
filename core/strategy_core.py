@@ -417,6 +417,14 @@ class StrategyCore:
             # trend_short -> long_prob=0.1, short_prob=0.9
             # neutral -> long_prob=0.5, short_prob=0.5
 
+            dominant_prob = max(long_prob, short_prob)
+
+            # 震荡过滤：range / range_high_vol 环境不开新仓
+            if self.regime_filter_enabled and market_regime:
+                regime_lower = str(market_regime).lower()
+                if regime_lower in {"range", "range_high_vol"}:
+                    return 0.0, prob_gap, dominant_prob, "RegimeFilter", None, 0.0
+
             if long_prob >= short_prob:
                 direction = "long"
                 dominant_prob = long_prob
