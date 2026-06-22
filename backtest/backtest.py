@@ -155,6 +155,7 @@ class Backtester:
         self.enable_funding = bool(config.BACKTEST_ENABLE_FUNDING)
         self.enable_intrabar_tp_sl = bool(config.BACKTEST_INTRABAR_TP_SL)
         self.worst_case_tp_sl = bool(config.BACKTEST_WORST_CASE_TP_SL)
+        self.force_close_on_end = bool(config.BACKTEST_FORCE_CLOSE_ON_END)
         self.fee_paid_total = 0.0
         self.slippage_paid_total = 0.0
         self.funding_pnl_total = 0.0
@@ -524,6 +525,34 @@ class Backtester:
         )
         return True
 
+    def _force_close_end_position(self, row):
+        if not self.force_close_on_end or self.position == 0 or self.entry_price <= 0:
+            return False
+
+        reference_price = float(row.get('5m_close', row.get('5m_open', self.entry_price)))
+        bar_high = float(row.get('5m_high', reference_price))
+        bar_low = float(row.get('5m_low', reference_price))
+        pos_to_close = self.position
+        close_side = "sell" if pos_to_close > 0 else "buy"
+        exec_price = self._apply_slippage(reference_price, close_side, bar_low=bar_low, bar_high=bar_high)
+
+        profit = (exec_price - self.entry_price) * pos_to_close
+        self.balance += profit
+        self._apply_trade_costs(pos_to_close, reference_price, exec_price)
+        self._record_closed_trade_pnl()
+        self.trade_log.append((row.name, "期末平仓", exec_price, pos_to_close, self.balance))
+
+        self.position = 0.0
+        self.entry_price = 0.0
+        self.hold_bars = 0
+        self.core.set_state(0.0, 0.0, 0, cooldown_bars_remaining=0)
+        self.final_equity = self.balance
+        self.max_balance = max(self.max_balance, self.final_equity)
+        if self.max_balance > 0:
+            drawdown = (self.final_equity - self.max_balance) / self.max_balance
+            self.max_drawdown = min(self.max_drawdown, drawdown)
+        return True
+
 
     def run_backtest(self):
 
@@ -685,6 +714,7 @@ class Backtester:
                 self.max_drawdown = min(self.max_drawdown, drawdown)
 
 
+        self._force_close_end_position(self.data.iloc[-1])
         return self._summary()
 
     def _predict_row(self, row):
@@ -837,6 +867,7 @@ class Backtester:
                 "live_min_adjust_amount": float(config.MIN_ADJUST_AMOUNT),
                 "min_expected_net_edge": float(self.core.min_expected_net_edge),
                 "position_probability_center": float(self.position_manager.probability_center),
+                "force_close_on_end": bool(self.force_close_on_end),
             },
             "decision_hold_examples": list(self.decision_examples),
         }
