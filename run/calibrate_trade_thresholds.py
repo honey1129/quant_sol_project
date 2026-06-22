@@ -550,36 +550,58 @@ def score_candidate(item, min_closed_trades):
     return (enough_trades, net, pf, -drawdown, closed)
 
 
-def build_candidates(long_thresholds, short_thresholds, gaps, min_target_ratios, asymmetric=False):
+def unique_sorted(values):
+    return sorted(set(values))
+
+
+def build_candidates(
+    long_thresholds,
+    short_thresholds,
+    gaps,
+    min_target_ratios,
+    position_probability_centers=None,
+    asymmetric=False,
+):
     candidates = []
+    long_thresholds = unique_sorted(long_thresholds)
+    short_thresholds = unique_sorted(short_thresholds)
+    gaps = unique_sorted(gaps)
+    min_target_ratios = unique_sorted(min_target_ratios)
+    position_probability_centers = unique_sorted(
+        position_probability_centers
+        if position_probability_centers is not None
+        else [float(config.POSITION_PROBABILITY_CENTER)]
+    )
     if asymmetric:
         threshold_pairs = [(long, short) for long in long_thresholds for short in short_thresholds]
     else:
-        shared = sorted(set(long_thresholds) | set(short_thresholds))
+        shared = unique_sorted(long_thresholds + short_thresholds)
         threshold_pairs = [(value, value) for value in shared]
 
     for long_threshold, short_threshold in threshold_pairs:
         for gap in gaps:
             for min_target_ratio in min_target_ratios:
-                backtest_min_adjust = min(
-                    float(config.MIN_ADJUST_AMOUNT),
-                    float(config.INITIAL_BALANCE) * float(min_target_ratio),
-                )
-                candidates.append({
-                    "name": (
-                        f"tl{long_threshold:.2f}_ts{short_threshold:.2f}_"
-                        f"gap{gap:.2f}_mt{min_target_ratio:.3f}"
-                    ),
-                    "overrides": {
-                        "THRESHOLD_LONG": float(long_threshold),
-                        "THRESHOLD_SHORT": float(short_threshold),
-                        "SIGNAL_MIN_PROB_DIFF": float(gap),
-                        "MIN_SIGNAL_TARGET_RATIO": float(min_target_ratio),
-                        "REGIME_RANGE_MIN_SIGNAL_TARGET_RATIO": float(min_target_ratio),
-                        "REGIME_HIGH_VOL_MIN_SIGNAL_TARGET_RATIO": float(min_target_ratio),
-                        "BACKTEST_MIN_ADJUST_AMOUNT": float(backtest_min_adjust),
-                    },
-                })
+                for probability_center in position_probability_centers:
+                    backtest_min_adjust = min(
+                        float(config.MIN_ADJUST_AMOUNT),
+                        float(config.INITIAL_BALANCE) * float(min_target_ratio),
+                    )
+                    candidates.append({
+                        "name": (
+                            f"tl{long_threshold:.2f}_ts{short_threshold:.2f}_"
+                            f"gap{gap:.2f}_mt{min_target_ratio:.3f}_pc{probability_center:.2f}"
+                        ),
+                        "overrides": {
+                            "THRESHOLD_LONG": float(long_threshold),
+                            "THRESHOLD_SHORT": float(short_threshold),
+                            "SIGNAL_MIN_PROB_DIFF": float(gap),
+                            "MIN_SIGNAL_TARGET_RATIO": float(min_target_ratio),
+                            "REGIME_RANGE_MIN_SIGNAL_TARGET_RATIO": float(min_target_ratio),
+                            "REGIME_HIGH_VOL_MIN_SIGNAL_TARGET_RATIO": float(min_target_ratio),
+                            "POSITION_PROBABILITY_CENTER": float(probability_center),
+                            "BACKTEST_MIN_ADJUST_AMOUNT": float(backtest_min_adjust),
+                        },
+                    })
     return candidates
 
 
@@ -636,6 +658,7 @@ def parse_args(argv=None):
     parser.add_argument("--short-thresholds", default=os.getenv("THRESHOLD_CALIBRATION_SHORTS"), help="逗号分隔 short 阈值")
     parser.add_argument("--gaps", default=os.getenv("THRESHOLD_CALIBRATION_GAPS"), help="逗号分隔 SIGNAL_MIN_PROB_DIFF 值")
     parser.add_argument("--min-target-ratios", default=os.getenv("THRESHOLD_CALIBRATION_MIN_TARGET_RATIOS"), help="逗号分隔 MIN_SIGNAL_TARGET_RATIO 值")
+    parser.add_argument("--position-probability-centers", default=os.getenv("THRESHOLD_CALIBRATION_POSITION_PROBABILITY_CENTERS"), help="逗号分隔仓位 sizing 概率中心")
     parser.add_argument("--bins", default=os.getenv("THRESHOLD_CALIBRATION_BINS"), help="逗号分隔概率校准 bin 边界")
     parser.add_argument("--asymmetric", action="store_true", help="跑 long/short 阈值笛卡尔积；默认使用对称阈值")
     parser.add_argument(
@@ -689,6 +712,7 @@ def main(argv=None):
     default_thresholds = [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, float(config.THRESHOLD_LONG)]
     default_gaps = [0.08, 0.12, 0.16, 0.20, float(config.SIGNAL_MIN_PROB_DIFF)]
     default_min_target_ratios = [0.01, 0.02, 0.04, float(config.MIN_SIGNAL_TARGET_RATIO)]
+    default_position_probability_centers = [0.35, 0.40, 0.45, 0.50, float(config.POSITION_PROBABILITY_CENTER)]
     default_label_lookaheads = [24, 36, 48, 72]
     default_label_take_profits = [0.018, 0.022, 0.026, float(config.TAKE_PROFIT)]
     default_label_stop_losses = [0.010, 0.012, 0.014, float(config.STOP_LOSS)]
@@ -696,6 +720,10 @@ def main(argv=None):
     short_thresholds = parse_float_list(args.short_thresholds, default_thresholds)
     gaps = parse_float_list(args.gaps, default_gaps)
     min_target_ratios = parse_float_list(args.min_target_ratios, default_min_target_ratios)
+    position_probability_centers = parse_float_list(
+        args.position_probability_centers,
+        default_position_probability_centers,
+    )
     label_lookaheads = parse_int_list(args.label_lookaheads, default_label_lookaheads)
     label_take_profits = parse_float_list(args.label_take_profits, default_label_take_profits)
     label_stop_losses = parse_float_list(args.label_stop_losses, default_label_stop_losses)
@@ -727,6 +755,7 @@ def main(argv=None):
         short_thresholds,
         gaps,
         min_target_ratios,
+        position_probability_centers,
         asymmetric=bool(args.asymmetric),
     )
 
@@ -758,12 +787,11 @@ def main(argv=None):
             "backtest_min_adjust_amount": float(config.BACKTEST_MIN_ADJUST_AMOUNT),
             "live_min_adjust_amount": float(config.MIN_ADJUST_AMOUNT),
             "min_expected_net_edge": float(config.MIN_EXPECTED_NET_EDGE),
-            "position_probability_center": 0.5,
+            "position_probability_center": float(config.POSITION_PROBABILITY_CENTER),
             "position_probability_note": (
-                "PositionManager.calculate_target_ratio currently treats prob<=0.5 as zero "
-                "signal strength. Binary trade-quality models with low but calibrated probabilities "
-                "may need probability calibration or a separate sizing center before threshold changes "
-                "can create non-zero target positions."
+                "PositionManager.calculate_target_ratio treats prob<=POSITION_PROBABILITY_CENTER "
+                "as zero signal strength. Binary trade-quality models often need this sizing center "
+                "calibrated together with thresholds and min target ratio."
             ),
         },
         "probability_calibration": {

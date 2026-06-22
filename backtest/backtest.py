@@ -836,6 +836,7 @@ class Backtester:
                 "min_adjust_amount": float(self.core.min_adjust_amount),
                 "live_min_adjust_amount": float(config.MIN_ADJUST_AMOUNT),
                 "min_expected_net_edge": float(self.core.min_expected_net_edge),
+                "position_probability_center": float(self.position_manager.probability_center),
             },
             "decision_hold_examples": list(self.decision_examples),
         }
