@@ -122,6 +122,38 @@ class WeightedPredictProbaTests(unittest.TestCase):
         self.assertAlmostEqual(float(out[0]), 0.15)
         self.assertAlmostEqual(float(out[1]), 0.20)
 
+    def test_binary_trade_quality_maps_trade_prob_to_trend_direction(self):
+        models = {"lgb_v1": StubModel([0.80, 0.20], classes=[0, 1])}
+
+        long_out = signal_engine.weighted_predict_proba(
+            models,
+            object(),
+            {"lgb_v1": 1.0},
+            trend_bias="long",
+            model_metadata={"target_schema": "binary_trade_quality"},
+        )
+        short_out = signal_engine.weighted_predict_proba(
+            models,
+            object(),
+            {"lgb_v1": 1.0},
+            trend_bias="short",
+            model_metadata={"target_schema": "binary_trade_quality"},
+        )
+        neutral_out = signal_engine.weighted_predict_proba(
+            models,
+            object(),
+            {"lgb_v1": 1.0},
+            trend_bias="neutral",
+            model_metadata={"target_schema": "binary_trade_quality"},
+        )
+
+        self.assertAlmostEqual(float(long_out[0]), 0.0)
+        self.assertAlmostEqual(float(long_out[1]), 0.20)
+        self.assertAlmostEqual(float(short_out[0]), 0.20)
+        self.assertAlmostEqual(float(short_out[1]), 0.0)
+        self.assertAlmostEqual(float(neutral_out[0]), 0.0)
+        self.assertAlmostEqual(float(neutral_out[1]), 0.0)
+
     def test_empty_models_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "模型列表为空"):
             signal_engine.weighted_predict_proba({}, object(), {})

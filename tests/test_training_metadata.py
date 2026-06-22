@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -43,37 +44,41 @@ class TrainingMetadataTests(unittest.TestCase):
         # 而非硬编码某个值,避免随 .env 变更而误报。
         self.assertEqual(metadata["label_mode"], train_module._label_mode())
         self.assertIn("label_filter_summary", metadata)
-        self.assertEqual(metadata["training_balance_strategy"], "sample_weight_direction_then_regime_recency")
+        self.assertEqual(metadata["training_balance_strategy"], "sample_weight_binary_quality_recency")
         self.assertEqual(metadata["sample_weight_summary"]["method"], "unit")
         self.assertEqual(metadata["evaluation_sample_weight_summary"], {})
         self.assertEqual(metadata["label_distribution"]["all"], {"0": 10, "1": 10})
+        self.assertEqual(metadata["target_schema"], "binary_trade_quality")
+        self.assertEqual(metadata["target_labels"], {"0": "no_trade", "1": "trade"})
         self.assertTrue(metadata["final_train_on_validation"])
         self.assertEqual(metadata["final_train_rows"], 10)
         self.assertEqual(metadata["validation_rows"], 4)
         self.assertEqual(metadata["oos_rows"], 2)
         self.assertTrue(metadata["artifact_hashes"])
 
-    def test_tradable_quality_labels_turn_counter_trend_into_no_trade(self):
-        index = pd.date_range("2026-01-01", periods=6, freq="5min", tz="UTC")
-        close = pd.Series([100, 103, 100, 97, 100, 103], index=index, dtype=float)
+    def test_realistic_quality_labels_mark_only_tp_before_sl_as_trade(self):
+        index = pd.date_range("2026-01-01", periods=4, freq="5min", tz="UTC")
+        close = pd.Series([100, 100, 100, 100], index=index, dtype=float)
         df = pd.DataFrame({
             "5m_close": close,
+            "5m_high": [100.0, 102.0, 100.2, 100.2],
+            "5m_low": [100.0, 99.8, 98.5, 99.8],
             "5m_atr": 0.1,
             "volatility_15": 0.0,
             "money_flow_ratio": 1.0,
-            "15m_ema_20": close * 1.01,
-            "15m_ema_60": close * 1.05,
+            "15m_ema_20": close * 0.99,
+            "15m_ema_60": close * 0.98,
         }, index=index)
 
-        labeled = train_module.create_labels(
-            df,
-            future_window=1,
-            threshold=0.01,
-            tradable_only=True,
-        )
+        with patch.dict(os.environ, {
+            "MODEL_LABEL_USE_REALISTIC": "1",
+            "MODEL_LABEL_LOOKAHEAD_BARS": "1",
+            "MODEL_LABEL_TAKE_PROFIT": "0.01",
+            "MODEL_LABEL_STOP_LOSS": "0.01",
+        }):
+            labeled = train_module.create_labels(df, future_window=1, threshold=0.01)
 
-        self.assertGreater(labeled.attrs["label_filter_summary"]["blocked_rows"], 0)
-        self.assertIn(2, set(labeled["target"].astype(int)))
+        self.assertIn(1, set(labeled["target"].astype(int)))
         self.assertIn(0, set(labeled["target"].astype(int)))
         self.assertGreater(len(labeled), 0)
 
@@ -82,6 +87,8 @@ class TrainingMetadataTests(unittest.TestCase):
         close = pd.Series([100.0, 100.1, 100.0, 100.1], index=index)
         df = pd.DataFrame({
             "5m_close": close,
+            "5m_high": close + 0.1,
+            "5m_low": close - 0.1,
             "5m_atr": 0.1,
             "volatility_15": 0.0,
             "money_flow_ratio": 1.0,
@@ -89,16 +96,17 @@ class TrainingMetadataTests(unittest.TestCase):
             "15m_ema_60": close,
         }, index=index)
 
-        labeled = train_module.create_labels(
-            df,
-            future_window=1,
-            threshold=0.01,
-            tradable_only=True,
-        )
+        with patch.dict(os.environ, {
+            "MODEL_LABEL_USE_REALISTIC": "1",
+            "MODEL_LABEL_LOOKAHEAD_BARS": "1",
+            "MODEL_LABEL_TAKE_PROFIT": "0.01",
+            "MODEL_LABEL_STOP_LOSS": "0.01",
+        }):
+            labeled = train_module.create_labels(df, future_window=1, threshold=0.01)
 
-        self.assertEqual(set(labeled["target"].astype(int)), {2})
+        self.assertEqual(set(labeled["target"].astype(int)), {0})
 
-    def test_raw_labels_can_keep_counter_trend_long_for_ab(self):
+    def test_threshold_labels_mark_large_moves_as_trade(self):
         index = pd.date_range("2026-01-01", periods=3, freq="5min", tz="UTC")
         close = pd.Series([100, 103, 100], index=index, dtype=float)
         df = pd.DataFrame({
@@ -110,14 +118,15 @@ class TrainingMetadataTests(unittest.TestCase):
             "15m_ema_60": close * 1.05,
         }, index=index)
 
-        labeled = train_module.create_labels(
-            df,
-            future_window=1,
-            threshold=0.01,
-            tradable_only=False,
-        )
+        with patch.dict(os.environ, {"MODEL_LABEL_USE_REALISTIC": "0"}):
+            labeled = train_module.create_labels(
+                df,
+                future_window=1,
+                threshold=0.01,
+                tradable_only=False,
+            )
 
-        self.assertEqual(set(labeled["target"].astype(int)), {0, 1})
+        self.assertEqual(set(labeled["target"].astype(int)), {1})
         self.assertFalse(labeled.attrs["label_filter_summary"]["enabled"])
 
     def test_balance_samples_preserves_order_and_returns_weights(self):
@@ -137,7 +146,7 @@ class TrainingMetadataTests(unittest.TestCase):
         self.assertEqual(list(sample_weight.index), list(index))
         self.assertEqual(len(X_balanced), len(X))
         self.assertEqual(summary["rows"], len(y))
-        self.assertEqual(summary["method"], "direction_then_regime_inverse_frequency_with_recency")
+        self.assertEqual(summary["method"], "binary_inverse_frequency_with_recency")
 
     def test_sample_weights_balance_directions_before_regime_groups(self):
         index = pd.date_range("2026-01-01", periods=8, freq="5min", tz="UTC")
@@ -147,7 +156,7 @@ class TrainingMetadataTests(unittest.TestCase):
             "regime_range_high_vol": [0, 0, 0, 0, 0, 0, 0, 1],
             "is_high_vol": [0, 0, 0, 0, 0, 0, 0, 1],
         }, index=index)
-        y = pd.Series([1, 1, 1, 1, 0, 0, 0, 2], index=index)
+        y = pd.Series([1, 1, 1, 1, 0, 0, 0, 0], index=index)
 
         sample_weight, _ = train_module.build_sample_weights(
             X,
@@ -161,10 +170,10 @@ class TrainingMetadataTests(unittest.TestCase):
         direction_totals = sample_weight.groupby(directions).sum()
         group_totals = sample_weight.groupby(regimes + ":" + directions).sum()
 
-        self.assertEqual(len(direction_totals), 3)
+        self.assertEqual(len(direction_totals), 2)
         for value in direction_totals:
-            self.assertAlmostEqual(value, 8 / 3)
-        self.assertAlmostEqual(group_totals["trend_long:short"], group_totals["trend_short:short"])
+            self.assertAlmostEqual(value, 4)
+        self.assertAlmostEqual(group_totals["all:trade"], group_totals["all:no_trade"])
 
     def test_write_json_atomic_round_trips_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:

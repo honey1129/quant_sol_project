@@ -135,13 +135,13 @@ class ImportantNotificationTests(unittest.TestCase):
             },
         )
 
-        self.assertIn("本轮动作: 暂不交易", message)
-        self.assertIn("冷却中，剩余 27 根K线", message)
+        self.assertIn("本轮决策: 暂不交易", message)
+        self.assertIn("冷却中，还需等 27 根K线才能交易", message)
         self.assertIn("模拟盘权益（虚拟资金） 93854.22 USDT", message)
-        self.assertIn("做多 86.8%", message)
-        self.assertIn("行情 高波动震荡，趋势 中性", message)
-        self.assertIn("最近HOLD原因: 冷却中，避免刚交易完立刻反复进出 10次", message)
-        self.assertIn("权益变化 本次新增统计", message)
+        self.assertIn("看涨概率 86.8%", message)
+        self.assertIn("市场环境: 高波动震荡，趋势 中性", message)
+        self.assertIn("最近不交易的原因统计: 冷却中，避免刚交易完立刻反复进出 10次", message)
+        self.assertIn("变化 本次新增统计", message)
         self.assertNotIn("long=0.868", message)
         self.assertNotIn("target=0.0000", message)
 
@@ -164,7 +164,7 @@ class ImportantNotificationTests(unittest.TestCase):
             decision={"action": "HOLD", "reason": "Cooldown(5)", "risk": {}},
         )
 
-        self.assertIn("权益变化 +870.50 USDT（+0.94%）", message)
+        self.assertIn("变化 +870.50 USDT（+0.94%）", message)
 
     def test_runtime_summary_shows_negative_equity_change(self):
         trader = LiveTrader.__new__(LiveTrader)
@@ -185,7 +185,7 @@ class ImportantNotificationTests(unittest.TestCase):
             decision={"action": "HOLD", "reason": "Cooldown(5)", "risk": {}},
         )
 
-        self.assertIn("权益变化 -470.00 USDT（-0.50%）", message)
+        self.assertIn("变化 -470.00 USDT（-0.50%）", message)
 
 
 if __name__ == "__main__":

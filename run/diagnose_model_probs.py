@@ -1,7 +1,7 @@
 """模型概率诊断脚本。
 
 用真实行情过一遍当前集成模型,量化:
-- long/short 概率分布(是否被"卡死"成常数,这是非平稳特征导致的典型故障)
+- 策略可用的 long/short 概率分布(二分类质量模型会先按 trend_bias 映射方向)
 - 方向命中率(预测方向 vs 未来收益符号,>50% 才优于抛硬币)
 - 通过做多/做空门槛的 bar 数量是否大致均衡
 
@@ -12,6 +12,7 @@
 配合 OOS 回测一起看(回测看 PnL,本脚本看概率质量)。
 """
 import argparse
+import json
 import os
 
 import joblib
@@ -24,6 +25,7 @@ from core.ml_feature_engineering import (
     merge_multi_period_features,
 )
 from core.okx_api import OKXClient
+from core.trend_filter import derive_trend_context
 from utils.utils import BASE_DIR
 
 
@@ -42,13 +44,29 @@ def diagnose(bars=1500):
 
     feature_cols = joblib.load(os.path.join(BASE_DIR, config.FEATURE_LIST_PATH))
     models = signal_engine.load_models(config.MODEL_PATHS)
+    metadata_path = os.path.join(BASE_DIR, config.TRAINING_METADATA_PATH)
+    model_metadata = {}
+    if os.path.exists(metadata_path):
+        with open(metadata_path, "r", encoding="utf-8") as file:
+            model_metadata = json.load(file)
     X = merged[feature_cols].astype(float)
 
     n = min(int(bars), len(X) - config.MODEL_LABEL_FUTURE_WINDOW)
     longs, shorts = [], []
     for i in range(len(X) - n, len(X)):
+        trend_context = derive_trend_context(
+            merged.iloc[i],
+            interval=config.TREND_FILTER_INTERVAL,
+            fast_col=config.TREND_FILTER_FAST_COL,
+            slow_col=config.TREND_FILTER_SLOW_COL,
+            min_gap=config.TREND_FILTER_MIN_GAP,
+        )
         probs = signal_engine.weighted_predict_proba(
-            models, X.iloc[i:i + 1], config.MODEL_WEIGHTS
+            models,
+            X.iloc[i:i + 1],
+            config.MODEL_WEIGHTS,
+            trend_bias=trend_context.get("trend_bias"),
+            model_metadata=model_metadata,
         )
         shorts.append(probs[0])
         longs.append(probs[1])
@@ -56,7 +74,7 @@ def diagnose(bars=1500):
     shorts = np.array(shorts)
     gap = np.abs(longs - shorts)
 
-    print(f"\nlast {n} bars ensemble (directional probs, no_trade mass ignored):")
+    print(f"\nlast {n} bars ensemble (strategy directional probs):")
     print("  long_prob  q0/25/50/75/100:", _quantiles(longs), "mean", round(longs.mean(), 3))
     print("  short_prob q0/25/50/75/100:", _quantiles(shorts), "mean", round(shorts.mean(), 3))
     print("  |gap|      q0/25/50/75/100:", _quantiles(gap))

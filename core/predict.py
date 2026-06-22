@@ -1,5 +1,6 @@
 # predict_engine.py
 
+import json
 import os
 import joblib
 import pandas as pd
@@ -20,6 +21,14 @@ class MultiPeriodSignalPredictor:
         self.model_paths = {name: os.path.join(BASE_DIR, path) for name, path in config.MODEL_PATHS.items()}
         self.models = {name: joblib.load(path) for name, path in self.model_paths.items()}
         self.model_weights = config.MODEL_WEIGHTS
+        metadata_path = os.path.join(BASE_DIR, config.TRAINING_METADATA_PATH)
+        self.model_metadata = {}
+        if os.path.exists(metadata_path):
+            try:
+                with open(metadata_path, "r", encoding="utf-8") as file:
+                    self.model_metadata = json.load(file)
+            except Exception:
+                self.model_metadata = {}
         self.core = StrategyCore(
             PositionManager(),
             threshold_long=config.THRESHOLD_LONG,
@@ -86,9 +95,6 @@ class MultiPeriodSignalPredictor:
         X_live = merged_df[feature_cols].iloc[-1:].astype(float)
         X_live = pd.DataFrame(X_live, columns=feature_cols)
 
-        # 多模型融合预测
-        avg_prob = signal_engine.weighted_predict_proba(self.models, X_live, self.model_weights)
-        long_prob, short_prob = avg_prob[1], avg_prob[0]
         price = float(merged_df["5m_close"].iloc[-1])
         money_flow_ratio = float(merged_df["money_flow_ratio"].iloc[-1])
         volatility = float(merged_df["volatility_15"].iloc[-1])
@@ -114,6 +120,15 @@ class MultiPeriodSignalPredictor:
             high_volatility_threshold=config.REGIME_HIGH_VOLATILITY_THRESHOLD,
             money_flow_extreme_threshold=config.REGIME_MONEY_FLOW_EXTREME_THRESHOLD,
         )
+        # 多模型融合预测。二分类质量模型需要当前 trend_bias 才能映射到多/空方向。
+        avg_prob = signal_engine.weighted_predict_proba(
+            self.models,
+            X_live,
+            self.model_weights,
+            trend_bias=trend_context.get("trend_bias"),
+            model_metadata=self.model_metadata,
+        )
+        long_prob, short_prob = avg_prob[1], avg_prob[0]
 
         print(
             f"实时预测概率 => 多头: {long_prob:.3f} | 空头: {short_prob:.3f} | "

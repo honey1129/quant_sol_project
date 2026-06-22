@@ -26,6 +26,12 @@ from utils.utils import BASE_DIR, LOGS_DIR, log_info
 
 
 DIRECTION_LABELS = {0: "short", 1: "long", 2: "no_trade"}
+BINARY_LABELS = {0: "no_trade", 1: "trade"}
+
+
+def is_binary_trade_quality(metadata):
+    label_mode = str((metadata or {}).get("target_schema") or (metadata or {}).get("label_mode") or "").lower()
+    return label_mode == "binary_trade_quality" or label_mode.startswith("binary_")
 
 
 def json_safe(value):
@@ -78,9 +84,11 @@ def load_model_bundle(model_root):
     }
 
 
-def weighted_predict_matrix(models, X, model_weights):
+def weighted_predict_matrix(models, X, model_weights, *, trend_biases=None, model_metadata=None):
     weighted_sum = None
     used_weight_total = 0.0
+    binary_quality = is_binary_trade_quality(model_metadata)
+    trend_biases = list(trend_biases) if trend_biases is not None else [None] * len(X)
     for name, model in models.items():
         weight = float(model_weights.get(name, 1.0))
         if not math.isfinite(weight) or weight < 0:
@@ -93,9 +101,23 @@ def weighted_predict_matrix(models, X, model_weights):
             raise ValueError(f"模型 {name} 返回的概率矩阵维度不正确: {raw_probs.shape!r}")
         classes = list(getattr(model, "classes_", range(raw_probs.shape[1])))
         probs = np.zeros((len(X), 3), dtype=float)
-        for label in (0, 1, 2):
-            if label in classes:
-                probs[:, label] = raw_probs[:, classes.index(label)]
+        if binary_quality and 2 not in classes:
+            trade_probs = raw_probs[:, classes.index(1)] if 1 in classes else np.zeros(len(X))
+            no_trade_probs = raw_probs[:, classes.index(0)] if 0 in classes else np.zeros(len(X))
+            for row_idx, trend_bias in enumerate(trend_biases):
+                trend_bias = str(trend_bias or "").lower()
+                if trend_bias == "long":
+                    probs[row_idx, 1] = trade_probs[row_idx]
+                    probs[row_idx, 2] = no_trade_probs[row_idx]
+                elif trend_bias == "short":
+                    probs[row_idx, 0] = trade_probs[row_idx]
+                    probs[row_idx, 2] = no_trade_probs[row_idx]
+                else:
+                    probs[row_idx, 2] = 1.0
+        else:
+            for label in (0, 1, 2):
+                if label in classes:
+                    probs[:, label] = raw_probs[:, classes.index(label)]
         if weighted_sum is None:
             weighted_sum = np.zeros_like(probs, dtype=float)
         weighted_sum += probs * weight
@@ -149,14 +171,35 @@ def enrich_regime_context(data):
 
 def add_predictions(data, bundle):
     X = data[bundle["feature_cols"]].astype(float)
-    probs = weighted_predict_matrix(bundle["models"], X, bundle["model_weights"])
+    metadata = bundle.get("metadata") or {}
+    probs = weighted_predict_matrix(
+        bundle["models"],
+        X,
+        bundle["model_weights"],
+        trend_biases=data.get("diag_trend_bias"),
+        model_metadata=metadata,
+    )
     data = data.copy()
     data["short_prob"] = probs[:, 0]
     data["long_prob"] = probs[:, 1]
     data["no_trade_prob"] = probs[:, 2]
     data["pred_label"] = np.argmax(probs, axis=1)
     data["pred_direction"] = data["pred_label"].map(DIRECTION_LABELS)
-    data["actual_direction"] = data["target"].astype(int).map(DIRECTION_LABELS)
+    if is_binary_trade_quality(metadata):
+        actual_labels = []
+        for _, row in data.iterrows():
+            if int(row["target"]) == 1 and row.get("diag_trend_bias") == "long":
+                actual_labels.append(1)
+            elif int(row["target"]) == 1 and row.get("diag_trend_bias") == "short":
+                actual_labels.append(0)
+            else:
+                actual_labels.append(2)
+        data["actual_label"] = actual_labels
+        data["actual_binary_label"] = data["target"].astype(int).map(BINARY_LABELS)
+    else:
+        data["actual_label"] = data["target"].astype(int)
+        data["actual_binary_label"] = None
+    data["actual_direction"] = data["actual_label"].astype(int).map(DIRECTION_LABELS)
     data["prob_gap"] = (data["long_prob"] - data["short_prob"]).abs()
     return data
 
@@ -215,7 +258,7 @@ def quantiles(values):
 
 
 def classification_metrics(group):
-    y_true = group["target"].astype(int)
+    y_true = group["actual_label"].astype(int)
     y_pred = group["pred_label"].astype(int)
     precision, recall, f1, support = precision_recall_fscore_support(
         y_true,

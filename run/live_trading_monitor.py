@@ -198,6 +198,14 @@ class LiveTrader:
         # ===== 模型/特征=====
         feature_path = os.path.join(BASE_DIR, config.FEATURE_LIST_PATH) if "BASE_DIR" in globals() else config.FEATURE_LIST_PATH
         self.feature_cols = joblib.load(feature_path)
+        metadata_path = os.path.join(BASE_DIR, config.TRAINING_METADATA_PATH) if "BASE_DIR" in globals() else config.TRAINING_METADATA_PATH
+        self.model_metadata = {}
+        if os.path.exists(metadata_path):
+            try:
+                with open(metadata_path, "r", encoding="utf-8") as file:
+                    self.model_metadata = json.load(file)
+            except Exception as exc:
+                log_error(f"模型训练元数据读取失败，按旧方向模型处理: {exc}")
 
         model_paths = {n: os.path.join(BASE_DIR, p) for n, p in config.MODEL_PATHS.items()} if "BASE_DIR" in globals() else config.MODEL_PATHS
         self.models = signal_engine.load_models(model_paths)
@@ -302,11 +310,25 @@ class LiveTrader:
             else:
                 return 0.50, 0.50
 
+        trend_context = derive_trend_context(
+            row,
+            interval=config.TREND_FILTER_INTERVAL,
+            fast_col=config.TREND_FILTER_FAST_COL,
+            slow_col=config.TREND_FILTER_SLOW_COL,
+            min_gap=config.TREND_FILTER_MIN_GAP,
+        )
+
         # 正常ML模式
         X = row[self.feature_cols].values.reshape(1, -1).astype(float)
         X = pd.DataFrame(X, columns=self.feature_cols)
 
-        avg = signal_engine.weighted_predict_proba(self.models, X, self.model_weights)
+        avg = signal_engine.weighted_predict_proba(
+            self.models,
+            X,
+            self.model_weights,
+            trend_bias=trend_context.get("trend_bias"),
+            model_metadata=self.model_metadata,
+        )
         long_prob, short_prob = float(avg[1]), float(avg[0])
         return long_prob, short_prob
 
