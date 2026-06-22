@@ -119,6 +119,19 @@ class TradeThresholdCalibrationTests(unittest.TestCase):
         self.assertEqual(len(candidates), 4)
         self.assertEqual(candidates[0]["name"], "lh24_tp0.020_sl0.010")
 
+    def test_build_threshold_candidates_includes_position_probability_center(self):
+        candidates = calibration.build_candidates(
+            long_thresholds=[0.6],
+            short_thresholds=[0.6],
+            gaps=[0.1],
+            min_target_ratios=[0.04],
+            position_probability_centers=[0.4],
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["name"], "tl0.60_ts0.60_gap0.10_mt0.040_pc0.40")
+        self.assertEqual(candidates[0]["overrides"]["POSITION_PROBABILITY_CENTER"], 0.4)
+
     def test_write_report_replaces_atomically_without_tmp_leftover(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "report.json")

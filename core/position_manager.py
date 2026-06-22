@@ -5,16 +5,32 @@ import math
 from config import config
 
 class PositionManager:
-    def __init__(self, min_ratio=None, max_ratio=None):
+    def __init__(self, min_ratio=None, max_ratio=None, probability_center=None):
         self.min_ratio = float(config.POSITION_MIN if min_ratio is None else min_ratio)
         self.max_ratio = float(config.POSITION_MAX if max_ratio is None else max_ratio)
+        self.probability_center = self._validate_probability_center(
+            config.POSITION_PROBABILITY_CENTER if probability_center is None else probability_center
+        )
         self.adjust_unit = config.ADJUST_UNIT
 
-    def set_bounds(self, *, min_ratio=None, max_ratio=None):
+    def _validate_probability_center(self, value):
+        value = float(value)
+        if not math.isfinite(value) or value < 0.0 or value >= 1.0:
+            raise ValueError("POSITION_PROBABILITY_CENTER must be in [0, 1)")
+        return value
+
+    def set_bounds(self, *, min_ratio=None, max_ratio=None, probability_center=None):
         if min_ratio is not None:
             self.min_ratio = float(min_ratio)
         if max_ratio is not None:
             self.max_ratio = max(float(max_ratio), self.min_ratio)
+        if probability_center is not None:
+            self.probability_center = self._validate_probability_center(probability_center)
+
+    def signal_strength(self, prob):
+        prob = max(0.0, min(1.0, float(prob)))
+        denominator = max(1e-9, 1.0 - self.probability_center)
+        return max(0.0, min(1.0, (prob - self.probability_center) / denominator))
 
     # Kelly公式计算
     def kelly_fraction(self, prob, reward_risk):
@@ -62,7 +78,7 @@ class PositionManager:
 
     # 最终目标仓位比例
     def calculate_target_ratio(self, prob, money_flow_ratio, volatility,reward_risk=1.0):
-        signal_strength = max(0, prob - 0.5) * 2
+        signal_strength = self.signal_strength(prob)
         kelly_weight = self.kelly_fraction(prob,reward_risk)
         multi_factor = self.multi_factor_score(prob, money_flow_ratio, volatility)
         blended_ratio = self.min_ratio + signal_strength * (self.max_ratio - self.min_ratio)

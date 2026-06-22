@@ -332,7 +332,7 @@ MODEL_SAMPLE_WEIGHT_MIN=0.25
 MODEL_SAMPLE_WEIGHT_MAX=20.0
 MODEL_TRAIN_RATIO=0.70
 MODEL_VALIDATION_RATIO=0.15
-MODEL_PURGE_BARS=8
+MODEL_PURGE_BARS=24
 MODEL_FINAL_TRAIN_ON_VALIDATION=1
 MODEL_WALK_FORWARD_ENABLED=1
 MODEL_WALK_FORWARD_FOLDS=3
@@ -342,6 +342,7 @@ MODEL_WALK_FORWARD_MIN_VALIDATION_ROWS=100
 # 仓位边界
 POSITION_MIN=0.08
 POSITION_MAX=0.45
+POSITION_PROBABILITY_CENTER=0.45
 BASE_POSITION_RATIO=0.12
 MAX_POSITION_RATIO=0.45
 MIN_ADJUST_AMOUNT=150
@@ -464,12 +465,13 @@ POLL_SEC=10
 - `MODEL_TRAIN_TRADABLE_LABELS=0` / `MODEL_TRAIN_NO_TRADE_LABELS=1`：训练标签保留原始方向和 no_trade 质量标签；regime/trend 过滤留在交易决策层执行。
 - `MODEL_USE_RUBIK_FEATURES=0`：Rubik OI/taker/多空比特征默认关闭。开启前应重新训练并用 OOS 回测确认收益质量。
 - `THRESHOLD_LONG=0.56` / `THRESHOLD_SHORT=0.56` / `SIGNAL_MIN_PROB_DIFF=0.12`：当前示例阈值配合新版标签和模型概率尺度，复制旧模型时不要盲目套用。
+- `POSITION_PROBABILITY_CENTER=0.45`：仓位 sizing 的概率起点；二分类质量模型的概率更稀疏，需和阈值、`MIN_SIGNAL_TARGET_RATIO` 一起校准。
 - `REGIME_HIGH_VOL_ALLOW_TRADES=false` / `REGIME_TREND_AGAINST_BLOCK=true`：高波动趋势区间不放行逆势交易，尤其防止 `trend_short` 中强行开多。
 - `MIN_ADJUST_AMOUNT=150` / `BACKTEST_MIN_ADJUST_AMOUNT=40`：实盘最小调仓和回测最小调仓分开配置，避免小额回测收益被线上最小交易额吞掉。
 - `MAX_POSITION_RATIO=0.45` / `LEVERAGE=3`：示例仍是测试盘参数，真实资金前要重新按账户权益调小。
 - `DYNAMIC_RISK_ENABLED=0`：新版示例先关闭动态风险缩放，避免和阈值校准同时改变；需要时再单独 A/B。
 - `MODEL_RECENT_SAMPLE_WEIGHT_BOOST=0.15`：训练不随机下采样；样本权重先平衡 long/short/no_trade，再在方向内部按 regime 平衡，并轻微提高近期样本权重。
-- `MODEL_TRAIN_RATIO` / `MODEL_VALIDATION_RATIO` / `MODEL_PURGE_BARS`：训练区、验证区、最终 OOS 回测区按时间切开，中间留 purge gap。
+- `MODEL_TRAIN_RATIO` / `MODEL_VALIDATION_RATIO` / `MODEL_PURGE_BARS`：训练区、验证区、最终 OOS 回测区按时间切开，中间留 purge gap；realistic 标签默认 lookahead 为 24 根，因此示例 purge 也设为 24。
 - `MODEL_FINAL_TRAIN_ON_VALIDATION=1`：验证指标仍来自严格时间切分；最终保存的模型用 OOS 之前的 train+validation 历史段重训，减少线上模型滞后。
 - `MODEL_WALK_FORWARD_ENABLED=1`：重训准入前会在验证区内做滚动 walk-forward 验证。
 - `MODEL_RETRAIN_MIN_*` / `MODEL_RETRAIN_REGIME_GATE_*`：候选模型必须满足 OOS 交易数、胜率、PF、平均盈亏比、手续费后收益和 regime 偏置门槛；不达标会保留旧模型并回滚。
@@ -519,7 +521,8 @@ python -m run.calibrate_trade_thresholds --split oos --asymmetric \
   --long-thresholds 0.45,0.50,0.55,0.60 \
   --short-thresholds 0.40,0.45,0.50,0.55,0.60 \
   --gaps 0.04,0.08,0.12 \
-  --min-target-ratios 0.01,0.02,0.04
+  --min-target-ratios 0.01,0.02,0.04 \
+  --position-probability-centers 0.35,0.40,0.45,0.50
 ```
 
 脚本会把 Brier、ECE、概率分桶、候选阈值回测结果写入 `logs/trade_threshold_calibration_*.json`。如需验证概率校准器，可额外加：
