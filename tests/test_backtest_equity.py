@@ -51,6 +51,44 @@ class BacktestSizingTests(unittest.TestCase):
 
         self.assertEqual(backtester.core.min_adjust_amount, 40.0)
 
+    def test_force_close_end_position_records_closed_trade(self):
+        data = pd.DataFrame(
+            {
+                "5m_open": [100.0],
+                "5m_high": [101.0],
+                "5m_low": [99.0],
+                "5m_close": [101.0],
+            },
+            index=pd.date_range("2026-01-01", periods=1, freq="5min"),
+        )
+        with patch.object(Backtester, "_load_data", return_value=({}, 2.8)):
+            with patch.object(Backtester, "_load_funding_history", return_value=pd.DataFrame()):
+                backtester = Backtester(
+                    "multi_period",
+                    10,
+                    data_dict={},
+                    reward_risk=2.8,
+                    precomputed_data=data,
+                    feature_cols=[],
+                    models={},
+                    model_weights={},
+                    enable_csv_dump=False,
+                    show_progress=False,
+                    emit_diagnostics=False,
+                )
+
+        backtester.position = 2.0
+        backtester.entry_price = 100.0
+        backtester.balance = 1000.0
+        backtester.last_closed_balance = 1000.0
+
+        self.assertTrue(backtester._force_close_end_position(data.iloc[-1]))
+
+        self.assertEqual(backtester.position, 0.0)
+        self.assertEqual(len(backtester.closed_trade_pnls), 1)
+        self.assertGreater(backtester.closed_trade_pnls[0], 0.0)
+        self.assertEqual(backtester.trade_log[-1][1], "期末平仓")
+
 
 if __name__ == "__main__":
     unittest.main()

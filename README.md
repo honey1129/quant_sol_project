@@ -380,6 +380,7 @@ DYNAMIC_RISK_WEAK_SIGNAL_THRESHOLD=0.16
 MAX_POSITION=0.4
 INITIAL_BALANCE=1000
 BACKTEST_MIN_ADJUST_AMOUNT=40
+BACKTEST_FORCE_CLOSE_ON_END=1
 
 # 手续费/滑点感知
 FEE_RATE=0.0005
@@ -468,6 +469,7 @@ POLL_SEC=10
 - `POSITION_PROBABILITY_CENTER=0.45`：仓位 sizing 的概率起点；二分类质量模型的概率更稀疏，需和阈值、`MIN_SIGNAL_TARGET_RATIO` 一起校准。
 - `REGIME_HIGH_VOL_ALLOW_TRADES=false` / `REGIME_TREND_AGAINST_BLOCK=true`：高波动趋势区间不放行逆势交易，尤其防止 `trend_short` 中强行开多。
 - `MIN_ADJUST_AMOUNT=150` / `BACKTEST_MIN_ADJUST_AMOUNT=40`：实盘最小调仓和回测最小调仓分开配置，避免小额回测收益被线上最小交易额吞掉。
+- `BACKTEST_FORCE_CLOSE_ON_END=1`：回测/重训验证窗口结束时强制按最后收盘价结算未平仓，避免 walk-forward 折内最后一笔交易漏计平仓数和 PF。
 - `MAX_POSITION_RATIO=0.45` / `LEVERAGE=3`：示例仍是测试盘参数，真实资金前要重新按账户权益调小。
 - `DYNAMIC_RISK_ENABLED=0`：新版示例先关闭动态风险缩放，避免和阈值校准同时改变；需要时再单独 A/B。
 - `MODEL_RECENT_SAMPLE_WEIGHT_BOOST=0.15`：训练不随机下采样；样本权重先平衡 long/short/no_trade，再在方向内部按 regime 平衡，并轻微提高近期样本权重。
