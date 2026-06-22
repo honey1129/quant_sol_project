@@ -1,6 +1,8 @@
 import unittest
 import os
 import tempfile
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -119,6 +121,28 @@ class TradeThresholdCalibrationTests(unittest.TestCase):
         self.assertEqual(len(candidates), 4)
         self.assertEqual(candidates[0]["name"], "lh24_tp0.020_sl0.010")
 
+    def test_candidate_metadata_uses_explicit_purge_for_label_lookahead(self):
+        index = pd.date_range("2026-01-01", periods=20, freq="5min", tz="UTC")
+        candidate = {
+            "name": "lh48_tp0.020_sl0.012",
+            "lookahead_bars": 48,
+            "take_profit": 0.02,
+            "stop_loss": 0.012,
+        }
+
+        metadata = calibration.build_candidate_metadata(
+            index,
+            ["a", "b"],
+            candidate,
+            split_positions=(10, 12, 16, 18),
+            final_train_end=16,
+            purge_bars=48,
+        )
+
+        self.assertEqual(metadata["purge_bars"], 48)
+        self.assertEqual(metadata["label_lookahead_bars"], 48)
+        self.assertEqual(metadata["final_train_rows"], 16)
+
     def test_build_threshold_candidates_includes_position_probability_center(self):
         candidates = calibration.build_candidates(
             long_thresholds=[0.6],
@@ -131,6 +155,72 @@ class TradeThresholdCalibrationTests(unittest.TestCase):
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0]["name"], "tl0.60_ts0.60_gap0.10_mt0.040_pc0.40")
         self.assertEqual(candidates[0]["overrides"]["POSITION_PROBABILITY_CENTER"], 0.4)
+
+    def test_label_strength_model_sweep_reports_best_threshold(self):
+        index = pd.date_range("2026-01-01", periods=4, freq="5min", tz="UTC")
+        predicted = pd.DataFrame({
+            "target": [0, 1, 0, 1],
+            "actual_label": [2, 1, 2, 0],
+            "long_prob": [0.2, 0.8, 0.3, 0.1],
+            "short_prob": [0.1, 0.2, 0.2, 0.9],
+            "diag_trend_bias": ["neutral", "long", "neutral", "short"],
+            "diag_regime": ["range", "trend_long", "range", "trend_short"],
+        }, index=index)
+        metadata = {
+            "validation_start": index[0].isoformat(),
+            "validation_end": index[-1].isoformat(),
+            "oos_start": index[0].isoformat(),
+        }
+        threshold_candidates = [{
+            "name": "tl0.50_ts0.50_gap0.10_mt0.020_pc0.40",
+            "overrides": {
+                "THRESHOLD_LONG": 0.5,
+                "THRESHOLD_SHORT": 0.5,
+                "SIGNAL_MIN_PROB_DIFF": 0.1,
+                "MIN_SIGNAL_TARGET_RATIO": 0.02,
+                "REGIME_RANGE_MIN_SIGNAL_TARGET_RATIO": 0.02,
+                "REGIME_HIGH_VOL_MIN_SIGNAL_TARGET_RATIO": 0.02,
+                "POSITION_PROBABILITY_CENTER": 0.4,
+                "BACKTEST_MIN_ADJUST_AMOUNT": 20.0,
+            },
+        }]
+
+        with patch.object(calibration, "fit_label_strength_candidate", return_value=(predicted, metadata, {"rows": 2})):
+            with patch.object(calibration, "run_candidate", return_value={
+                "closed_trade_count": 2,
+                "trade_count": 2,
+                "net_pnl_after_costs": 3.0,
+                "profit_factor": 2.0,
+                "win_rate_pct": 50.0,
+                "max_drawdown_pct": -0.1,
+            }):
+                report = calibration.build_label_strength_model_sweep(
+                    SimpleNamespace(data=predicted),
+                    ["feature"],
+                    "validation",
+                    None,
+                    [{
+                        "name": "lh24_tp0.020_sl0.012",
+                        "lookahead_bars": 24,
+                        "take_profit": 0.02,
+                        "stop_loss": 0.012,
+                    }],
+                    threshold_candidates,
+                    top_n=1,
+                    probability_method="none",
+                    probability_source="selected",
+                    probability_rows=None,
+                    bins=[0.0, 0.5, 1.0],
+                    min_closed_trades=1,
+                    target_trade_pct=50.0,
+                    min_trade_rows=1,
+                )
+
+        self.assertTrue(report["enabled"])
+        self.assertEqual(report["recommended"][0]["label_name"], "lh24_tp0.020_sl0.012")
+        self.assertEqual(report["recommended"][0]["profit_factor"], 2.0)
+        self.assertNotIn("_rank_score", report["recommended"][0])
+        self.assertEqual(report["candidates"][0]["best_threshold"]["name"], threshold_candidates[0]["name"])
 
     def test_write_report_replaces_atomically_without_tmp_leftover(self):
         with tempfile.TemporaryDirectory() as tmpdir:
