@@ -46,6 +46,38 @@ def parse_float_list(value, default):
     return result
 
 
+def parse_int_list(value, default):
+    if value is None or str(value).strip() == "":
+        return list(default)
+    result = []
+    for item in str(value).split(","):
+        item = item.strip()
+        if not item:
+            continue
+        result.append(int(item))
+    return result
+
+
+@contextlib.contextmanager
+def temporary_env(overrides):
+    originals = {}
+    missing = set()
+    for key, value in overrides.items():
+        if key in os.environ:
+            originals[key] = os.environ[key]
+        else:
+            missing.add(key)
+        os.environ[key] = str(value)
+    try:
+        yield
+    finally:
+        for key in overrides:
+            if key in missing:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = originals[key]
+
+
 def apply_overrides(overrides):
     originals = {}
     for key, value in overrides.items():
@@ -82,9 +114,8 @@ def load_all_diagnostic_data(model_root, raw_labels=False):
 
 
 def calibration_bins(data, direction, bins, prob_col=None):
-    label = PROBABILITY_DIRECTIONS[direction]["label"]
     prob_col = prob_col or PROBABILITY_DIRECTIONS[direction]["raw_col"]
-    target = (data["target"].astype(int) == label).astype(float)
+    target = direction_target_series(data, direction).astype(float)
     probs = data[prob_col].astype(float)
     brier = float(np.mean((probs.to_numpy() - target.to_numpy()) ** 2))
 
@@ -148,6 +179,17 @@ def build_probability_calibration_report_for_columns(data, bins, prob_cols):
     return report
 
 
+def directional_label_series(data):
+    if "actual_label" in data.columns:
+        return data["actual_label"].astype(int)
+    return data["target"].astype(int)
+
+
+def direction_target_series(data, direction):
+    label = PROBABILITY_DIRECTIONS[direction]["label"]
+    return (directional_label_series(data) == label).astype(int)
+
+
 class ProbabilityCalibrator:
     def __init__(self, direction, method, model=None, fallback_reason=None, fitted_rows=0, positive_rows=0):
         self.direction = direction
@@ -195,12 +237,12 @@ def fit_direction_probability_calibrator(data, direction, method):
         return ProbabilityCalibrator(direction, method, fallback_reason="disabled")
 
     prob_col = PROBABILITY_DIRECTIONS[direction]["raw_col"]
-    label = PROBABILITY_DIRECTIONS[direction]["label"]
-    cleaned = data[[prob_col, "target"]].replace([np.inf, -np.inf], np.nan).dropna()
+    label_col = "actual_label" if "actual_label" in data.columns else "target"
+    cleaned = data[[prob_col, label_col]].replace([np.inf, -np.inf], np.nan).dropna()
     if cleaned.empty:
         return ProbabilityCalibrator(direction, method, fallback_reason="empty_calibration_data")
 
-    y = (cleaned["target"].astype(int) == label).astype(int).to_numpy()
+    y = direction_target_series(cleaned.rename(columns={label_col: "actual_label"}), direction).to_numpy()
     probs = cleaned[prob_col].astype(float).to_numpy()
     positive_rows = int(y.sum())
     fitted_rows = int(len(y))
@@ -306,6 +348,137 @@ def weak_signal_gate_counts(data, threshold_long, threshold_short, signal_min_pr
         "long_gate_pct": float(long_mask.mean() * 100.0) if len(data) else 0.0,
         "short_gate_pct": float(short_mask.mean() * 100.0) if len(data) else 0.0,
         "gate_pct": float((long_mask | short_mask).mean() * 100.0) if len(data) else 0.0,
+    }
+
+
+def build_label_strength_candidates(lookaheads, take_profits, stop_losses):
+    candidates = []
+    for lookahead in lookaheads:
+        for take_profit in take_profits:
+            for stop_loss in stop_losses:
+                candidates.append({
+                    "name": f"lh{int(lookahead)}_tp{float(take_profit):.3f}_sl{float(stop_loss):.3f}",
+                    "lookahead_bars": int(lookahead),
+                    "take_profit": float(take_profit),
+                    "stop_loss": float(stop_loss),
+                })
+    return candidates
+
+
+def summarize_label_strength(data, candidate, *, target_trade_pct, min_trade_rows):
+    rows = int(len(data))
+    if rows == 0:
+        return {
+            **candidate,
+            "rows": 0,
+            "trade_rows": 0,
+            "trade_pct": 0.0,
+            "score": float("-inf"),
+            "reason": "empty_label_sample",
+        }
+
+    target = data["target"].astype(int)
+    trade_mask = target == 1
+    trade_rows = int(trade_mask.sum())
+    trade_pct = float(trade_rows / rows * 100.0)
+
+    trend_bias = data.get("diag_trend_bias", pd.Series("unknown", index=data.index)).astype(str)
+    regime = data.get("diag_regime", pd.Series("unknown", index=data.index)).astype(str)
+    trade_direction_counts = {
+        "long": int((trade_mask & (trend_bias == "long")).sum()),
+        "short": int((trade_mask & (trend_bias == "short")).sum()),
+        "neutral": int((trade_mask & (trend_bias == "neutral")).sum()),
+        "unknown": int((trade_mask & (~trend_bias.isin(["long", "short", "neutral"]))).sum()),
+    }
+    directional_trade_rows = trade_direction_counts["long"] + trade_direction_counts["short"]
+    if directional_trade_rows > 0:
+        direction_imbalance_pct = abs(
+            trade_direction_counts["long"] - trade_direction_counts["short"]
+        ) / directional_trade_rows * 100.0
+    else:
+        direction_imbalance_pct = 100.0
+
+    regime_rows = data.groupby(regime).size().sort_index()
+    regime_trade_rows = data[trade_mask].groupby(regime[trade_mask]).size().sort_index()
+    by_regime = {}
+    for regime_name, regime_count in regime_rows.items():
+        regime_trade_count = int(regime_trade_rows.get(regime_name, 0))
+        by_regime[str(regime_name)] = {
+            "rows": int(regime_count),
+            "trade_rows": regime_trade_count,
+            "trade_pct": float(regime_trade_count / max(int(regime_count), 1) * 100.0),
+        }
+
+    score = -abs(trade_pct - float(target_trade_pct)) - 0.25 * direction_imbalance_pct
+    if trade_rows < int(min_trade_rows):
+        score -= (int(min_trade_rows) - trade_rows) / max(int(min_trade_rows), 1) * 100.0
+
+    return {
+        **candidate,
+        "rows": rows,
+        "trade_rows": trade_rows,
+        "no_trade_rows": int(rows - trade_rows),
+        "trade_pct": trade_pct,
+        "target_distribution": {
+            str(k): int(v)
+            for k, v in target.value_counts().sort_index().items()
+        },
+        "trade_direction_counts": trade_direction_counts,
+        "direction_imbalance_pct": float(direction_imbalance_pct),
+        "by_regime": by_regime,
+        "score": float(score),
+        "score_inputs": {
+            "target_trade_pct": float(target_trade_pct),
+            "min_trade_rows": int(min_trade_rows),
+        },
+    }
+
+
+def build_label_strength_report(
+    seed_data,
+    metadata,
+    split,
+    rows,
+    candidates,
+    *,
+    target_trade_pct,
+    min_trade_rows,
+):
+    results = []
+    for candidate in candidates:
+        with temporary_env({
+            "MODEL_LABEL_USE_REALISTIC": "1",
+            "MODEL_LABEL_LOOKAHEAD_BARS": candidate["lookahead_bars"],
+            "MODEL_LABEL_TAKE_PROFIT": candidate["take_profit"],
+            "MODEL_LABEL_STOP_LOSS": candidate["stop_loss"],
+        }):
+            labeled = td.create_labels(
+                seed_data.copy(),
+                future_window=int(config.MODEL_LABEL_FUTURE_WINDOW),
+                threshold=float(config.MODEL_LABEL_THRESHOLD),
+                tradable_only=True,
+            )
+        labeled = td.enrich_regime_context(labeled)
+        selected = td.select_split(labeled, metadata, split, rows)
+        results.append(
+            summarize_label_strength(
+                selected,
+                candidate,
+                target_trade_pct=target_trade_pct,
+                min_trade_rows=min_trade_rows,
+            )
+        )
+
+    ranked = sorted(results, key=lambda item: item.get("score", float("-inf")), reverse=True)
+    return {
+        "enabled": True,
+        "split": split,
+        "rows_limit": rows,
+        "candidate_count": int(len(candidates)),
+        "target_trade_pct": float(target_trade_pct),
+        "min_trade_rows": int(min_trade_rows),
+        "candidates": results,
+        "recommended": ranked[:10],
     }
 
 
@@ -485,6 +658,22 @@ def parse_args(argv=None):
     )
     parser.add_argument("--raw-labels", action="store_true", help="使用原始涨跌标签，不按交易门禁过滤")
     parser.add_argument("--min-closed-trades", type=int, default=int(os.getenv("THRESHOLD_CALIBRATION_MIN_CLOSED_TRADES", "5")), help="推荐排序最低平仓笔数")
+    parser.add_argument("--skip-label-strength", action="store_true", help="跳过标签强度 sweep")
+    parser.add_argument("--label-lookaheads", default=os.getenv("LABEL_STRENGTH_LOOKAHEADS"), help="逗号分隔 realistic 标签 lookahead bars")
+    parser.add_argument("--label-take-profits", default=os.getenv("LABEL_STRENGTH_TAKE_PROFITS"), help="逗号分隔 realistic 标签 TP")
+    parser.add_argument("--label-stop-losses", default=os.getenv("LABEL_STRENGTH_STOP_LOSSES"), help="逗号分隔 realistic 标签 SL")
+    parser.add_argument(
+        "--label-target-trade-pct",
+        type=float,
+        default=float(os.getenv("LABEL_STRENGTH_TARGET_TRADE_PCT", "8.0")),
+        help="标签强度推荐目标 trade 占比百分数",
+    )
+    parser.add_argument(
+        "--label-min-trade-rows",
+        type=int,
+        default=int(os.getenv("LABEL_STRENGTH_MIN_TRADE_ROWS", "80")),
+        help="标签强度推荐最低 trade 样本数",
+    )
     parser.add_argument("--output", default=None, help="报告 JSON 输出路径")
     return parser.parse_args(argv)
 
@@ -500,10 +689,16 @@ def main(argv=None):
     default_thresholds = [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, float(config.THRESHOLD_LONG)]
     default_gaps = [0.08, 0.12, 0.16, 0.20, float(config.SIGNAL_MIN_PROB_DIFF)]
     default_min_target_ratios = [0.01, 0.02, 0.04, float(config.MIN_SIGNAL_TARGET_RATIO)]
+    default_label_lookaheads = [24, 36, 48, 72]
+    default_label_take_profits = [0.018, 0.022, 0.026, float(config.TAKE_PROFIT)]
+    default_label_stop_losses = [0.010, 0.012, 0.014, float(config.STOP_LOSS)]
     long_thresholds = parse_float_list(args.long_thresholds, default_thresholds)
     short_thresholds = parse_float_list(args.short_thresholds, default_thresholds)
     gaps = parse_float_list(args.gaps, default_gaps)
     min_target_ratios = parse_float_list(args.min_target_ratios, default_min_target_ratios)
+    label_lookaheads = parse_int_list(args.label_lookaheads, default_label_lookaheads)
+    label_take_profits = parse_float_list(args.label_take_profits, default_label_take_profits)
+    label_stop_losses = parse_float_list(args.label_stop_losses, default_label_stop_losses)
     bins = parse_float_list(args.bins, [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
 
     bundle, seed_bt, labeled = load_all_diagnostic_data(args.model_root, raw_labels=args.raw_labels)
@@ -549,6 +744,11 @@ def main(argv=None):
             "oos_start": bundle["metadata"].get("oos_start"),
             "oos_end": bundle["metadata"].get("oos_end"),
             "feature_count": bundle["metadata"].get("feature_count"),
+            "target_schema": bundle["metadata"].get("target_schema"),
+            "label_mode": bundle["metadata"].get("label_mode"),
+            "label_take_profit": bundle["metadata"].get("label_take_profit"),
+            "label_stop_loss": bundle["metadata"].get("label_stop_loss"),
+            "label_lookahead_bars": bundle["metadata"].get("label_lookahead_bars"),
         },
         "base_gate_config": {
             "threshold_long": float(config.THRESHOLD_LONG),
@@ -558,6 +758,13 @@ def main(argv=None):
             "backtest_min_adjust_amount": float(config.BACKTEST_MIN_ADJUST_AMOUNT),
             "live_min_adjust_amount": float(config.MIN_ADJUST_AMOUNT),
             "min_expected_net_edge": float(config.MIN_EXPECTED_NET_EDGE),
+            "position_probability_center": 0.5,
+            "position_probability_note": (
+                "PositionManager.calculate_target_ratio currently treats prob<=0.5 as zero "
+                "signal strength. Binary trade-quality models with low but calibrated probabilities "
+                "may need probability calibration or a separate sizing center before threshold changes "
+                "can create non-zero target positions."
+            ),
         },
         "probability_calibration": {
             "method": args.probability_calibration,
@@ -586,6 +793,23 @@ def main(argv=None):
             ),
         },
         "threshold_probability_mode": "calibrated" if using_calibrated_probabilities else "raw",
+        "label_strength": (
+            {"enabled": False, "reason": "skipped"}
+            if args.skip_label_strength
+            else build_label_strength_report(
+                seed_bt.data.copy(),
+                bundle["metadata"],
+                args.split,
+                args.rows,
+                build_label_strength_candidates(
+                    sorted(set(label_lookaheads)),
+                    sorted(set(label_take_profits)),
+                    sorted(set(label_stop_losses)),
+                ),
+                target_trade_pct=float(args.label_target_trade_pct),
+                min_trade_rows=int(args.label_min_trade_rows),
+            )
+        ),
         "candidates": [],
     }
 

@@ -39,6 +39,23 @@ class TradeThresholdCalibrationTests(unittest.TestCase):
         self.assertEqual(calibrator.summary()["fallback_reason"], "single_class_calibration_data")
         self.assertEqual(list(out), data["long_prob"].tolist())
 
+    def test_probability_calibration_uses_actual_direction_label_when_present(self):
+        data = pd.DataFrame({
+            "target": [0, 1],
+            "actual_label": [2, 0],
+            "long_prob": [0.1, 0.2],
+            "short_prob": [0.8, 0.7],
+        })
+
+        self.assertEqual(
+            calibration.direction_target_series(data, "short").tolist(),
+            [0, 1],
+        )
+        report = calibration.calibration_bins(data, "short", [0.0, 1.0])
+
+        self.assertEqual(report["bins"][0]["rows"], 2)
+        self.assertAlmostEqual(report["bins"][0]["hit_rate"], 0.5)
+
     def test_calibration_source_falls_back_when_validation_metadata_missing(self):
         selected = pd.DataFrame({"target": [0], "long_prob": [0.2], "short_prob": [0.7]})
         labeled = pd.DataFrame({
@@ -72,6 +89,35 @@ class TradeThresholdCalibrationTests(unittest.TestCase):
         self.assertEqual(float(out.loc[0, "long_prob"]), 0.7)
         self.assertEqual(float(out.loc[0, "short_prob"]), 0.2)
         self.assertEqual(out.loc[0, "pred_direction"], "long")
+
+    def test_label_strength_summary_reports_trade_density_and_direction_balance(self):
+        index = pd.date_range("2026-01-01", periods=4, freq="5min", tz="UTC")
+        data = pd.DataFrame({
+            "target": [1, 1, 0, 0],
+            "diag_trend_bias": ["long", "short", "long", "neutral"],
+            "diag_regime": ["trend_long", "trend_short", "trend_long", "range_high_vol"],
+        }, index=index)
+        candidate = {"name": "lh48_tp0.028_sl0.012", "lookahead_bars": 48, "take_profit": 0.028, "stop_loss": 0.012}
+
+        summary = calibration.summarize_label_strength(
+            data,
+            candidate,
+            target_trade_pct=50.0,
+            min_trade_rows=1,
+        )
+
+        self.assertEqual(summary["trade_rows"], 2)
+        self.assertAlmostEqual(summary["trade_pct"], 50.0)
+        self.assertEqual(summary["trade_direction_counts"]["long"], 1)
+        self.assertEqual(summary["trade_direction_counts"]["short"], 1)
+        self.assertAlmostEqual(summary["direction_imbalance_pct"], 0.0)
+        self.assertEqual(summary["by_regime"]["trend_long"]["trade_rows"], 1)
+
+    def test_build_label_strength_candidates_crosses_inputs(self):
+        candidates = calibration.build_label_strength_candidates([24, 48], [0.02], [0.01, 0.012])
+
+        self.assertEqual(len(candidates), 4)
+        self.assertEqual(candidates[0]["name"], "lh24_tp0.020_sl0.010")
 
     def test_write_report_replaces_atomically_without_tmp_leftover(self):
         with tempfile.TemporaryDirectory() as tmpdir:
