@@ -36,6 +36,29 @@ def _target_direction(target):
     return TARGET_DIRECTIONS.get(int(target), "unknown")
 
 
+def _env_bool(name, default):
+    value = os.getenv(name)
+    if value is None:
+        return bool(default)
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _label_use_realistic():
+    return _env_bool("MODEL_LABEL_USE_REALISTIC", config.MODEL_LABEL_USE_REALISTIC)
+
+
+def _label_lookahead_bars():
+    return int(os.getenv("MODEL_LABEL_LOOKAHEAD_BARS", str(config.MODEL_LABEL_LOOKAHEAD_BARS)))
+
+
+def _label_take_profit():
+    return float(os.getenv("MODEL_LABEL_TAKE_PROFIT", str(config.MODEL_LABEL_TAKE_PROFIT)))
+
+
+def _label_stop_loss():
+    return float(os.getenv("MODEL_LABEL_STOP_LOSS", str(config.MODEL_LABEL_STOP_LOSS)))
+
+
 def _row_atr_ratio(row):
     close_price = row.get("5m_close")
     atr_value = row.get("5m_atr")
@@ -114,7 +137,7 @@ def _tradable_label_filter_summary(raw_df, filtered_df, blocked_mask):
 
 
 def _label_mode():
-    use_realistic = bool(int(os.getenv("MODEL_LABEL_USE_REALISTIC", "1")))
+    use_realistic = _label_use_realistic()
     return "binary_realistic" if use_realistic else "binary_threshold"
 
 
@@ -171,13 +194,13 @@ def create_labels(df, future_window=5, threshold=0.002, tradable_only=None, incl
     这样模型只需要学习"什么时候该交易",方向由 trend filter 决定
     """
     df = df.copy()
-    use_realistic = bool(int(os.getenv("MODEL_LABEL_USE_REALISTIC", "1")))
+    use_realistic = _label_use_realistic()
 
     if use_realistic:
         # 二分类realistic标签
-        lookahead_bars = int(os.getenv("MODEL_LABEL_LOOKAHEAD_BARS", "48"))
-        take_profit_pct = float(os.getenv("MODEL_LABEL_TAKE_PROFIT", str(config.TAKE_PROFIT)))
-        stop_loss_pct = float(os.getenv("MODEL_LABEL_STOP_LOSS", str(config.STOP_LOSS)))
+        lookahead_bars = _label_lookahead_bars()
+        take_profit_pct = _label_take_profit()
+        stop_loss_pct = _label_stop_loss()
 
         log_info(f"使用二分类realistic标签: lookahead={lookahead_bars}根K线, TP={take_profit_pct:.2%}, SL={stop_loss_pct:.2%}")
 
@@ -406,10 +429,10 @@ def build_training_metadata(*, X, y, feature_cols, train_end, validation_start, 
         "validation_metrics": validation_metrics,
         "label_future_window": int(config.MODEL_LABEL_FUTURE_WINDOW),
         "label_threshold": float(config.MODEL_LABEL_THRESHOLD),
-        "label_use_realistic": bool(int(os.getenv("MODEL_LABEL_USE_REALISTIC", "1"))),
-        "label_lookahead_bars": int(os.getenv("MODEL_LABEL_LOOKAHEAD_BARS", "48")),
-        "label_take_profit": float(os.getenv("MODEL_LABEL_TAKE_PROFIT", str(config.TAKE_PROFIT))),
-        "label_stop_loss": float(os.getenv("MODEL_LABEL_STOP_LOSS", str(config.STOP_LOSS))),
+        "label_use_realistic": bool(_label_use_realistic()),
+        "label_lookahead_bars": int(_label_lookahead_bars()),
+        "label_take_profit": float(_label_take_profit()),
+        "label_stop_loss": float(_label_stop_loss()),
         "target_schema": "binary_trade_quality",
         "target_labels": {
             str(TARGET_NO_TRADE): "no_trade",
