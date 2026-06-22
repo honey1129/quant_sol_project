@@ -1,6 +1,7 @@
 import os
 from datetime import datetime
 import csv
+import json
 from collections import Counter
 import joblib
 import traceback
@@ -16,7 +17,7 @@ import pandas as pd
 from tqdm import tqdm
 from core import position_manager, okx_api, ml_feature_engineering, signal_engine
 from config import config
-from utils.utils import log_info, log_error,LOGS_DIR
+from utils.utils import log_info, log_error, LOGS_DIR, BASE_DIR
 
 
 def mark_to_market_equity(balance, position, entry_price, mark_price):
@@ -101,6 +102,7 @@ class Backtester:
         feature_cols=None,
         models=None,
         model_weights=None,
+        model_metadata=None,
         funding_history=None,
         enable_csv_dump=True,
         show_progress=True,
@@ -136,6 +138,7 @@ class Backtester:
         # 加载模型与权重
         self.models = models if models is not None else signal_engine.load_models(config.MODEL_PATHS)
         self.model_weights = model_weights if model_weights is not None else config.MODEL_WEIGHTS
+        self.model_metadata = model_metadata if model_metadata is not None else self._load_model_metadata()
 
         # 初始化仓位和资金
         self.position = 0
@@ -269,6 +272,17 @@ class Backtester:
 
         log_info(f"回测加载 funding 记录: {len(funding_df)} 条")
         return funding_df.reset_index(drop=True)
+
+    def _load_model_metadata(self):
+        metadata_path = os.path.join(BASE_DIR, config.TRAINING_METADATA_PATH)
+        if not os.path.exists(metadata_path):
+            return {}
+        try:
+            with open(metadata_path, "r", encoding="utf-8") as file:
+                return json.load(file)
+        except Exception as exc:
+            log_error(f"模型训练元数据读取失败，按旧方向模型处理: {exc}")
+            return {}
 
     def _log_intrabar_range_diagnostics(self):
         required_cols = {'5m_open', '5m_high', '5m_low'}
@@ -680,7 +694,20 @@ class Backtester:
         X_row = row[self.feature_cols].values.reshape(1, -1).astype(float)
         X_row = pd.DataFrame(X_row, columns=self.feature_cols)
 
-        avg_pred = signal_engine.weighted_predict_proba(self.models, X_row, self.model_weights)
+        trend_context = derive_trend_context(
+            row,
+            interval=config.TREND_FILTER_INTERVAL,
+            fast_col=config.TREND_FILTER_FAST_COL,
+            slow_col=config.TREND_FILTER_SLOW_COL,
+            min_gap=config.TREND_FILTER_MIN_GAP,
+        )
+        avg_pred = signal_engine.weighted_predict_proba(
+            self.models,
+            X_row,
+            self.model_weights,
+            trend_bias=trend_context.get("trend_bias"),
+            model_metadata=self.model_metadata,
+        )
         long_prob, short_prob = avg_pred[1], avg_pred[0]
         return long_prob, short_prob
 
