@@ -482,6 +482,284 @@ def build_label_strength_report(
     }
 
 
+def _label_strength_env(candidate):
+    return {
+        "MODEL_LABEL_USE_REALISTIC": "1",
+        "MODEL_LABEL_LOOKAHEAD_BARS": candidate["lookahead_bars"],
+        "MODEL_LABEL_TAKE_PROFIT": candidate["take_profit"],
+        "MODEL_LABEL_STOP_LOSS": candidate["stop_loss"],
+    }
+
+
+def build_candidate_metadata(index, feature_cols, candidate, split_positions, final_train_end, purge_bars):
+    train_end, validation_start, validation_end, oos_start = split_positions
+    return {
+        "schema_version": 2,
+        "source": "run.calibrate_trade_thresholds",
+        "target_schema": "binary_trade_quality",
+        "label_mode": "binary_realistic",
+        "label_use_realistic": True,
+        "label_lookahead_bars": int(candidate["lookahead_bars"]),
+        "label_take_profit": float(candidate["take_profit"]),
+        "label_stop_loss": float(candidate["stop_loss"]),
+        "feature_count": int(len(feature_cols)),
+        "train_rows": int(train_end),
+        "validation_rows": int(validation_end - validation_start),
+        "oos_rows": int(len(index) - oos_start),
+        "final_train_rows": int(final_train_end),
+        "purge_bars": int(purge_bars),
+        "train_start": index[0].isoformat(),
+        "train_end": index[train_end - 1].isoformat(),
+        "validation_start": index[validation_start].isoformat(),
+        "validation_end": index[validation_end - 1].isoformat(),
+        "oos_start": index[oos_start].isoformat(),
+        "oos_end": index[-1].isoformat(),
+    }
+
+
+def fit_label_strength_candidate(seed_data, feature_cols, candidate, split):
+    from train.train import build_time_splits, train_model_bundle
+
+    with temporary_env(_label_strength_env(candidate)):
+        labeled = td.create_labels(
+            seed_data.copy(),
+            future_window=int(config.MODEL_LABEL_FUTURE_WINDOW),
+            threshold=float(config.MODEL_LABEL_THRESHOLD),
+            tradable_only=True,
+        )
+    labeled = td.enrich_regime_context(labeled)
+    missing_cols = [col for col in feature_cols if col not in labeled.columns]
+    if missing_cols:
+        raise RuntimeError(
+            "标签强度模型训练缺少特征列: "
+            + ",".join(str(col) for col in missing_cols[:12])
+        )
+
+    X = labeled[feature_cols].astype(float)
+    y = labeled["target"].astype(int)
+    purge_bars = max(int(config.MODEL_PURGE_BARS), int(candidate["lookahead_bars"]))
+    originals = apply_overrides({"MODEL_PURGE_BARS": purge_bars})
+    try:
+        split_positions = build_time_splits(len(X))
+    finally:
+        restore_overrides(originals)
+    train_end, _, validation_end, _ = split_positions
+    if split == "validation":
+        model_train_end = train_end
+    else:
+        model_train_end = validation_end if bool(config.MODEL_FINAL_TRAIN_ON_VALIDATION) else train_end
+
+    models, _, _, sample_weight_summary = train_model_bundle(
+        X.iloc[:model_train_end].copy(),
+        y.iloc[:model_train_end].copy(),
+    )
+    metadata = build_candidate_metadata(
+        X.index,
+        feature_cols,
+        candidate,
+        split_positions,
+        final_train_end=model_train_end,
+        purge_bars=purge_bars,
+    )
+    bundle = {
+        "root_dir": PROJECT_ROOT,
+        "models": models,
+        "feature_cols": list(feature_cols),
+        "metadata": metadata,
+        "model_weights": dict(config.MODEL_WEIGHTS),
+    }
+    predicted = td.add_predictions(labeled.copy(), bundle)
+    return predicted, metadata, sample_weight_summary
+
+
+def _run_threshold_sweep_for_data(seed_bt, data, threshold_candidates, min_closed_trades):
+    results = []
+    for candidate in threshold_candidates:
+        overrides = candidate["overrides"]
+        summary = run_candidate(seed_bt, data.copy(), overrides)
+        summary["name"] = candidate["name"]
+        summary["overrides"] = overrides
+        summary["weak_signal_gate_counts"] = weak_signal_gate_counts(
+            data,
+            overrides["THRESHOLD_LONG"],
+            overrides["THRESHOLD_SHORT"],
+            overrides["SIGNAL_MIN_PROB_DIFF"],
+        )
+        results.append(summary)
+    return sorted(
+        results,
+        key=lambda item: score_candidate(item, int(min_closed_trades)),
+        reverse=True,
+    )
+
+
+def build_label_strength_model_sweep(
+    seed_bt,
+    feature_cols,
+    split,
+    rows,
+    label_summaries,
+    threshold_candidates,
+    *,
+    top_n,
+    probability_method,
+    probability_source,
+    probability_rows,
+    bins,
+    min_closed_trades,
+    target_trade_pct,
+    min_trade_rows,
+):
+    selected_label_summaries = list(label_summaries[:max(0, int(top_n))])
+    if not selected_label_summaries:
+        return {
+            "enabled": False,
+            "reason": "label_strength_model_sweep_top_n_is_zero",
+        }
+
+    report = {
+        "enabled": True,
+        "split": split,
+        "rows_limit": rows,
+        "label_candidate_count": int(len(selected_label_summaries)),
+        "threshold_candidate_count": int(len(threshold_candidates)),
+        "probability_calibration_method": probability_method,
+        "probability_calibration_source": probability_source,
+        "candidates": [],
+        "recommended": [],
+    }
+
+    for label_summary in selected_label_summaries:
+        candidate = {
+            "name": label_summary["name"],
+            "lookahead_bars": int(label_summary["lookahead_bars"]),
+            "take_profit": float(label_summary["take_profit"]),
+            "stop_loss": float(label_summary["stop_loss"]),
+        }
+        log_info(f"标签强度模型sweep候选: {candidate['name']}")
+        predicted, metadata, sample_weight_summary = fit_label_strength_candidate(
+            seed_bt.data.copy(),
+            feature_cols,
+            candidate,
+            split,
+        )
+        selected = td.select_split(predicted, metadata, split, rows)
+        if selected.empty:
+            item = {
+                **candidate,
+                "skipped": True,
+                "reason": "empty_selected_split",
+                "metadata": metadata,
+            }
+            report["candidates"].append(item)
+            continue
+
+        probability_source_data, source_fallback = select_probability_calibration_source(
+            predicted,
+            metadata,
+            probability_source,
+            selected,
+            rows=probability_rows,
+        )
+        calibrators = fit_probability_calibrators(probability_source_data, probability_method)
+        probability_data = apply_probability_calibrators(selected, calibrators)
+        threshold_data = (
+            use_calibrated_probability_columns(probability_data)
+            if probability_method != "none"
+            else selected
+        )
+        ranked = _run_threshold_sweep_for_data(
+            seed_bt,
+            threshold_data,
+            threshold_candidates,
+            min_closed_trades,
+        )
+        label_summary_on_selected = summarize_label_strength(
+            selected,
+            candidate,
+            target_trade_pct=target_trade_pct,
+            min_trade_rows=min_trade_rows,
+        )
+        item = {
+            **candidate,
+            "skipped": False,
+            "rows": int(len(selected)),
+            "start": selected.index.min().isoformat(),
+            "end": selected.index.max().isoformat(),
+            "metadata": metadata,
+            "sample_weight_summary": sample_weight_summary,
+            "label_summary": label_summary_on_selected,
+            "probability_calibration": {
+                "method": probability_method,
+                "source": probability_source,
+                "source_rows": int(len(probability_source_data)),
+                "source_start": (
+                    probability_source_data.index.min().isoformat()
+                    if not probability_source_data.empty
+                    else None
+                ),
+                "source_end": (
+                    probability_source_data.index.max().isoformat()
+                    if not probability_source_data.empty
+                    else None
+                ),
+                "source_fallback_reason": source_fallback,
+                "used_for_threshold_sweep": probability_method != "none",
+                "calibrators": {
+                    direction: calibrator.summary()
+                    for direction, calibrator in calibrators.items()
+                },
+                "raw": build_probability_calibration_report(selected, bins),
+                "calibrated": (
+                    build_probability_calibration_report_for_columns(
+                        probability_data,
+                        bins,
+                        {
+                            "long": PROBABILITY_DIRECTIONS["long"]["calibrated_col"],
+                            "short": PROBABILITY_DIRECTIONS["short"]["calibrated_col"],
+                        },
+                    )
+                    if probability_method != "none"
+                    else None
+                ),
+            },
+            "recommended_thresholds": ranked[:10],
+            "best_threshold": ranked[0] if ranked else None,
+        }
+        report["candidates"].append(item)
+
+    best_items = []
+    for item in report["candidates"]:
+        best = item.get("best_threshold")
+        if not best:
+            continue
+        best_items.append({
+            "label_name": item["name"],
+            "lookahead_bars": int(item["lookahead_bars"]),
+            "take_profit": float(item["take_profit"]),
+            "stop_loss": float(item["stop_loss"]),
+            "label_trade_pct": float(item["label_summary"].get("trade_pct", 0.0)),
+            "threshold_name": best["name"],
+            "threshold_overrides": best.get("overrides", {}),
+            "closed_trade_count": int(best.get("closed_trade_count") or 0),
+            "trade_count": int(best.get("trade_count") or 0),
+            "net_pnl_after_costs": float(best.get("net_pnl_after_costs") or 0.0),
+            "profit_factor": float(best.get("profit_factor") or 0.0),
+            "win_rate_pct": float(best.get("win_rate_pct") or 0.0),
+            "max_drawdown_pct": float(best.get("max_drawdown_pct") or 0.0),
+            "_rank_score": score_candidate(best, min_closed_trades),
+        })
+    recommended = sorted(
+        best_items,
+        key=lambda item: item["_rank_score"],
+        reverse=True,
+    )[:10]
+    for item in recommended:
+        item.pop("_rank_score", None)
+    report["recommended"] = recommended
+    return report
+
+
 def compact_summary(summary):
     keys = [
         "final_equity",
@@ -697,6 +975,12 @@ def parse_args(argv=None):
         default=int(os.getenv("LABEL_STRENGTH_MIN_TRADE_ROWS", "80")),
         help="标签强度推荐最低 trade 样本数",
     )
+    parser.add_argument(
+        "--label-strength-model-top-n",
+        type=int,
+        default=int(os.getenv("LABEL_STRENGTH_MODEL_TOP_N", "0")),
+        help="对标签强度推荐前 N 个候选临时训练模型并跑阈值回测；0 表示跳过重训练 sweep",
+    )
     parser.add_argument("--output", default=None, help="报告 JSON 输出路径")
     return parser.parse_args(argv)
 
@@ -728,6 +1012,11 @@ def main(argv=None):
     label_take_profits = parse_float_list(args.label_take_profits, default_label_take_profits)
     label_stop_losses = parse_float_list(args.label_stop_losses, default_label_stop_losses)
     bins = parse_float_list(args.bins, [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
+    label_candidates = build_label_strength_candidates(
+        sorted(set(label_lookaheads)),
+        sorted(set(label_take_profits)),
+        sorted(set(label_stop_losses)),
+    )
 
     bundle, seed_bt, labeled = load_all_diagnostic_data(args.model_root, raw_labels=args.raw_labels)
     raw_data = td.select_split(labeled, bundle["metadata"], args.split, args.rows)
@@ -757,6 +1046,19 @@ def main(argv=None):
         min_target_ratios,
         position_probability_centers,
         asymmetric=bool(args.asymmetric),
+    )
+    label_strength_report = (
+        {"enabled": False, "reason": "skipped"}
+        if args.skip_label_strength
+        else build_label_strength_report(
+            seed_bt.data.copy(),
+            bundle["metadata"],
+            args.split,
+            args.rows,
+            label_candidates,
+            target_trade_pct=float(args.label_target_trade_pct),
+            min_trade_rows=int(args.label_min_trade_rows),
+        )
     )
 
     report = {
@@ -821,25 +1123,35 @@ def main(argv=None):
             ),
         },
         "threshold_probability_mode": "calibrated" if using_calibrated_probabilities else "raw",
-        "label_strength": (
-            {"enabled": False, "reason": "skipped"}
-            if args.skip_label_strength
-            else build_label_strength_report(
-                seed_bt.data.copy(),
-                bundle["metadata"],
-                args.split,
-                args.rows,
-                build_label_strength_candidates(
-                    sorted(set(label_lookaheads)),
-                    sorted(set(label_take_profits)),
-                    sorted(set(label_stop_losses)),
-                ),
-                target_trade_pct=float(args.label_target_trade_pct),
-                min_trade_rows=int(args.label_min_trade_rows),
-            )
-        ),
+        "label_strength": label_strength_report,
+        "label_strength_model_sweep": {"enabled": False, "reason": "not_requested"},
         "candidates": [],
     }
+    if (
+        label_strength_report.get("enabled")
+        and int(args.label_strength_model_top_n) > 0
+    ):
+        log_info(
+            "标签强度模型sweep开始: "
+            f"top_n={int(args.label_strength_model_top_n)} "
+            f"threshold_candidates={len(candidates)}"
+        )
+        report["label_strength_model_sweep"] = build_label_strength_model_sweep(
+            seed_bt,
+            bundle["feature_cols"],
+            args.split,
+            args.rows,
+            label_strength_report.get("recommended", []),
+            candidates,
+            top_n=int(args.label_strength_model_top_n),
+            probability_method=args.probability_calibration,
+            probability_source=args.probability_calibration_source,
+            probability_rows=calibration_rows,
+            bins=bins,
+            min_closed_trades=int(args.min_closed_trades),
+            target_trade_pct=float(args.label_target_trade_pct),
+            min_trade_rows=int(args.label_min_trade_rows),
+        )
 
     path = write_report(report, args.output)
     log_info(f"阈值校准开始: candidates={len(candidates)} rows={len(data)}")

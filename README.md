@@ -535,6 +535,8 @@ python -m run.calibrate_trade_thresholds --split oos --asymmetric \
 
 概率校准器必须先用 validation 拟合，再在 OOS 上验证；不要用 OOS 反向拟合。最近一轮验证里 raw 概率优于 isotonic/sigmoid，因此当前默认不启用概率校准，只把它作为诊断工具。
 
+如需把标签强度也纳入交易结果验证，可额外加 `--label-strength-model-top-n 3`。脚本会先按标签分布推荐候选，再对前 N 个候选临时重训模型，并用同一组阈值跑 validation/OOS 回测；报告里的 `label_strength_model_sweep.recommended` 才是“标签强度 + 概率/阈值”联合校准结果。
+
 ### 6. 测试盘启动前预检
 
 ```bash
