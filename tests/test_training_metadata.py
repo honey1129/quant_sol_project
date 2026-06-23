@@ -44,7 +44,10 @@ class TrainingMetadataTests(unittest.TestCase):
         # 而非硬编码某个值,避免随 .env 变更而误报。
         self.assertEqual(metadata["label_mode"], train_module._label_mode())
         self.assertIn("label_filter_summary", metadata)
-        self.assertEqual(metadata["training_balance_strategy"], "sample_weight_binary_quality_recency")
+        self.assertEqual(
+            metadata["training_balance_strategy"],
+            "sample_weight_binary_target_regime_direction_recency",
+        )
         self.assertEqual(metadata["sample_weight_summary"]["method"], "unit")
         self.assertEqual(metadata["evaluation_sample_weight_summary"], {})
         self.assertEqual(metadata["label_distribution"]["all"], {"0": 10, "1": 10})
@@ -198,9 +201,9 @@ class TrainingMetadataTests(unittest.TestCase):
         self.assertEqual(list(sample_weight.index), list(index))
         self.assertEqual(len(X_balanced), len(X))
         self.assertEqual(summary["rows"], len(y))
-        self.assertEqual(summary["method"], "binary_inverse_frequency_with_recency")
+        self.assertEqual(summary["method"], "binary_target_regime_direction_with_recency")
 
-    def test_sample_weights_balance_directions_before_regime_groups(self):
+    def test_sample_weights_balance_targets_and_regime_direction_groups(self):
         index = pd.date_range("2026-01-01", periods=8, freq="5min", tz="UTC")
         X = pd.DataFrame({
             "regime_trend_long": [1, 1, 1, 1, 1, 1, 0, 0],
@@ -209,23 +212,33 @@ class TrainingMetadataTests(unittest.TestCase):
             "is_high_vol": [0, 0, 0, 0, 0, 0, 0, 1],
         }, index=index)
         y = pd.Series([1, 1, 1, 1, 0, 0, 0, 0], index=index)
+        sample_context = pd.DataFrame({
+            "label_regime": [
+                "trend_long", "trend_long", "trend_long", "trend_long",
+                "trend_long", "trend_long", "trend_short", "range_high_vol",
+            ],
+            "label_direction": ["long", "long", "long", "long", "long", "long", "short", "none"],
+        }, index=index)
 
-        sample_weight, _ = train_module.build_sample_weights(
-            X,
-            y,
-            recent_boost=0.0,
-            min_weight=0.0,
-            max_weight=1000.0,
-        )
-        regimes = train_module.infer_sample_regimes(X)
-        directions = y.astype(int).map(train_module._target_direction)
-        direction_totals = sample_weight.groupby(directions).sum()
-        group_totals = sample_weight.groupby(regimes + ":" + directions).sum()
+        with patch("train.train.config.MODEL_TRADE_SAMPLE_WEIGHT_MULTIPLIER", 1.0):
+            with patch("train.train.config.MODEL_NO_TRADE_SAMPLE_WEIGHT_MULTIPLIER", 1.0):
+                sample_weight, _ = train_module.build_sample_weights(
+                    X,
+                    y,
+                    sample_context=sample_context,
+                    recent_boost=0.0,
+                    min_weight=0.0,
+                    max_weight=1000.0,
+                )
 
-        self.assertEqual(len(direction_totals), 2)
-        for value in direction_totals:
-            self.assertAlmostEqual(value, 4)
-        self.assertAlmostEqual(group_totals["all:trade"], group_totals["all:no_trade"])
+        targets = y.astype(int).map(train_module._target_direction)
+        groups = targets + ":" + sample_context["label_regime"] + ":" + sample_context["label_direction"]
+        target_totals = sample_weight.groupby(targets).sum()
+        group_totals = sample_weight.groupby(groups).sum()
+
+        self.assertAlmostEqual(target_totals["trade"], target_totals["no_trade"])
+        self.assertAlmostEqual(group_totals["no_trade:trend_long:long"], group_totals["no_trade:trend_short:short"])
+        self.assertAlmostEqual(group_totals["no_trade:trend_short:short"], group_totals["no_trade:range_high_vol:none"])
 
     def test_write_json_atomic_round_trips_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:

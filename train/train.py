@@ -568,20 +568,61 @@ def create_labels(df, future_window=5, threshold=0.002, tradable_only=None, incl
     }
     return df
 
-def infer_sample_regimes(X):
-    """二分类模式下不需要按regime分组,直接返回统一regime"""
-    return pd.Series("all", index=X.index, dtype="object")
+def infer_sample_regimes(X, sample_context=None):
+    if sample_context is not None and "label_regime" in sample_context:
+        return (
+            sample_context["label_regime"]
+            .reindex(X.index)
+            .fillna("unknown")
+            .astype(str)
+            .str.lower()
+        )
+    if "regime_trend_long" in X or "regime_trend_short" in X or "regime_range_high_vol" in X:
+        regimes = pd.Series("range", index=X.index, dtype="object")
+        if "regime_range_high_vol" in X:
+            regimes = regimes.mask(X["regime_range_high_vol"].astype(float) > 0.5, "range_high_vol")
+        if "regime_trend_long" in X:
+            regimes = regimes.mask(X["regime_trend_long"].astype(float) > 0.5, "trend_long")
+        if "regime_trend_short" in X:
+            regimes = regimes.mask(X["regime_trend_short"].astype(float) > 0.5, "trend_short")
+        return regimes
+    return pd.Series("unknown", index=X.index, dtype="object")
 
 
-def build_sample_weights(X, y, *, recent_boost=None, min_weight=None, max_weight=None):
+def infer_sample_trade_directions(X, y, sample_context=None):
+    if sample_context is not None and "label_direction" in sample_context:
+        return (
+            sample_context["label_direction"]
+            .reindex(X.index)
+            .fillna("unknown")
+            .astype(str)
+            .str.lower()
+        )
+
+    directions = pd.Series("unknown", index=X.index, dtype="object")
+    if "trend_bias_num" in X:
+        trend_bias = X["trend_bias_num"].astype(float)
+        directions = directions.mask(trend_bias > 0.0, "long")
+        directions = directions.mask(trend_bias < 0.0, "short")
+        directions = directions.mask(trend_bias == 0.0, "none")
+    if "regime_trend_long" in X:
+        directions = directions.mask(X["regime_trend_long"].astype(float) > 0.5, "long")
+    if "regime_trend_short" in X:
+        directions = directions.mask(X["regime_trend_short"].astype(float) > 0.5, "short")
+
+    target_kinds = y.astype(int).map(_target_direction)
+    return directions.where(target_kinds != "no_trade", directions.fillna("none"))
+
+
+def build_sample_weights(X, y, *, sample_context=None, recent_boost=None, min_weight=None, max_weight=None):
     """
-    二分类样本权重: 简化为按类别反频率加权 + 时间衰减
+    二分类样本权重: 先平衡 trade/no_trade, 再在类别内部平衡 regime + direction 组合。
     """
     y = y.astype(int)
     if len(y) == 0:
         return pd.Series(dtype=float, index=y.index, name="sample_weight"), {
             "enabled": True,
-            "method": "binary_inverse_frequency_with_recency",
+            "method": "binary_target_regime_direction_with_recency",
             "rows": 0,
         }
 
@@ -595,19 +636,34 @@ def build_sample_weights(X, y, *, recent_boost=None, min_weight=None, max_weight
     if max_weight is not None and max_weight < min_weight:
         raise ValueError("MODEL_SAMPLE_WEIGHT_MAX 不能小于 MODEL_SAMPLE_WEIGHT_MIN")
 
-    # 二分类: 只有 trade 和 no_trade
     trade_multiplier = max(0.0, float(config.MODEL_TRADE_SAMPLE_WEIGHT_MULTIPLIER))
     no_trade_multiplier = max(0.0, float(config.MODEL_NO_TRADE_SAMPLE_WEIGHT_MULTIPLIER))
 
-    directions = y.map(_target_direction)
-    direction_counts = directions.value_counts(sort=False)
-    direction_count = max(1, int(len(direction_counts)))
+    target_kinds = y.map(_target_direction)
+    regimes = infer_sample_regimes(X, sample_context=sample_context)
+    trade_directions = infer_sample_trade_directions(X, y, sample_context=sample_context)
+    group_df = pd.DataFrame({
+        "target": target_kinds,
+        "regime": regimes.reindex(y.index).fillna("unknown").astype(str),
+        "direction": trade_directions.reindex(y.index).fillna("unknown").astype(str),
+    }, index=y.index)
 
-    def direction_weight(direction):
-        multiplier = no_trade_multiplier if direction == "no_trade" else trade_multiplier
-        return (len(y) / (direction_count * float(direction_counts[direction]))) * multiplier
+    target_counts = group_df["target"].value_counts(sort=False)
+    target_count = max(1, int(len(target_counts)))
+    group_labels = group_df["target"] + ":" + group_df["regime"] + ":" + group_df["direction"]
+    group_counts = group_labels.value_counts(sort=False)
+    group_count_by_target = group_df.assign(group=group_labels).groupby("target")["group"].nunique()
 
-    base_weights = directions.map(direction_weight).astype(float)
+    def row_weight(row):
+        target = row["target"]
+        group = f"{target}:{row['regime']}:{row['direction']}"
+        target_base = len(y) / (target_count * float(target_counts[target]))
+        target_group_count = max(1, int(group_count_by_target[target]))
+        group_factor = float(target_counts[target]) / (target_group_count * float(group_counts[group]))
+        multiplier = no_trade_multiplier if target == "no_trade" else trade_multiplier
+        return target_base * group_factor * multiplier
+
+    base_weights = group_df.apply(row_weight, axis=1).astype(float)
 
     if len(base_weights) == 1:
         recency_weights = np.array([1.0 + recent_boost], dtype=float)
@@ -621,12 +677,16 @@ def build_sample_weights(X, y, *, recent_boost=None, min_weight=None, max_weight
     if mean_weight > 0:
         weights = weights / mean_weight
 
-    direction_weight_mean = pd.DataFrame({"direction": directions, "sample_weight": weights}).groupby("direction")["sample_weight"].mean()
-    direction_weight_total = pd.DataFrame({"direction": directions, "sample_weight": weights}).groupby("direction")["sample_weight"].sum()
+    weighted_groups = group_df.assign(sample_weight=weights, group=group_labels)
+    target_weight_mean = weighted_groups.groupby("target")["sample_weight"].mean()
+    target_weight_total = weighted_groups.groupby("target")["sample_weight"].sum()
+    group_weight_mean = weighted_groups.groupby("group")["sample_weight"].mean()
+    group_weight_total = weighted_groups.groupby("group")["sample_weight"].sum()
+    regime_direction_counts = group_df.groupby(["target", "regime", "direction"]).size()
 
     summary = {
         "enabled": True,
-        "method": "binary_inverse_frequency_with_recency",
+        "method": "binary_target_regime_direction_with_recency",
         "rows": int(len(y)),
         "recent_boost": float(recent_boost),
         "trade_multiplier": float(trade_multiplier),
@@ -636,21 +696,34 @@ def build_sample_weights(X, y, *, recent_boost=None, min_weight=None, max_weight
         "mean": float(weights.mean()),
         "min": float(weights.min()),
         "max": float(weights.max()),
-        "direction_counts": {str(k): int(v) for k, v in direction_counts.sort_index().items()},
-        "direction_weight_mean": {
-            str(direction): float(value)
-            for direction, value in direction_weight_mean.sort_index().items()
+        "target_counts": {str(k): int(v) for k, v in target_counts.sort_index().items()},
+        "group_counts": {str(k): int(v) for k, v in group_counts.sort_index().items()},
+        "regime_direction_counts": {
+            ":".join(map(str, key)): int(value)
+            for key, value in regime_direction_counts.sort_index().items()
         },
-        "direction_weight_total": {
-            str(direction): float(value)
-            for direction, value in direction_weight_total.sort_index().items()
+        "target_weight_mean": {
+            str(target): float(value)
+            for target, value in target_weight_mean.sort_index().items()
+        },
+        "target_weight_total": {
+            str(target): float(value)
+            for target, value in target_weight_total.sort_index().items()
+        },
+        "group_weight_mean": {
+            str(group): float(value)
+            for group, value in group_weight_mean.sort_index().items()
+        },
+        "group_weight_total": {
+            str(group): float(value)
+            for group, value in group_weight_total.sort_index().items()
         },
     }
     return weights, summary
 
 
-def balance_samples(X, y):
-    sample_weight, weight_summary = build_sample_weights(X, y)
+def balance_samples(X, y, sample_context=None):
+    sample_weight, weight_summary = build_sample_weights(X, y, sample_context=sample_context)
     return X.copy(), y.copy(), sample_weight, weight_summary
 
 def evaluate_model(model, model_name, X_test, y_test):
@@ -739,7 +812,7 @@ def build_training_metadata(*, X, y, feature_cols, train_end, validation_start, 
         "label_mode": _label_mode(),
         "label_filter_summary": label_filter_summary or {},
         "label_quality_summary": label_quality_summary or {},
-        "training_balance_strategy": "sample_weight_binary_quality_recency",
+        "training_balance_strategy": "sample_weight_binary_target_regime_direction_recency",
         "sample_weight_summary": sample_weight_summary or {},
         "evaluation_sample_weight_summary": evaluation_sample_weight_summary or {},
         "train_ratio": float(config.MODEL_TRAIN_RATIO),
@@ -792,8 +865,12 @@ def build_model_estimators():
     }
 
 
-def train_model_bundle(X_train, y_train):
-    X_balanced, y_balanced, sample_weight, sample_weight_summary = balance_samples(X_train, y_train)
+def train_model_bundle(X_train, y_train, sample_context=None):
+    X_balanced, y_balanced, sample_weight, sample_weight_summary = balance_samples(
+        X_train,
+        y_train,
+        sample_context=sample_context,
+    )
     X_balanced = pd.DataFrame(X_balanced, columns=X_train.columns)
 
     models = build_model_estimators()
@@ -869,7 +946,12 @@ def train():
     y_test = y.iloc[validation_start:validation_end].copy()
 
     # 只在训练集内部计算评估模型的样本权重，避免把未来样本混回验证过程。
-    eval_models, X_eval_train, _, evaluation_sample_weight_summary = train_model_bundle(X_train, y_train)
+    eval_sample_context = merged_df.iloc[:train_end].copy()
+    eval_models, X_eval_train, _, evaluation_sample_weight_summary = train_model_bundle(
+        X_train,
+        y_train,
+        sample_context=eval_sample_context,
+    )
     X_test = pd.DataFrame(X_test, columns=feature_cols)
 
     validation_metrics = {
@@ -881,7 +963,12 @@ def train():
     final_train_end = validation_end if bool(config.MODEL_FINAL_TRAIN_ON_VALIDATION) else train_end
     X_final_train = X.iloc[:final_train_end].copy()
     y_final_train = y.iloc[:final_train_end].copy()
-    models, X_final_train, _, sample_weight_summary = train_model_bundle(X_final_train, y_final_train)
+    final_sample_context = merged_df.iloc[:final_train_end].copy()
+    models, X_final_train, _, sample_weight_summary = train_model_bundle(
+        X_final_train,
+        y_final_train,
+        sample_context=final_sample_context,
+    )
 
     lgb_model = models["lgb_v1"]
     joblib.dump(lgb_model, lgb_path)
