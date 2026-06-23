@@ -374,6 +374,55 @@ class RetrainBacktestValidationTests(unittest.TestCase):
         self.assertEqual(regime["dominant_long_count"], 85)
         self.assertAlmostEqual(regime["dominant_long_pct"], 85.0)
 
+    @unittest.skipUnless(HAS_REAL_PANDAS, "requires pandas")
+    def test_walk_forward_fold_diagnostics_include_label_and_prediction_quality(self):
+        pd = retrain_models.pd
+
+        class FakeModel:
+            classes_ = [0, 1]
+
+            def predict(self, X):
+                return [1 if value >= 0.5 else 0 for value in X["feature"]]
+
+            def predict_proba(self, X):
+                rows = []
+                for value in X["feature"]:
+                    trade_prob = 0.8 if value >= 0.5 else 0.2
+                    rows.append([1.0 - trade_prob, trade_prob])
+                return rows
+
+        index = pd.date_range("2026-01-01", periods=4, freq="5min")
+        validation_df = pd.DataFrame({
+            "feature": [0.8, 0.2, 0.7, 0.1],
+            "target": [1, 0, 1, 0],
+            "label_regime": ["trend_long", "trend_long", "trend_short", "range"],
+            "label_direction": ["long", "long", "short", "none"],
+            "label_outcome": ["TP", "TIMEOUT", "TP", "NO_DIRECTION"],
+            "label_reject_reason": ["accepted", "outcome_timeout", "accepted", "neutral_trend"],
+            "5m_close": [102.0, 102.0, 98.0, 100.0],
+            "15m_ema_20": [102.0, 102.0, 98.0, 100.0],
+            "15m_ema_60": [100.0, 100.0, 100.0, 100.0],
+        }, index=index)
+        train_df = validation_df.copy()
+        diagnostics = retrain_models.build_walk_forward_fold_diagnostics(
+            {"fold": 1},
+            train_df,
+            validation_df,
+            ["feature"],
+            {"fake": FakeModel()},
+            {"fake": 1.0},
+            {"target_schema": "binary_trade_quality"},
+        )
+
+        self.assertEqual(diagnostics["fold"], 1)
+        self.assertEqual(diagnostics["validation"]["target_counts"], {"0": 2, "1": 2})
+        self.assertEqual(diagnostics["ensemble"]["confusion_matrix"], [[2, 0], [0, 2]])
+        self.assertAlmostEqual(diagnostics["ensemble"]["trade_precision"], 1.0)
+        self.assertAlmostEqual(diagnostics["ensemble"]["trade_recall"], 1.0)
+        self.assertIn("trend_long", diagnostics["by_regime"])
+        self.assertIn("signal_direction_counts", diagnostics["ensemble"])
+        self.assertIn("predicted_trade_direction_counts", diagnostics["ensemble"])
+
 
 if __name__ == "__main__":
     unittest.main()
