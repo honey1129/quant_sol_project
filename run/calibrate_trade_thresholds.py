@@ -351,6 +351,265 @@ def weak_signal_gate_counts(data, threshold_long, threshold_short, signal_min_pr
     }
 
 
+def _probability_quantiles(values):
+    series = pd.to_numeric(pd.Series(values), errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    if series.empty:
+        return {}
+    return {
+        "mean": float(series.mean()),
+        "p10": float(series.quantile(0.10)),
+        "p25": float(series.quantile(0.25)),
+        "p50": float(series.quantile(0.50)),
+        "p75": float(series.quantile(0.75)),
+        "p90": float(series.quantile(0.90)),
+        "max": float(series.max()),
+    }
+
+
+def _direction_context_series(data):
+    if "diag_trend_bias" in data:
+        direction = data["diag_trend_bias"].fillna("unknown").astype(str).str.lower()
+    else:
+        direction = pd.Series(
+            np.where(data["long_prob"].astype(float) >= data["short_prob"].astype(float), "long", "short"),
+            index=data.index,
+            dtype="object",
+        )
+    return direction.where(direction.isin(PROBABILITY_DIRECTIONS), "none")
+
+
+def _direction_probability_series(data, direction):
+    return pd.to_numeric(data[PROBABILITY_DIRECTIONS[direction]["raw_col"]], errors="coerce").fillna(0.0).astype(float)
+
+
+def _direction_gap_series(data):
+    long_prob = pd.to_numeric(data["long_prob"], errors="coerce").fillna(0.0).astype(float)
+    short_prob = pd.to_numeric(data["short_prob"], errors="coerce").fillna(0.0).astype(float)
+    return (long_prob - short_prob).abs()
+
+
+def _gate_metrics_for_direction(data, direction, threshold, gap):
+    rows = int(len(data))
+    target = _trade_target_series_for_direction(data, direction)
+    probs = _direction_probability_series(data, direction)
+    gaps = _direction_gap_series(data)
+    passed = (probs > float(threshold)) & (gaps >= float(gap))
+
+    tp = int((passed & target).sum())
+    fp = int((passed & ~target).sum())
+    fn = int((~passed & target).sum())
+    tn = int((~passed & ~target).sum())
+    trade_rows = int(target.sum())
+    no_trade_rows = int(rows - trade_rows)
+    precision = tp / max(tp + fp, 1)
+    recall = tp / max(trade_rows, 1)
+    f1 = (2 * precision * recall / max(precision + recall, 1e-12)) if (precision + recall) > 0 else 0.0
+
+    return {
+        "threshold": float(threshold),
+        "gap": float(gap),
+        "rows": rows,
+        "trade_rows": trade_rows,
+        "no_trade_rows": no_trade_rows,
+        "pass_rows": int(passed.sum()),
+        "pass_pct": float(passed.mean() * 100.0) if rows else 0.0,
+        "tp": tp,
+        "fp": fp,
+        "fn": fn,
+        "tn": tn,
+        "precision": float(precision),
+        "recall": float(recall),
+        "f1": float(f1),
+        "false_positive_rate": float(fp / max(no_trade_rows, 1)),
+    }
+
+
+def _trade_target_series_for_direction(data, direction):
+    if "actual_label" in data.columns:
+        return direction_target_series(data, direction).astype(int) == 1
+    if "target" in data.columns and "diag_trend_bias" in data.columns:
+        trend_direction = data["diag_trend_bias"].fillna("unknown").astype(str).str.lower()
+        return (data["target"].astype(int) == 1) & (trend_direction == str(direction).lower())
+    return direction_target_series(data, direction).astype(int) == 1
+
+
+def _rank_gate_metrics(item, min_trade_rows):
+    enough_labels = 1 if int(item.get("trade_rows") or 0) >= int(min_trade_rows) else 0
+    return (
+        enough_labels,
+        float(item.get("f1") or 0.0),
+        float(item.get("precision") or 0.0),
+        float(item.get("recall") or 0.0),
+        -float(item.get("false_positive_rate") or 0.0),
+        -float(item.get("pass_pct") or 0.0),
+    )
+
+
+def _regime_direction_action(base_gate, recommended_gate, probability_quantiles, *, min_group_rows, min_trade_rows):
+    reasons = []
+    if int(base_gate.get("rows") or 0) < int(min_group_rows):
+        return "insufficient_rows", ["group_rows_below_minimum"]
+    if int(base_gate.get("trade_rows") or 0) < int(min_trade_rows):
+        return "insufficient_trade_labels", ["trade_labels_below_minimum"]
+
+    true_trade = probability_quantiles.get("true_trade") or {}
+    true_no_trade = probability_quantiles.get("true_no_trade") or {}
+    false_positive = probability_quantiles.get("false_positive") or {}
+    true_trade_p50 = true_trade.get("p50")
+    true_no_trade_p50 = true_no_trade.get("p50")
+    false_positive_p50 = false_positive.get("p50")
+    base_threshold = float(base_gate.get("threshold") or 0.0)
+    base_precision = float(base_gate.get("precision") or 0.0)
+    base_recall = float(base_gate.get("recall") or 0.0)
+    recommended_f1 = float(recommended_gate.get("f1") or 0.0)
+    base_f1 = float(base_gate.get("f1") or 0.0)
+
+    if base_recall == 0.0 and true_trade_p50 is not None and true_trade_p50 <= base_threshold:
+        reasons.append("true_trade_prob_below_base_threshold")
+    if (
+        true_trade_p50 is not None
+        and true_no_trade_p50 is not None
+        and true_trade_p50 <= true_no_trade_p50
+    ):
+        reasons.append("true_trade_prob_not_above_no_trade")
+    if (
+        true_trade_p50 is not None
+        and false_positive_p50 is not None
+        and false_positive_p50 > true_trade_p50
+    ):
+        reasons.append("false_positive_prob_above_true_trade")
+
+    if "true_trade_prob_not_above_no_trade" in reasons or "false_positive_prob_above_true_trade" in reasons:
+        return "probability_inversion_retrain_or_group_calibrate", reasons
+    if "true_trade_prob_below_base_threshold" in reasons:
+        return "probability_scale_low_consider_group_threshold_or_calibration", reasons
+    if recommended_f1 > base_f1 + 0.05:
+        return "use_regime_direction_gate_candidate", ["candidate_improves_f1"]
+    if base_precision < 0.20 and int(base_gate.get("fp") or 0) > int(base_gate.get("tp") or 0):
+        return "tighten_or_retrain_false_positives", ["false_positives_exceed_true_positives"]
+    return "keep_base_gate", ["base_gate_is_competitive"]
+
+
+def build_regime_direction_probability_report(
+    data,
+    threshold_candidates,
+    gap_candidates,
+    *,
+    min_group_rows=30,
+    min_trade_rows=5,
+    top_n=8,
+):
+    if data.empty:
+        return {
+            "enabled": True,
+            "rows": 0,
+            "groups": {},
+            "recommended": [],
+        }
+
+    working = data.copy()
+    working["_calibration_regime"] = (
+        working.get("diag_regime", pd.Series("unknown", index=working.index))
+        .fillna("unknown")
+        .astype(str)
+        .str.lower()
+    )
+    working["_calibration_direction"] = _direction_context_series(working)
+    working = working[working["_calibration_direction"].isin(PROBABILITY_DIRECTIONS)].copy()
+
+    thresholds = unique_sorted(float(value) for value in threshold_candidates)
+    gaps = unique_sorted(float(value) for value in gap_candidates)
+    groups = {}
+    recommended = []
+
+    for (regime, direction), group in working.groupby(["_calibration_regime", "_calibration_direction"], sort=True):
+        base_threshold = float(config.THRESHOLD_LONG if direction == "long" else config.THRESHOLD_SHORT)
+        base_gap = float(config.SIGNAL_MIN_PROB_DIFF)
+        local_thresholds = unique_sorted([*thresholds, base_threshold])
+        local_gaps = unique_sorted([*gaps, base_gap])
+        base_gate = _gate_metrics_for_direction(group, direction, base_threshold, base_gap)
+
+        sweep = []
+        for threshold in local_thresholds:
+            for gap in local_gaps:
+                sweep.append(_gate_metrics_for_direction(group, direction, threshold, gap))
+        ranked = sorted(
+            sweep,
+            key=lambda item: _rank_gate_metrics(item, min_trade_rows),
+            reverse=True,
+        )
+        recommended_gate = ranked[0] if ranked else base_gate
+
+        target = _trade_target_series_for_direction(group, direction)
+        probs = _direction_probability_series(group, direction)
+        gaps_series = _direction_gap_series(group)
+        base_passed = (probs > base_threshold) & (gaps_series >= base_gap)
+        probability_quantiles = {
+            "all": _probability_quantiles(probs),
+            "true_trade": _probability_quantiles(probs[target]),
+            "true_no_trade": _probability_quantiles(probs[~target]),
+            "true_positive": _probability_quantiles(probs[target & base_passed]),
+            "false_negative": _probability_quantiles(probs[target & ~base_passed]),
+            "false_positive": _probability_quantiles(probs[~target & base_passed]),
+            "true_negative": _probability_quantiles(probs[~target & ~base_passed]),
+            "gap_all": _probability_quantiles(gaps_series),
+        }
+        action, action_reasons = _regime_direction_action(
+            base_gate,
+            recommended_gate,
+            probability_quantiles,
+            min_group_rows=min_group_rows,
+            min_trade_rows=min_trade_rows,
+        )
+        key = f"{regime}:{direction}"
+        summary = {
+            "regime": str(regime),
+            "direction": str(direction),
+            "rows": int(len(group)),
+            "base_gate": base_gate,
+            "recommended_gate": recommended_gate,
+            "recommended_action": action,
+            "action_reasons": action_reasons,
+            "probability_quantiles": probability_quantiles,
+            "threshold_sweep_top": ranked[: int(top_n)],
+        }
+        groups[key] = summary
+        if action not in {"insufficient_rows", "insufficient_trade_labels", "keep_base_gate"}:
+            recommended.append({
+                "group": key,
+                "regime": str(regime),
+                "direction": str(direction),
+                "action": action,
+                "reasons": action_reasons,
+                "base_gate": base_gate,
+                "recommended_gate": recommended_gate,
+            })
+
+    recommended = sorted(
+        recommended,
+        key=lambda item: (
+            int(item["base_gate"].get("trade_rows") or 0),
+            float(item["recommended_gate"].get("f1") or 0.0) - float(item["base_gate"].get("f1") or 0.0),
+        ),
+        reverse=True,
+    )
+    return {
+        "enabled": True,
+        "rows": int(len(working)),
+        "min_group_rows": int(min_group_rows),
+        "min_trade_rows": int(min_trade_rows),
+        "threshold_candidates": [float(value) for value in thresholds],
+        "gap_candidates": [float(value) for value in gaps],
+        "base_gate": {
+            "threshold_long": float(config.THRESHOLD_LONG),
+            "threshold_short": float(config.THRESHOLD_SHORT),
+            "signal_min_prob_diff": float(config.SIGNAL_MIN_PROB_DIFF),
+        },
+        "groups": groups,
+        "recommended": recommended,
+    }
+
+
 def build_label_strength_candidates(lookaheads, take_profits, stop_losses):
     candidates = []
     for lookahead in lookaheads:
@@ -957,6 +1216,28 @@ def parse_args(argv=None):
         default=int(os.getenv("THRESHOLD_CALIBRATION_PROBABILITY_ROWS", "0")),
         help="概率校准拟合来源尾部 N 行；<=0 表示全量",
     )
+    parser.add_argument(
+        "--regime-direction-thresholds",
+        default=os.getenv("REGIME_DIRECTION_CALIBRATION_THRESHOLDS"),
+        help="逗号分隔 regime+direction 局部诊断阈值；默认包含低概率段",
+    )
+    parser.add_argument(
+        "--regime-direction-gaps",
+        default=os.getenv("REGIME_DIRECTION_CALIBRATION_GAPS"),
+        help="逗号分隔 regime+direction 局部诊断概率差阈值",
+    )
+    parser.add_argument(
+        "--regime-direction-min-rows",
+        type=int,
+        default=int(os.getenv("REGIME_DIRECTION_CALIBRATION_MIN_ROWS", "30")),
+        help="regime+direction 分组诊断最低样本数",
+    )
+    parser.add_argument(
+        "--regime-direction-min-trades",
+        type=int,
+        default=int(os.getenv("REGIME_DIRECTION_CALIBRATION_MIN_TRADES", "5")),
+        help="regime+direction 分组推荐最低 trade 标签数",
+    )
     parser.add_argument("--raw-labels", action="store_true", help="使用原始涨跌标签，不按交易门禁过滤")
     parser.add_argument("--min-closed-trades", type=int, default=int(os.getenv("THRESHOLD_CALIBRATION_MIN_CLOSED_TRADES", "5")), help="推荐排序最低平仓笔数")
     parser.add_argument("--skip-label-strength", action="store_true", help="跳过标签强度 sweep")
@@ -997,6 +1278,15 @@ def main(argv=None):
     default_gaps = [0.08, 0.12, 0.16, 0.20, float(config.SIGNAL_MIN_PROB_DIFF)]
     default_min_target_ratios = [0.01, 0.02, 0.04, float(config.MIN_SIGNAL_TARGET_RATIO)]
     default_position_probability_centers = [0.35, 0.40, 0.45, 0.50, float(config.POSITION_PROBABILITY_CENTER)]
+    default_regime_direction_thresholds = [
+        0.02, 0.04, 0.06, 0.08, 0.10,
+        0.15, 0.20, 0.25, 0.30, 0.35,
+        0.40, 0.45, 0.50, 0.55, 0.60,
+        0.65, 0.70, 0.75, 0.80,
+        float(config.THRESHOLD_LONG),
+        float(config.THRESHOLD_SHORT),
+    ]
+    default_regime_direction_gaps = [0.0, 0.04, 0.08, 0.12, float(config.SIGNAL_MIN_PROB_DIFF)]
     default_label_lookaheads = [24, 36, 48, 72]
     default_label_take_profits = [0.018, 0.022, 0.026, float(config.TAKE_PROFIT)]
     default_label_stop_losses = [0.010, 0.012, 0.014, float(config.STOP_LOSS)]
@@ -1007,6 +1297,14 @@ def main(argv=None):
     position_probability_centers = parse_float_list(
         args.position_probability_centers,
         default_position_probability_centers,
+    )
+    regime_direction_thresholds = parse_float_list(
+        args.regime_direction_thresholds,
+        default_regime_direction_thresholds,
+    )
+    regime_direction_gaps = parse_float_list(
+        args.regime_direction_gaps,
+        default_regime_direction_gaps,
     )
     label_lookaheads = parse_int_list(args.label_lookaheads, default_label_lookaheads)
     label_take_profits = parse_float_list(args.label_take_profits, default_label_take_profits)
@@ -1122,6 +1420,13 @@ def main(argv=None):
                 else None
             ),
         },
+        "regime_direction_calibration": build_regime_direction_probability_report(
+            data,
+            regime_direction_thresholds,
+            regime_direction_gaps,
+            min_group_rows=int(args.regime_direction_min_rows),
+            min_trade_rows=int(args.regime_direction_min_trades),
+        ),
         "threshold_probability_mode": "calibrated" if using_calibrated_probabilities else "raw",
         "label_strength": label_strength_report,
         "label_strength_model_sweep": {"enabled": False, "reason": "not_requested"},

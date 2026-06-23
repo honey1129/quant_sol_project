@@ -92,6 +92,40 @@ class TradeThresholdCalibrationTests(unittest.TestCase):
         self.assertEqual(float(out.loc[0, "short_prob"]), 0.2)
         self.assertEqual(out.loc[0, "pred_direction"], "long")
 
+    def test_regime_direction_calibration_flags_probability_inversion(self):
+        index = pd.date_range("2026-01-01", periods=6, freq="5min", tz="UTC")
+        data = pd.DataFrame({
+            "target": [1, 1, 0, 0, 0, 0],
+            "actual_label": [1, 1, 2, 2, 2, 2],
+            "long_prob": [0.08, 0.12, 0.55, 0.65, 0.03, 0.04],
+            "short_prob": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "diag_trend_bias": ["long"] * 6,
+            "diag_regime": ["trend_long"] * 6,
+        }, index=index)
+
+        with patch("run.calibrate_trade_thresholds.config.THRESHOLD_LONG", 0.50):
+            with patch("run.calibrate_trade_thresholds.config.THRESHOLD_SHORT", 0.50):
+                with patch("run.calibrate_trade_thresholds.config.SIGNAL_MIN_PROB_DIFF", 0.0):
+                    report = calibration.build_regime_direction_probability_report(
+                        data,
+                        threshold_candidates=[0.05, 0.10, 0.50],
+                        gap_candidates=[0.0],
+                        min_group_rows=1,
+                        min_trade_rows=1,
+                    )
+
+        group = report["groups"]["trend_long:long"]
+        self.assertEqual(group["base_gate"]["tp"], 0)
+        self.assertEqual(group["base_gate"]["fp"], 2)
+        self.assertEqual(group["base_gate"]["recall"], 0.0)
+        self.assertEqual(
+            group["recommended_action"],
+            "probability_inversion_retrain_or_group_calibrate",
+        )
+        self.assertIn("false_positive_prob_above_true_trade", group["action_reasons"])
+        self.assertAlmostEqual(group["probability_quantiles"]["true_trade"]["p50"], 0.10)
+        self.assertEqual(report["recommended"][0]["group"], "trend_long:long")
+
     def test_label_strength_summary_reports_trade_density_and_direction_balance(self):
         index = pd.date_range("2026-01-01", periods=4, freq="5min", tz="UTC")
         data = pd.DataFrame({

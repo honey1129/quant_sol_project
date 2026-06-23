@@ -472,6 +472,7 @@ POLL_SEC=10
 - `THRESHOLD_LONG=0.56` / `THRESHOLD_SHORT=0.56` / `SIGNAL_MIN_PROB_DIFF=0.12`：当前示例阈值配合新版标签和模型概率尺度，复制旧模型时不要盲目套用。
 - `POSITION_PROBABILITY_CENTER=0.45`：仓位 sizing 的概率起点；二分类质量模型的概率更稀疏，需和阈值、`MIN_SIGNAL_TARGET_RATIO` 一起校准。
 - `REGIME_HIGH_VOL_ALLOW_TRADES=false` / `REGIME_TREND_AGAINST_BLOCK=true`：高波动趋势区间不放行逆势交易，尤其防止 `trend_short` 中强行开多。
+- `REGIME_DIRECTION_CALIBRATION_THRESHOLDS` / `REGIME_DIRECTION_CALIBRATION_GAPS`：只用于离线校准报告；会额外扫描低概率段，定位 `trend_long` 被整体压低或 `trend_short` 误报过高这类分组问题，不会直接改变实盘门槛。
 - `MODEL_RECENT_SAMPLE_WEIGHT_BOOST=0.5` / `MODEL_TRADE_SAMPLE_WEIGHT_MULTIPLIER=2.0`：训练不随机下采样；样本权重先平衡 trade/no_trade，再在类别内部按 regime+direction 平衡，并更重视近期样本，目标是改善后段 walk-forward 的 trade recall。
 - `MIN_ADJUST_AMOUNT=150` / `BACKTEST_MIN_ADJUST_AMOUNT=40`：实盘最小调仓和回测最小调仓分开配置，避免小额回测收益被线上最小交易额吞掉。
 - `BACKTEST_FORCE_CLOSE_ON_END=1`：回测/重训验证窗口结束时强制按最后收盘价结算未平仓，避免 walk-forward 折内最后一笔交易漏计平仓数和 PF。
@@ -536,10 +537,11 @@ python -m run.calibrate_trade_thresholds --split oos --asymmetric \
   --short-thresholds 0.40,0.45,0.50,0.55,0.60 \
   --gaps 0.04,0.08,0.12 \
   --min-target-ratios 0.01,0.02,0.04 \
-  --position-probability-centers 0.35,0.40,0.45,0.50
+  --position-probability-centers 0.35,0.40,0.45,0.50 \
+  --regime-direction-thresholds 0.02,0.04,0.06,0.08,0.10,0.15,0.20,0.30,0.40,0.50,0.60
 ```
 
-脚本会把 Brier、ECE、概率分桶、候选阈值回测结果写入 `logs/trade_threshold_calibration_*.json`。如需验证概率校准器，可额外加：
+脚本会把 Brier、ECE、概率分桶、候选阈值回测结果写入 `logs/trade_threshold_calibration_*.json`。报告里的 `regime_direction_calibration` 会按 `trend_long:long`、`trend_short:short` 等分组输出 base gate、推荐 gate、真实 trade / no_trade 概率分位、误报/漏报切片和建议动作，用来判断某个分组是该降低门槛、收紧门槛，还是概率倒挂需要重训/分组校准。如需验证概率校准器，可额外加：
 
 ```bash
 --probability-calibration sigmoid --probability-calibration-source validation
@@ -835,7 +837,7 @@ PYTHONPATH=. .venv/bin/python -m run.daily_trade_report
 - `logs/runtime_dashboard_baseline.json`: Dashboard 收益基线
 - `logs/backtest_*.csv`: 回测交易记录与汇总
 - `logs/training_diagnostics_*.json`: regime 分层分类指标、混淆矩阵、信号方向占比与回测诊断
-- `logs/trade_threshold_calibration_*.json`: 阈值 sweep、Brier/ECE、概率分桶和候选交易质量报告
+- `logs/trade_threshold_calibration_*.json`: 阈值 sweep、Brier/ECE、概率分桶、regime+direction 分组准入诊断和候选交易质量报告
 - `logs/market_data_audit_*.json`: OKX K线连续性、跨周期对齐和可选外部价格对照报告
 
 ## 单元测试
