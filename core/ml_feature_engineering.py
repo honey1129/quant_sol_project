@@ -60,6 +60,8 @@ def _is_excluded_model_feature(col):
     col = str(col)
     if col in MODEL_FEATURE_EXCLUDE_EXACT:
         return True
+    if col.startswith("label_"):
+        return True
     return col.endswith(MODEL_FEATURE_EXCLUDE_SUFFIXES)
 
 

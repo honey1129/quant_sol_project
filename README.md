@@ -76,11 +76,11 @@ quant_sol_project/
 - 生成多周期特征、高级特征、regime/trend 显式特征和平稳化派生特征
 - 训练时通过 `model_feature_columns()` 排除绝对价格水位、原始成交量、累计 OBV、confirm 标志等非平稳列
 - `.env.example` 默认使用 `MODEL_LABEL_FUTURE_WINDOW=8` / `MODEL_LABEL_THRESHOLD=0.004`，让标签避开 5m 小噪声
-- 默认关闭 label 阶段 tradable 过滤：`MODEL_TRAIN_TRADABLE_LABELS=0`，regime/trend 闸仍在交易决策层生效
-- 默认启用三分类质量标签：short / long / no_trade
+- 默认启用二分类交易质量标签：`trade / no_trade`；方向由 trend/regime 规则决定
+- realistic 标签要求规则允许开仓、未来先触发 TP、扣除估算手续费/滑点后仍有正收益，并记录 MFE/MAE 质量诊断
 - 可选接入 Rubik OI/taker/多空比平稳特征：`MODEL_USE_RUBIK_FEATURES=1` 时才拉取
 - 按时间顺序切分训练集 / 验证集 / 最终 OOS 回测集，中间留 purge gap，避免未来数据泄漏
-- 使用 sample weight 平衡 long / short / no_trade，并在方向内部按 regime 平衡，不再随机下采样破坏时间序列
+- 使用 sample weight 平衡 trade / no_trade，并轻微提高近期样本权重，不再随机下采样破坏时间序列
 - 产出模型文件、特征列表和训练元数据
 
 默认模型输出：
@@ -321,7 +321,10 @@ MODEL_LABEL_USE_REALISTIC=1
 MODEL_LABEL_LOOKAHEAD_BARS=24
 MODEL_LABEL_TAKE_PROFIT=0.016
 MODEL_LABEL_STOP_LOSS=0.014
-MODEL_TRAIN_TRADABLE_LABELS=0
+MODEL_LABEL_MIN_NET_RETURN=0.0
+MODEL_LABEL_MAX_MAE_RATIO=1.0
+MODEL_LABEL_REQUIRE_REGIME_ALLOWED=1
+MODEL_TRAIN_TRADABLE_LABELS=1
 MODEL_TRAIN_NO_TRADE_LABELS=1
 MODEL_USE_RUBIK_FEATURES=0
 MODEL_RUBIK_PERIOD=1H
@@ -462,8 +465,9 @@ POLL_SEC=10
 
 - `WINDOWS=5m:15000,15m:6000,1H:2000`：拉长训练窗口；模型输入已平稳化，跨价位段样本更可复用。
 - `MODEL_LABEL_FUTURE_WINDOW=8` / `MODEL_LABEL_THRESHOLD=0.004`：threshold 标签备用口径，目标是避开 5m 细碎噪声。
-- `MODEL_LABEL_LOOKAHEAD_BARS=24` / `MODEL_LABEL_TAKE_PROFIT=0.016` / `MODEL_LABEL_STOP_LOSS=0.014`：realistic 二分类质量标签的当前校准口径；OOS 标签强度 sweep 中 trade 标签占比约 8%，比旧的 `48/0.028/0.012` 更适合当前概率尺度。
-- `MODEL_TRAIN_TRADABLE_LABELS=0` / `MODEL_TRAIN_NO_TRADE_LABELS=1`：训练标签保留原始方向和 no_trade 质量标签；regime/trend 过滤留在交易决策层执行。
+- `MODEL_LABEL_LOOKAHEAD_BARS=24` / `MODEL_LABEL_TAKE_PROFIT=0.016` / `MODEL_LABEL_STOP_LOSS=0.014`：realistic 二分类质量标签的当前校准口径，目标是让模型学习“当前规则方向是否值得交易”。
+- `MODEL_LABEL_MIN_NET_RETURN=0.0` / `MODEL_LABEL_MAX_MAE_RATIO=1.0`：trade 标签必须扣除估算手续费/滑点后仍不亏，且触发 TP 前的最大不利波动不超过止损距离。
+- `MODEL_LABEL_REQUIRE_REGIME_ALLOWED=1` / `MODEL_TRAIN_TRADABLE_LABELS=1` / `MODEL_TRAIN_NO_TRADE_LABELS=1`：标签与线上可交易规则保持一致；被 trend/regime 规则拒绝的样本标为 no_trade。
 - `MODEL_USE_RUBIK_FEATURES=0`：Rubik OI/taker/多空比特征默认关闭。开启前应重新训练并用 OOS 回测确认收益质量。
 - `THRESHOLD_LONG=0.56` / `THRESHOLD_SHORT=0.56` / `SIGNAL_MIN_PROB_DIFF=0.12`：当前示例阈值配合新版标签和模型概率尺度，复制旧模型时不要盲目套用。
 - `POSITION_PROBABILITY_CENTER=0.45`：仓位 sizing 的概率起点；二分类质量模型的概率更稀疏，需和阈值、`MIN_SIGNAL_TARGET_RATIO` 一起校准。

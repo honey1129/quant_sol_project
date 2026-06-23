@@ -388,6 +388,302 @@ def aggregate_regime_signal_summaries(summaries):
     return aggregate
 
 
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            return value
+    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+        return str(value)
+    return value
+
+
+def _direction_counts_from_probabilities(long_probs, short_probs):
+    counts = {"long": 0, "short": 0, "flat": 0}
+    for long_prob, short_prob in zip(long_probs, short_probs):
+        long_prob = float(long_prob)
+        short_prob = float(short_prob)
+        if long_prob > short_prob:
+            counts["long"] += 1
+        elif short_prob > long_prob:
+            counts["short"] += 1
+        else:
+            counts["flat"] += 1
+    total = max(1, sum(counts.values()))
+    return {
+        **counts,
+        "long_pct": counts["long"] / total * 100.0,
+        "short_pct": counts["short"] / total * 100.0,
+        "flat_pct": counts["flat"] / total * 100.0,
+    }
+
+
+def _active_direction_counts(long_probs, short_probs, is_active):
+    counts = {"long": 0, "short": 0, "flat": 0}
+    for long_prob, short_prob, active in zip(long_probs, short_probs, is_active):
+        if not bool(active):
+            counts["flat"] += 1
+        elif float(long_prob) > float(short_prob):
+            counts["long"] += 1
+        elif float(short_prob) > float(long_prob):
+            counts["short"] += 1
+        else:
+            counts["flat"] += 1
+    total = max(1, sum(counts.values()))
+    return {
+        **counts,
+        "long_pct": counts["long"] / total * 100.0,
+        "short_pct": counts["short"] / total * 100.0,
+        "flat_pct": counts["flat"] / total * 100.0,
+    }
+
+
+def _target_counts(y):
+    return {str(k): int(v) for k, v in y.astype(int).value_counts().sort_index().items()}
+
+
+def _series_counts(df, col):
+    if col not in df:
+        return {}
+    return {str(k): int(v) for k, v in df[col].fillna("unknown").astype(str).value_counts().sort_index().items()}
+
+
+def _label_quality_summary(df):
+    rows = int(len(df))
+    if rows == 0 or "target" not in df:
+        return {"rows": rows, "trade_rows": 0, "no_trade_rows": rows, "trade_pct": 0.0}
+    y = df["target"].astype(int)
+    trade_rows = int((y == 1).sum())
+    summary = {
+        "rows": rows,
+        "trade_rows": trade_rows,
+        "no_trade_rows": int(rows - trade_rows),
+        "trade_pct": float(trade_rows / rows * 100.0) if rows else 0.0,
+        "target_counts": _target_counts(y),
+        "direction_counts": _series_counts(df, "label_direction"),
+        "trend_counts": _series_counts(df, "label_trend_bias"),
+        "regime_counts": _series_counts(df, "label_regime"),
+        "outcome_counts": _series_counts(df, "label_outcome"),
+        "reject_reason_counts": _series_counts(df, "label_reject_reason"),
+    }
+    return summary
+
+
+def _confusion_matrix(y_true, y_pred):
+    true_series = pd.Series(y_true).astype(int).reset_index(drop=True)
+    pred_series = pd.Series(y_pred).astype(int).reset_index(drop=True)
+    matrix = [[0, 0], [0, 0]]
+    for actual, predicted in zip(true_series, pred_series):
+        if actual in {0, 1} and predicted in {0, 1}:
+            matrix[int(actual)][int(predicted)] += 1
+    return matrix
+
+
+def _safe_classification_report(y_true, y_pred):
+    matrix = _confusion_matrix(y_true, y_pred)
+    total = sum(sum(row) for row in matrix)
+    report = {}
+    for label, name in ((0, "no_trade"), (1, "trade")):
+        tp = matrix[label][label]
+        fp = matrix[1 - label][label]
+        fn = matrix[label][1 - label]
+        support = sum(matrix[label])
+        precision = tp / (tp + fp) if (tp + fp) else 0.0
+        recall = tp / (tp + fn) if (tp + fn) else 0.0
+        f1 = 2.0 * precision * recall / (precision + recall) if (precision + recall) else 0.0
+        report[name] = {
+            "precision": float(precision),
+            "recall": float(recall),
+            "f1-score": float(f1),
+            "support": int(support),
+        }
+    accuracy = (matrix[0][0] + matrix[1][1]) / total if total else 0.0
+    report["accuracy"] = float(accuracy)
+    report["macro avg"] = {
+        "precision": float((report["no_trade"]["precision"] + report["trade"]["precision"]) / 2.0),
+        "recall": float((report["no_trade"]["recall"] + report["trade"]["recall"]) / 2.0),
+        "f1-score": float((report["no_trade"]["f1-score"] + report["trade"]["f1-score"]) / 2.0),
+        "support": int(total),
+    }
+    return report
+
+
+def _binary_metrics(y_true, y_pred):
+    matrix = _confusion_matrix(y_true, y_pred)
+    tp = matrix[1][1]
+    fp = matrix[0][1]
+    fn = matrix[1][0]
+    precision = tp / (tp + fp) if (tp + fp) else 0.0
+    recall = tp / (tp + fn) if (tp + fn) else 0.0
+    f1 = 2.0 * precision * recall / (precision + recall) if (precision + recall) else 0.0
+    return {
+        "trade_precision": float(precision),
+        "trade_recall": float(recall),
+        "trade_f1": float(f1),
+    }
+
+
+def build_walk_forward_fold_diagnostics(fold, train_df, validation_df, feature_cols, fold_models, model_weights, metadata):
+    from core import signal_engine
+    from core.trend_filter import derive_trend_context
+
+    X_validation = validation_df[feature_cols].astype(float)
+    y_true = validation_df["target"].astype(int)
+    model_predictions = {}
+    proba_sum = None
+    used_weight_total = 0.0
+    trend_biases = []
+
+    for _, row in validation_df.iterrows():
+        trend_context = derive_trend_context(
+            row,
+            interval=config.TREND_FILTER_INTERVAL,
+            fast_col=config.TREND_FILTER_FAST_COL,
+            slow_col=config.TREND_FILTER_SLOW_COL,
+            min_gap=config.TREND_FILTER_MIN_GAP,
+        )
+        trend_biases.append(str(trend_context.get("trend_bias") or "neutral"))
+
+    for name, model in fold_models.items():
+        raw_pred = pd.Series(model.predict(X_validation), index=X_validation.index).astype(int)
+        model_predictions[name] = {
+            "prediction_counts": _target_counts(raw_pred),
+            "classification_report": _json_safe(_safe_classification_report(y_true, raw_pred)),
+            "confusion_matrix": _confusion_matrix(y_true, raw_pred),
+            **_binary_metrics(y_true, raw_pred),
+        }
+
+        try:
+            weight = float(model_weights.get(name, 1.0))
+        except (TypeError, ValueError):
+            weight = 1.0
+        if weight <= 0:
+            continue
+        weighted_rows = []
+        for row_idx in range(len(X_validation)):
+            row_frame = X_validation.iloc[row_idx:row_idx + 1]
+            directional = signal_engine.weighted_predict_proba(
+                {name: model},
+                row_frame,
+                {name: 1.0},
+                trend_bias=trend_biases[row_idx],
+                model_metadata=metadata,
+            )
+            weighted_rows.append(directional)
+        model_proba = pd.DataFrame(weighted_rows, columns=["short_prob", "long_prob"], index=X_validation.index)
+        if proba_sum is None:
+            proba_sum = model_proba * weight
+        else:
+            proba_sum = proba_sum.add(model_proba * weight, fill_value=0.0)
+        used_weight_total += weight
+
+    if proba_sum is not None and used_weight_total > 0:
+        ensemble_proba = proba_sum / used_weight_total
+        trade_prob = ensemble_proba.max(axis=1)
+        y_pred = (trade_prob >= 0.5).astype(int)
+        signal_direction_counts = _direction_counts_from_probabilities(
+            ensemble_proba["long_prob"],
+            ensemble_proba["short_prob"],
+        )
+        predicted_trade_direction_counts = _active_direction_counts(
+            ensemble_proba["long_prob"],
+            ensemble_proba["short_prob"],
+            y_pred,
+        )
+    else:
+        y_pred = pd.Series(0, index=X_validation.index, dtype=int)
+        signal_direction_counts = {"long": 0, "short": 0, "flat": int(len(X_validation)), "long_pct": 0.0, "short_pct": 0.0, "flat_pct": 100.0}
+        predicted_trade_direction_counts = dict(signal_direction_counts)
+
+    validation_with_pred = validation_df.copy()
+    validation_with_pred["_pred_target"] = y_pred.to_numpy()
+    by_regime = {}
+    if "label_regime" in validation_with_pred:
+        for regime, group in validation_with_pred.groupby(validation_with_pred["label_regime"].fillna("unknown").astype(str), sort=True):
+            group_true = group["target"].astype(int)
+            group_pred = group["_pred_target"].astype(int)
+            by_regime[str(regime)] = {
+                "rows": int(len(group)),
+                "target_counts": _target_counts(group_true),
+                "prediction_counts": _target_counts(group_pred),
+                "confusion_matrix": _confusion_matrix(group_true, group_pred),
+                **_binary_metrics(group_true, group_pred),
+            }
+
+    diagnostics = {
+        "fold": int(fold["fold"]),
+        "train": {
+            "rows": int(len(train_df)),
+            "target_counts": _target_counts(train_df["target"].astype(int)),
+            "label_quality_summary": _label_quality_summary(train_df),
+        },
+        "validation": {
+            "rows": int(len(validation_df)),
+            "target_counts": _target_counts(y_true),
+            "label_quality_summary": _label_quality_summary(validation_df),
+            "trend_counts": {str(k): int(v) for k, v in pd.Series(trend_biases).value_counts().sort_index().items()},
+            "regime_counts": (
+                {str(k): int(v) for k, v in validation_df["label_regime"].fillna("unknown").astype(str).value_counts().sort_index().items()}
+                if "label_regime" in validation_df else {}
+            ),
+            "direction_counts": (
+                {str(k): int(v) for k, v in validation_df["label_direction"].fillna("unknown").astype(str).value_counts().sort_index().items()}
+                if "label_direction" in validation_df else {}
+            ),
+            "outcome_counts": (
+                {str(k): int(v) for k, v in validation_df["label_outcome"].fillna("unknown").astype(str).value_counts().sort_index().items()}
+                if "label_outcome" in validation_df else {}
+            ),
+            "reject_reason_counts": (
+                {str(k): int(v) for k, v in validation_df["label_reject_reason"].fillna("unknown").astype(str).value_counts().sort_index().items()}
+                if "label_reject_reason" in validation_df else {}
+            ),
+        },
+        "ensemble": {
+            "prediction_counts": _target_counts(pd.Series(y_pred)),
+            "confusion_matrix": _confusion_matrix(y_true, y_pred),
+            "classification_report": _json_safe(_safe_classification_report(y_true, y_pred)),
+            "signal_direction_counts": signal_direction_counts,
+            "predicted_trade_direction_counts": predicted_trade_direction_counts,
+            **_binary_metrics(y_true, y_pred),
+        },
+        "by_regime": by_regime,
+        "models": model_predictions,
+    }
+    return _json_safe(diagnostics)
+
+
+def write_walk_forward_fold_diagnostics(log_file, diagnostics):
+    ensemble = diagnostics.get("ensemble") or {}
+    validation = diagnostics.get("validation") or {}
+    with open(log_file, "a", encoding="utf-8") as file:
+        file.write(
+            "fold_label_diagnostics "
+            f"fold={diagnostics.get('fold')} "
+            f"train_targets={diagnostics.get('train', {}).get('target_counts', {})} "
+            f"validation_targets={validation.get('target_counts', {})} "
+            f"validation_regimes={validation.get('regime_counts', {})} "
+            f"validation_rejects={validation.get('reject_reason_counts', {})}\n"
+        )
+        file.write(
+            "fold_prediction_diagnostics "
+            f"fold={diagnostics.get('fold')} "
+            f"predictions={ensemble.get('prediction_counts', {})} "
+            f"trade_precision={float(ensemble.get('trade_precision', 0.0)):.4f} "
+            f"trade_recall={float(ensemble.get('trade_recall', 0.0)):.4f} "
+            f"trade_f1={float(ensemble.get('trade_f1', 0.0)):.4f} "
+            f"signal_directions={ensemble.get('signal_direction_counts', {})} "
+            f"active_directions={ensemble.get('predicted_trade_direction_counts', {})} "
+            f"confusion_matrix={ensemble.get('confusion_matrix', [])}\n"
+        )
+        file.write("fold_diagnostics_json " + json.dumps(diagnostics, ensure_ascii=False, sort_keys=True) + "\n")
+
+
 def aggregate_backtest_summaries(summaries):
     fold_count = len(summaries)
     closed_trade_count = sum(int(item.get("closed_trade_count", 0)) for item in summaries)
@@ -513,6 +809,16 @@ def run_walk_forward_validation(log_file, context_backtester, metadata, feature_
         X_train = train_df[feature_cols].astype(float)
         y_train = train_df["target"]
         fold_models, _, _, _ = train_model_bundle(X_train, y_train)
+        fold_diagnostics = build_walk_forward_fold_diagnostics(
+            fold,
+            train_df,
+            validation_df,
+            feature_cols,
+            fold_models,
+            config.MODEL_WEIGHTS,
+            metadata,
+        )
+        write_walk_forward_fold_diagnostics(log_file, fold_diagnostics)
         fold_data = context_backtester.data.loc[
             (context_backtester.data.index >= validation_df.index.min()) &
             (context_backtester.data.index <= validation_df.index.max())
@@ -557,6 +863,7 @@ def run_walk_forward_validation(log_file, context_backtester, metadata, feature_
             "validation_rows": int(len(fold_data)),
             "validation_start": validation_df.index.min().isoformat(),
             "validation_end": validation_df.index.max().isoformat(),
+            "fold_diagnostics": fold_diagnostics,
         })
         fold_summaries.append(fold_summary)
 
