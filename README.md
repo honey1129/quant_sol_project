@@ -502,6 +502,14 @@ python -m run.diagnose_model_probs --bars 1500
 
 这个脚本会输出最近样本的 long/short 概率分布、方向命中率、预测多空占比，以及当前阈值下通过 long/short gate 的 bar 数量。它适合在每次改特征、标签或重训后先看模型是否又学偏了。
 
+### 2.1 审计 OKX 行情数据
+
+```bash
+python -m run.audit_market_data --rows 1000 --compare-binance
+```
+
+脚本会检查 OKX 多周期 K 线是否有缺口、重复、未确认尾 K、OHLCV 非法值、跨周期 close 对齐异常，并可选对照 Binance USDT-M 永续收盘价。报告写入 `logs/market_data_audit_*.json`；若只想检查 OKX 自身数据，可去掉 `--compare-binance`。
+
 ### 3. 跑回测
 
 ```bash
@@ -824,6 +832,7 @@ PYTHONPATH=. .venv/bin/python -m run.daily_trade_report
 - `logs/backtest_*.csv`: 回测交易记录与汇总
 - `logs/training_diagnostics_*.json`: regime 分层分类指标、混淆矩阵、信号方向占比与回测诊断
 - `logs/trade_threshold_calibration_*.json`: 阈值 sweep、Brier/ECE、概率分桶和候选交易质量报告
+- `logs/market_data_audit_*.json`: OKX K线连续性、跨周期对齐和可选外部价格对照报告
 
 ## 单元测试
 
@@ -839,6 +848,7 @@ python -m unittest \
   tests.test_trade_audit \
   tests.test_stationary_features \
   tests.test_rubik_features \
+  tests.test_market_data_audit \
   tests.test_calibrate_trade_thresholds
 ```
 
@@ -852,6 +862,7 @@ python -m unittest \
 - 真实成交记录与每日复盘汇总
 - 平稳特征不会泄漏绝对价格水位进模型
 - Rubik 特征无前视、默认关闭、启用后只进入平稳派生列
+- OKX 行情数据审计能识别缺口、重复、非法 OHLCV 和跨周期错位
 - 阈值/概率校准报告可复现且写入安全
 
 ## 风险说明
