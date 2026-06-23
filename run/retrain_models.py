@@ -453,6 +453,33 @@ def _series_counts(df, col):
     return {str(k): int(v) for k, v in df[col].fillna("unknown").astype(str).value_counts().sort_index().items()}
 
 
+def _quantiles(values):
+    series = pd.to_numeric(pd.Series(values), errors="coerce").replace([float("inf"), float("-inf")], pd.NA).dropna()
+    if series.empty:
+        return {}
+    return {
+        "mean": float(series.mean()),
+        "p10": float(series.quantile(0.10)),
+        "p25": float(series.quantile(0.25)),
+        "p50": float(series.quantile(0.50)),
+        "p75": float(series.quantile(0.75)),
+        "p90": float(series.quantile(0.90)),
+        "max": float(series.max()),
+    }
+
+
+def _prediction_slice_summary(df, mask):
+    subset = df.loc[mask].copy()
+    return {
+        "rows": int(len(subset)),
+        "regime_counts": _series_counts(subset, "label_regime"),
+        "direction_counts": _series_counts(subset, "label_direction"),
+        "outcome_counts": _series_counts(subset, "label_outcome"),
+        "reject_reason_counts": _series_counts(subset, "label_reject_reason"),
+        "trade_prob_quantiles": _quantiles(subset.get("_trade_prob", [])),
+    }
+
+
 def _label_quality_summary(df):
     rows = int(len(df))
     if rows == 0 or "target" not in df:
@@ -597,11 +624,17 @@ def build_walk_forward_fold_diagnostics(fold, train_df, validation_df, feature_c
         )
     else:
         y_pred = pd.Series(0, index=X_validation.index, dtype=int)
+        trade_prob = pd.Series(0.0, index=X_validation.index, dtype=float)
+        ensemble_proba = pd.DataFrame(
+            {"short_prob": 0.0, "long_prob": 0.0},
+            index=X_validation.index,
+        )
         signal_direction_counts = {"long": 0, "short": 0, "flat": int(len(X_validation)), "long_pct": 0.0, "short_pct": 0.0, "flat_pct": 100.0}
         predicted_trade_direction_counts = dict(signal_direction_counts)
 
     validation_with_pred = validation_df.copy()
     validation_with_pred["_pred_target"] = y_pred.to_numpy()
+    validation_with_pred["_trade_prob"] = trade_prob.reindex(validation_df.index).fillna(0.0).to_numpy()
     by_regime = {}
     if "label_regime" in validation_with_pred:
         for regime, group in validation_with_pred.groupby(validation_with_pred["label_regime"].fillna("unknown").astype(str), sort=True):
@@ -612,8 +645,25 @@ def build_walk_forward_fold_diagnostics(fold, train_df, validation_df, feature_c
                 "target_counts": _target_counts(group_true),
                 "prediction_counts": _target_counts(group_pred),
                 "confusion_matrix": _confusion_matrix(group_true, group_pred),
+                "trade_prob_quantiles": _quantiles(group["_trade_prob"]),
                 **_binary_metrics(group_true, group_pred),
             }
+
+    actual_trade = validation_with_pred["target"].astype(int) == 1
+    predicted_trade = validation_with_pred["_pred_target"].astype(int) == 1
+    trade_prob_quantiles = {
+        "all": _quantiles(validation_with_pred["_trade_prob"]),
+        "true_trade": _quantiles(validation_with_pred.loc[actual_trade, "_trade_prob"]),
+        "true_no_trade": _quantiles(validation_with_pred.loc[~actual_trade, "_trade_prob"]),
+        "true_positive": _quantiles(validation_with_pred.loc[actual_trade & predicted_trade, "_trade_prob"]),
+        "false_negative": _quantiles(validation_with_pred.loc[actual_trade & ~predicted_trade, "_trade_prob"]),
+        "false_positive": _quantiles(validation_with_pred.loc[~actual_trade & predicted_trade, "_trade_prob"]),
+        "true_negative": _quantiles(validation_with_pred.loc[~actual_trade & ~predicted_trade, "_trade_prob"]),
+    }
+    error_slices = {
+        "false_negative": _prediction_slice_summary(validation_with_pred, actual_trade & ~predicted_trade),
+        "false_positive": _prediction_slice_summary(validation_with_pred, ~actual_trade & predicted_trade),
+    }
 
     diagnostics = {
         "fold": int(fold["fold"]),
@@ -650,6 +700,8 @@ def build_walk_forward_fold_diagnostics(fold, train_df, validation_df, feature_c
             "classification_report": _json_safe(_safe_classification_report(y_true, y_pred)),
             "signal_direction_counts": signal_direction_counts,
             "predicted_trade_direction_counts": predicted_trade_direction_counts,
+            "trade_prob_quantiles": trade_prob_quantiles,
+            "error_slices": error_slices,
             **_binary_metrics(y_true, y_pred),
         },
         "by_regime": by_regime,
@@ -679,6 +731,8 @@ def write_walk_forward_fold_diagnostics(log_file, diagnostics):
             f"trade_f1={float(ensemble.get('trade_f1', 0.0)):.4f} "
             f"signal_directions={ensemble.get('signal_direction_counts', {})} "
             f"active_directions={ensemble.get('predicted_trade_direction_counts', {})} "
+            f"trade_prob_q={ensemble.get('trade_prob_quantiles', {})} "
+            f"errors={ensemble.get('error_slices', {})} "
             f"confusion_matrix={ensemble.get('confusion_matrix', [])}\n"
         )
         file.write("fold_diagnostics_json " + json.dumps(diagnostics, ensure_ascii=False, sort_keys=True) + "\n")
@@ -808,7 +862,7 @@ def run_walk_forward_validation(log_file, context_backtester, metadata, feature_
 
         X_train = train_df[feature_cols].astype(float)
         y_train = train_df["target"]
-        fold_models, _, _, _ = train_model_bundle(X_train, y_train)
+        fold_models, _, _, _ = train_model_bundle(X_train, y_train, sample_context=train_df)
         fold_diagnostics = build_walk_forward_fold_diagnostics(
             fold,
             train_df,

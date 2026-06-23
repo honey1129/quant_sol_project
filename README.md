@@ -80,7 +80,7 @@ quant_sol_project/
 - realistic 标签要求规则允许开仓、未来先触发 TP、扣除估算手续费/滑点后仍有正收益，并记录 MFE/MAE 质量诊断
 - 可选接入 Rubik OI/taker/多空比平稳特征：`MODEL_USE_RUBIK_FEATURES=1` 时才拉取
 - 按时间顺序切分训练集 / 验证集 / 最终 OOS 回测集，中间留 purge gap，避免未来数据泄漏
-- 使用 sample weight 平衡 trade / no_trade，并轻微提高近期样本权重，不再随机下采样破坏时间序列
+- 使用 sample weight 平衡 trade / no_trade，并在类别内部按 regime + direction 平衡，同时提高近期样本权重
 - 产出模型文件、特征列表和训练元数据
 
 默认模型输出：
@@ -328,8 +328,8 @@ MODEL_TRAIN_TRADABLE_LABELS=1
 MODEL_TRAIN_NO_TRADE_LABELS=1
 MODEL_USE_RUBIK_FEATURES=0
 MODEL_RUBIK_PERIOD=1H
-MODEL_RECENT_SAMPLE_WEIGHT_BOOST=0.15
-MODEL_TRADE_SAMPLE_WEIGHT_MULTIPLIER=1.0
+MODEL_RECENT_SAMPLE_WEIGHT_BOOST=0.5
+MODEL_TRADE_SAMPLE_WEIGHT_MULTIPLIER=2.0
 MODEL_NO_TRADE_SAMPLE_WEIGHT_MULTIPLIER=1.0
 MODEL_SAMPLE_WEIGHT_MIN=0.25
 MODEL_SAMPLE_WEIGHT_MAX=20.0
@@ -472,11 +472,11 @@ POLL_SEC=10
 - `THRESHOLD_LONG=0.56` / `THRESHOLD_SHORT=0.56` / `SIGNAL_MIN_PROB_DIFF=0.12`：当前示例阈值配合新版标签和模型概率尺度，复制旧模型时不要盲目套用。
 - `POSITION_PROBABILITY_CENTER=0.45`：仓位 sizing 的概率起点；二分类质量模型的概率更稀疏，需和阈值、`MIN_SIGNAL_TARGET_RATIO` 一起校准。
 - `REGIME_HIGH_VOL_ALLOW_TRADES=false` / `REGIME_TREND_AGAINST_BLOCK=true`：高波动趋势区间不放行逆势交易，尤其防止 `trend_short` 中强行开多。
+- `MODEL_RECENT_SAMPLE_WEIGHT_BOOST=0.5` / `MODEL_TRADE_SAMPLE_WEIGHT_MULTIPLIER=2.0`：训练不随机下采样；样本权重先平衡 trade/no_trade，再在类别内部按 regime+direction 平衡，并更重视近期样本，目标是改善后段 walk-forward 的 trade recall。
 - `MIN_ADJUST_AMOUNT=150` / `BACKTEST_MIN_ADJUST_AMOUNT=40`：实盘最小调仓和回测最小调仓分开配置，避免小额回测收益被线上最小交易额吞掉。
 - `BACKTEST_FORCE_CLOSE_ON_END=1`：回测/重训验证窗口结束时强制按最后收盘价结算未平仓，避免 walk-forward 折内最后一笔交易漏计平仓数和 PF。
 - `MAX_POSITION_RATIO=0.45` / `LEVERAGE=3`：示例仍是测试盘参数，真实资金前要重新按账户权益调小。
 - `DYNAMIC_RISK_ENABLED=0`：新版示例先关闭动态风险缩放，避免和阈值校准同时改变；需要时再单独 A/B。
-- `MODEL_RECENT_SAMPLE_WEIGHT_BOOST=0.15`：训练不随机下采样；样本权重先平衡 long/short/no_trade，再在方向内部按 regime 平衡，并轻微提高近期样本权重。
 - `MODEL_TRAIN_RATIO` / `MODEL_VALIDATION_RATIO` / `MODEL_PURGE_BARS`：训练区、验证区、最终 OOS 回测区按时间切开，中间留 purge gap；realistic 标签默认 lookahead 为 24 根，因此示例 purge 也设为 24。
 - `MODEL_FINAL_TRAIN_ON_VALIDATION=1`：验证指标仍来自严格时间切分；最终保存的模型用 OOS 之前的 train+validation 历史段重训，减少线上模型滞后。
 - `MODEL_WALK_FORWARD_ENABLED=1`：重训准入前会在验证区内做滚动 walk-forward 验证。
