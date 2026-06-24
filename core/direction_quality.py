@@ -12,6 +12,7 @@ class BinaryProbabilityCalibrator:
         method="none",
         model=None,
         direction=None,
+        regime=None,
         fallback_reason=None,
         fitted_rows=0,
         positive_rows=0,
@@ -21,6 +22,7 @@ class BinaryProbabilityCalibrator:
         self.method = str(method or "none").lower()
         self.model = model
         self.direction = direction
+        self.regime = regime
         self.fallback_reason = fallback_reason
         self.fitted_rows = int(fitted_rows or 0)
         self.positive_rows = int(positive_rows or 0)
@@ -49,6 +51,7 @@ class BinaryProbabilityCalibrator:
         payload = {
             "method": self.method,
             "direction": self.direction,
+            "regime": self.regime,
             "active": bool(self.active),
             "fallback_reason": self.fallback_reason,
             "fitted_rows": int(self.fitted_rows),
@@ -71,6 +74,7 @@ def fit_binary_probability_calibrator(
     *,
     method="sigmoid",
     direction=None,
+    regime=None,
     sample_weight=None,
     min_rows=50,
     min_positive_rows=5,
@@ -81,6 +85,7 @@ def fit_binary_probability_calibrator(
         return BinaryProbabilityCalibrator(
             method=method,
             direction=direction,
+            regime=regime,
             fallback_reason="disabled",
         )
 
@@ -105,6 +110,7 @@ def fit_binary_probability_calibrator(
     base_payload = {
         "method": method,
         "direction": direction,
+        "regime": regime,
         "fitted_rows": fitted_rows,
         "positive_rows": positive_rows,
         "negative_rows": negative_rows,
@@ -170,10 +176,30 @@ class DirectionQualityModel:
 
     classes_ = np.asarray([0, 1], dtype=int)
 
-    def __init__(self, global_model, direction_models=None, direction_calibrators=None, diagnostics=None):
+    def __init__(
+        self,
+        global_model,
+        direction_models=None,
+        direction_calibrators=None,
+        direction_regime_calibrators=None,
+        diagnostics=None,
+    ):
         self.global_model = global_model
-        self.direction_models = dict(direction_models or {})
-        self.direction_calibrators = dict(direction_calibrators or {})
+        self.direction_models = {
+            str(direction).strip().lower(): model
+            for direction, model in dict(direction_models or {}).items()
+        }
+        self.direction_calibrators = {
+            str(direction).strip().lower(): calibrator
+            for direction, calibrator in dict(direction_calibrators or {}).items()
+        }
+        self.direction_regime_calibrators = {}
+        for direction, by_regime in dict(direction_regime_calibrators or {}).items():
+            direction_key = str(direction).strip().lower()
+            self.direction_regime_calibrators[direction_key] = {
+                str(regime).strip().lower(): calibrator
+                for regime, calibrator in dict(by_regime or {}).items()
+            }
         self.diagnostics = dict(diagnostics or {})
         self.classes_ = np.asarray([0, 1], dtype=int)
 
@@ -185,15 +211,65 @@ class DirectionQualityModel:
         values = np.asarray([0.0 if not math.isfinite(float(v)) else float(v) for v in values])
         return values
 
-    def _calibrate_probabilities(self, direction, probs):
+    def _regime_values(self, X):
+        regimes = np.asarray(["unknown"] * len(X), dtype=object)
+        if not hasattr(X, "columns"):
+            return regimes
+
+        if "label_regime" in X.columns:
+            return np.asarray(
+                [
+                    str(value or "unknown").strip().lower()
+                    for value in X["label_regime"].fillna("unknown")
+                ],
+                dtype=object,
+            )
+
+        regimes = np.asarray(["range"] * len(X), dtype=object)
+        if "regime_range_high_vol" in X.columns:
+            mask = np.asarray(X["regime_range_high_vol"].astype(float) > 0.5, dtype=bool)
+            regimes[mask] = "range_high_vol"
+        if "regime_trend_long" in X.columns:
+            mask = np.asarray(X["regime_trend_long"].astype(float) > 0.5, dtype=bool)
+            regimes[mask] = "trend_long"
+        if "regime_trend_short" in X.columns:
+            mask = np.asarray(X["regime_trend_short"].astype(float) > 0.5, dtype=bool)
+            regimes[mask] = "trend_short"
+        return regimes
+
+    def _calibrate_probabilities(self, direction, probs, X=None):
+        probs = np.asarray(probs, dtype=float)
+        calibrated = probs.copy()
+        applied = np.zeros(len(probs), dtype=bool)
+
+        by_regime = self.direction_regime_calibrators.get(direction) or {}
+        if by_regime and X is not None:
+            regimes = self._regime_values(X)
+            for regime, calibrator in by_regime.items():
+                if calibrator is None or not bool(getattr(calibrator, "active", False)):
+                    continue
+                mask = regimes == str(regime).strip().lower()
+                if not np.any(mask):
+                    continue
+                trade_probability = np.asarray(
+                    calibrator.predict_trade_probability(probs[mask, 1]),
+                    dtype=float,
+                )
+                calibrated[mask] = np.column_stack([1.0 - trade_probability, trade_probability]).astype(float)
+                applied[mask] = True
+
         calibrator = self.direction_calibrators.get(direction)
-        if calibrator is None:
-            return probs
+        if calibrator is None or not bool(getattr(calibrator, "active", False)):
+            return calibrated
+        fallback_mask = ~applied
+        if not np.any(fallback_mask):
+            return calibrated
         trade_probability = np.asarray(
-            calibrator.predict_trade_probability(probs[:, 1]),
+            calibrator.predict_trade_probability(probs[fallback_mask, 1]),
             dtype=float,
         )
-        return np.column_stack([1.0 - trade_probability, trade_probability]).astype(float)
+        calibrated[fallback_mask] = np.column_stack([1.0 - trade_probability, trade_probability]).astype(float)
+        return calibrated
 
     def predict_proba(self, X):
         probs = _binary_probabilities(self.global_model, X)
@@ -211,7 +287,7 @@ class DirectionQualityModel:
             else:
                 subset = np.asarray(X)[mask]
             direction_probs = _binary_probabilities(model, subset)
-            probs[mask] = self._calibrate_probabilities(direction, direction_probs)
+            probs[mask] = self._calibrate_probabilities(direction, direction_probs, subset)
 
         return np.clip(probs, 0.0, 1.0)
 
@@ -231,5 +307,14 @@ class DirectionQualityModel:
         return sorted(
             str(direction)
             for direction, calibrator in self.direction_calibrators.items()
+            if bool(getattr(calibrator, "active", False))
+        )
+
+    @property
+    def calibrated_direction_regimes(self):
+        return sorted(
+            f"{direction}:{regime}"
+            for direction, by_regime in self.direction_regime_calibrators.items()
+            for regime, calibrator in by_regime.items()
             if bool(getattr(calibrator, "active", False))
         )

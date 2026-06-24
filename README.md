@@ -480,6 +480,7 @@ POLL_SEC=10
 - `MODEL_TRAIN_DIRECTION_QUALITY_MODELS=1` / `MODEL_DIRECTION_QUALITY_MIN_ROWS=200` / `MODEL_DIRECTION_QUALITY_MIN_TRADE_ROWS=20`：在全局质量模型外额外训练 long/short 子模型；方向样本或 trade 样本不足时自动回退到全局模型。
 - `MODEL_DIRECTION_QUALITY_CALIBRATION=sigmoid` / `MODEL_DIRECTION_QUALITY_CALIBRATION_RATIO=0.20`：每个方向子模型用尾部方向样本单独做概率校准，降低 `trend_short` 高置信误报和 `trend_long` 概率压低这类方向内倒挂；最终子模型仍用全量方向样本训练。
 - `MODEL_DIRECTION_QUALITY_CALIBRATION_USE_SAMPLE_WEIGHT=0`：概率校准默认按真实样本分布拟合，不继承训练阶段为了召回而放大的 trade 权重。
+- `MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION=1` / `MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION_MIN_ROWS=50`：在方向校准之上按 `label_regime` 继续校准，优先修正 `short:trend_short` 这类局部高置信误报；样本不足时自动回退到方向校准。
 - `MODEL_WALK_FORWARD_DIAGNOSTIC_THRESHOLD=0.35`：walk-forward 诊断里的 trade/no-trade precision/recall 使用校准后概率尺度，不再固定按 0.5 判断。
 - `MODEL_WALK_FORWARD_THRESHOLD_SWEEP_*`：重训验证时额外扫描一组低概率门槛、概率差、最小目标仓位和 sizing center，输出每折推荐候选；它只用于诊断和推荐，不会自动改线上 `.env` 或绕过当前准入门槛。
 - `MODEL_USE_RUBIK_FEATURES=0`：Rubik OI/taker/多空比特征默认关闭。开启前应重新训练并用 OOS 回测确认收益质量。
