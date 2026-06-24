@@ -1,5 +1,6 @@
 import argparse
 import contextlib
+import io
 import json
 import math
 import os
@@ -555,10 +556,35 @@ def _binary_metrics(y_true, y_pred):
     }
 
 
-def build_walk_forward_fold_diagnostics(fold, train_df, validation_df, feature_cols, fold_models, model_weights, metadata):
+def walk_forward_diagnostic_threshold():
+    try:
+        threshold = float(getattr(config, "MODEL_WALK_FORWARD_DIAGNOSTIC_THRESHOLD", 0.5))
+    except (TypeError, ValueError):
+        threshold = 0.5
+    if not math.isfinite(threshold):
+        return 0.5
+    return max(0.0, min(1.0, threshold))
+
+
+def build_walk_forward_fold_diagnostics(
+    fold,
+    train_df,
+    validation_df,
+    feature_cols,
+    fold_models,
+    model_weights,
+    metadata,
+    *,
+    decision_threshold=None,
+):
     from core import signal_engine
     from core.trend_filter import derive_trend_context
 
+    decision_threshold = (
+        walk_forward_diagnostic_threshold()
+        if decision_threshold is None
+        else max(0.0, min(1.0, float(decision_threshold)))
+    )
     X_validation = validation_df[feature_cols].astype(float)
     y_true = validation_df["target"].astype(int)
     model_predictions = {}
@@ -612,7 +638,7 @@ def build_walk_forward_fold_diagnostics(fold, train_df, validation_df, feature_c
     if proba_sum is not None and used_weight_total > 0:
         ensemble_proba = proba_sum / used_weight_total
         trade_prob = ensemble_proba.max(axis=1)
-        y_pred = (trade_prob >= 0.5).astype(int)
+        y_pred = (trade_prob >= decision_threshold).astype(int)
         signal_direction_counts = _direction_counts_from_probabilities(
             ensemble_proba["long_prob"],
             ensemble_proba["short_prob"],
@@ -695,6 +721,7 @@ def build_walk_forward_fold_diagnostics(fold, train_df, validation_df, feature_c
             ),
         },
         "ensemble": {
+            "decision_threshold": float(decision_threshold),
             "prediction_counts": _target_counts(pd.Series(y_pred)),
             "confusion_matrix": _confusion_matrix(y_true, y_pred),
             "classification_report": _json_safe(_safe_classification_report(y_true, y_pred)),
@@ -725,6 +752,7 @@ def write_walk_forward_fold_diagnostics(log_file, diagnostics):
         file.write(
             "fold_prediction_diagnostics "
             f"fold={diagnostics.get('fold')} "
+            f"decision_threshold={float(ensemble.get('decision_threshold', 0.0)):.4f} "
             f"predictions={ensemble.get('prediction_counts', {})} "
             f"trade_precision={float(ensemble.get('trade_precision', 0.0)):.4f} "
             f"trade_recall={float(ensemble.get('trade_recall', 0.0)):.4f} "
@@ -736,6 +764,299 @@ def write_walk_forward_fold_diagnostics(log_file, diagnostics):
             f"confusion_matrix={ensemble.get('confusion_matrix', [])}\n"
         )
         file.write("fold_diagnostics_json " + json.dumps(diagnostics, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def parse_float_candidates(raw_value, defaults):
+    if raw_value is None or str(raw_value).strip() == "":
+        values = list(defaults)
+    else:
+        values = []
+        for item in str(raw_value).split(","):
+            item = item.strip()
+            if not item:
+                continue
+            try:
+                value = float(item)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(value):
+                values.append(value)
+    return sorted(set(float(value) for value in values if math.isfinite(float(value))))
+
+
+def _threshold_sweep_enabled():
+    return bool(getattr(config, "MODEL_WALK_FORWARD_THRESHOLD_SWEEP_ENABLED", True))
+
+
+def _threshold_sweep_candidate_limit():
+    try:
+        return max(1, int(getattr(config, "MODEL_WALK_FORWARD_THRESHOLD_SWEEP_MAX_CANDIDATES", 160)))
+    except (TypeError, ValueError):
+        return 160
+
+
+def _threshold_sweep_top_n():
+    try:
+        return max(1, int(getattr(config, "MODEL_WALK_FORWARD_THRESHOLD_SWEEP_TOP_N", 5)))
+    except (TypeError, ValueError):
+        return 5
+
+
+def _current_threshold_sweep_overrides():
+    min_target_ratio = float(getattr(config, "MIN_SIGNAL_TARGET_RATIO", 0.0))
+    return {
+        "THRESHOLD_LONG": float(config.THRESHOLD_LONG),
+        "THRESHOLD_SHORT": float(config.THRESHOLD_SHORT),
+        "SIGNAL_MIN_PROB_DIFF": float(config.SIGNAL_MIN_PROB_DIFF),
+        "MIN_SIGNAL_TARGET_RATIO": min_target_ratio,
+        "REGIME_RANGE_MIN_SIGNAL_TARGET_RATIO": float(
+            getattr(config, "REGIME_RANGE_MIN_SIGNAL_TARGET_RATIO", min_target_ratio)
+        ),
+        "REGIME_HIGH_VOL_MIN_SIGNAL_TARGET_RATIO": float(
+            getattr(config, "REGIME_HIGH_VOL_MIN_SIGNAL_TARGET_RATIO", min_target_ratio)
+        ),
+        "POSITION_PROBABILITY_CENTER": float(config.POSITION_PROBABILITY_CENTER),
+        "BACKTEST_MIN_ADJUST_AMOUNT": float(config.BACKTEST_MIN_ADJUST_AMOUNT),
+    }
+
+
+def threshold_sweep_candidate_key(overrides):
+    return tuple(
+        round(float(overrides[key]), 8)
+        for key in (
+            "THRESHOLD_LONG",
+            "THRESHOLD_SHORT",
+            "SIGNAL_MIN_PROB_DIFF",
+            "MIN_SIGNAL_TARGET_RATIO",
+            "POSITION_PROBABILITY_CENTER",
+            "BACKTEST_MIN_ADJUST_AMOUNT",
+        )
+    )
+
+
+def build_walk_forward_threshold_candidates():
+    current = _current_threshold_sweep_overrides()
+    thresholds = parse_float_candidates(
+        getattr(config, "MODEL_WALK_FORWARD_THRESHOLD_SWEEP_THRESHOLDS", ""),
+        [0.12, 0.20, 0.30, 0.40, 0.50],
+    )
+    thresholds.extend([current["THRESHOLD_LONG"], current["THRESHOLD_SHORT"]])
+    thresholds = sorted(set(max(0.0, min(1.0, float(value))) for value in thresholds))
+    gaps = parse_float_candidates(
+        getattr(config, "MODEL_WALK_FORWARD_THRESHOLD_SWEEP_GAPS", ""),
+        [0.0, 0.08, 0.12],
+    )
+    gaps.append(current["SIGNAL_MIN_PROB_DIFF"])
+    gaps = sorted(set(max(0.0, min(1.0, float(value))) for value in gaps))
+    min_target_ratios = parse_float_candidates(
+        getattr(config, "MODEL_WALK_FORWARD_THRESHOLD_SWEEP_MIN_TARGET_RATIOS", ""),
+        [0.005, 0.010],
+    )
+    min_target_ratios.append(current["MIN_SIGNAL_TARGET_RATIO"])
+    min_target_ratios = sorted(set(max(0.0, float(value)) for value in min_target_ratios))
+    position_centers = parse_float_candidates(
+        getattr(config, "MODEL_WALK_FORWARD_THRESHOLD_SWEEP_POSITION_CENTERS", ""),
+        [0.05, 0.10, 0.20, 0.30],
+    )
+    position_centers.append(current["POSITION_PROBABILITY_CENTER"])
+    position_centers = sorted(set(max(0.0, min(0.99, float(value))) for value in position_centers))
+
+    candidates = []
+    seen = set()
+
+    def add_candidate(name, overrides):
+        key = threshold_sweep_candidate_key(overrides)
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append({"name": name, "overrides": dict(overrides)})
+
+    add_candidate("current", current)
+    limit = _threshold_sweep_candidate_limit()
+    for threshold in thresholds:
+        for gap in gaps:
+            for min_target_ratio in min_target_ratios:
+                for position_center in position_centers:
+                    backtest_min_adjust = min(
+                        float(config.MIN_ADJUST_AMOUNT),
+                        float(config.INITIAL_BALANCE) * float(min_target_ratio),
+                    )
+                    overrides = {
+                        "THRESHOLD_LONG": float(threshold),
+                        "THRESHOLD_SHORT": float(threshold),
+                        "SIGNAL_MIN_PROB_DIFF": float(gap),
+                        "MIN_SIGNAL_TARGET_RATIO": float(min_target_ratio),
+                        "REGIME_RANGE_MIN_SIGNAL_TARGET_RATIO": float(min_target_ratio),
+                        "REGIME_HIGH_VOL_MIN_SIGNAL_TARGET_RATIO": float(min_target_ratio),
+                        "POSITION_PROBABILITY_CENTER": float(position_center),
+                        "BACKTEST_MIN_ADJUST_AMOUNT": float(backtest_min_adjust),
+                    }
+                    add_candidate(
+                        (
+                            f"tl{threshold:.2f}_ts{threshold:.2f}_gap{gap:.2f}_"
+                            f"mt{min_target_ratio:.3f}_pc{position_center:.2f}"
+                        ),
+                        overrides,
+                    )
+                    if len(candidates) >= limit:
+                        return candidates
+    return candidates
+
+
+def apply_config_overrides(overrides):
+    originals = {}
+    for key, value in overrides.items():
+        originals[key] = getattr(config, key)
+        setattr(config, key, value)
+    return originals
+
+
+def restore_config_overrides(originals):
+    for key, value in originals.items():
+        setattr(config, key, value)
+
+
+def compact_walk_forward_candidate_summary(summary):
+    keys = [
+        "final_equity",
+        "return_pct",
+        "max_drawdown_pct",
+        "trade_count",
+        "closed_trade_count",
+        "winning_trade_count",
+        "losing_trade_count",
+        "win_rate_pct",
+        "profit_factor",
+        "avg_win_loss_ratio",
+        "avg_closed_trade_pnl",
+        "net_pnl_after_costs",
+        "fees_paid",
+        "slippage_cost",
+        "funding_pnl",
+        "take_profit_count",
+        "stop_loss_count",
+        "decision_action_counts",
+        "decision_reason_top",
+        "decision_direction_counts",
+        "decision_regime_counts",
+        "decision_probability_quantiles",
+        "decision_gate_config",
+    ]
+    return {key: summary.get(key) for key in keys if key in summary}
+
+
+def threshold_sweep_score(summary):
+    closed = int(summary.get("closed_trade_count") or 0)
+    net = float(summary.get("net_pnl_after_costs") or 0.0)
+    pf = float(summary.get("profit_factor") or 0.0)
+    drawdown = abs(float(summary.get("max_drawdown_pct") or 0.0))
+    enough_trades = 1 if closed >= HARD_MIN_CLOSED_TRADES else 0
+    positive_pf = 1 if pf > HARD_MIN_PROFIT_FACTOR else 0
+    return (enough_trades, positive_pf, net, pf, -drawdown, closed)
+
+
+def run_backtest_with_overrides(backtester_kwargs, overrides):
+    from backtest.backtest import Backtester
+
+    backtester_kwargs = dict(backtester_kwargs)
+    use_precomputed_probabilities = bool(backtester_kwargs.pop("use_precomputed_probabilities", False))
+    originals = apply_config_overrides(overrides)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            backtester = Backtester(**backtester_kwargs)
+            original_predict_row = backtester._predict_row
+            if use_precomputed_probabilities:
+                backtester._predict_row = lambda row: (row["long_prob"], row["short_prob"])
+            try:
+                summary = backtester.run_backtest()
+            finally:
+                backtester._predict_row = original_predict_row
+        return compact_walk_forward_candidate_summary(summary or {})
+    finally:
+        restore_config_overrides(originals)
+
+
+def run_walk_forward_threshold_sweep(backtester_kwargs, candidates):
+    if not candidates:
+        return {"enabled": False, "reason": "no_candidates", "candidate_count": 0}
+
+    results = []
+    for candidate in candidates:
+        summary = run_backtest_with_overrides(backtester_kwargs, candidate["overrides"])
+        summary["name"] = candidate["name"]
+        summary["overrides"] = candidate["overrides"]
+        results.append(summary)
+
+    ranked = sorted(results, key=threshold_sweep_score, reverse=True)
+    top_n = _threshold_sweep_top_n()
+    best = ranked[0] if ranked else None
+    return {
+        "enabled": True,
+        "candidate_count": int(len(candidates)),
+        "top_n": int(top_n),
+        "best": best,
+        "recommended": ranked[:top_n],
+    }
+
+
+def write_walk_forward_threshold_sweep(log_file, fold_number, sweep_summary):
+    if not sweep_summary or not sweep_summary.get("enabled"):
+        return
+    best = sweep_summary.get("best") or {}
+    with open(log_file, "a", encoding="utf-8") as file:
+        file.write(
+            "walk_forward_threshold_sweep "
+            f"fold={fold_number} "
+            f"candidates={sweep_summary.get('candidate_count', 0)} "
+            f"best={best.get('name')} "
+            f"closed={best.get('closed_trade_count', 0)} "
+            f"net={float(best.get('net_pnl_after_costs') or 0.0):.2f} "
+            f"pf={float(best.get('profit_factor') or 0.0):.4f} "
+            f"overrides={best.get('overrides', {})}\n"
+        )
+        file.write(
+            "walk_forward_threshold_sweep_json "
+            + json.dumps(sweep_summary, ensure_ascii=False, sort_keys=True)
+            + "\n"
+        )
+
+
+def add_walk_forward_probabilities(data, feature_cols, fold_models, model_weights, metadata):
+    from core import signal_engine
+    from core.trend_filter import derive_trend_context
+
+    predicted = data.copy()
+    rows = []
+    for _, row in predicted.iterrows():
+        X_row = pd.DataFrame(
+            [row[feature_cols].astype(float).to_numpy()],
+            columns=feature_cols,
+        )
+        trend_context = derive_trend_context(
+            row,
+            interval=config.TREND_FILTER_INTERVAL,
+            fast_col=config.TREND_FILTER_FAST_COL,
+            slow_col=config.TREND_FILTER_SLOW_COL,
+            min_gap=config.TREND_FILTER_MIN_GAP,
+        )
+        avg_pred = signal_engine.weighted_predict_proba(
+            fold_models,
+            X_row,
+            model_weights,
+            trend_bias=trend_context.get("trend_bias"),
+            model_metadata=metadata,
+        )
+        rows.append({
+            "long_prob": float(avg_pred[1]),
+            "short_prob": float(avg_pred[0]),
+        })
+    if rows:
+        probability_frame = pd.DataFrame(rows, index=predicted.index)
+        predicted[["long_prob", "short_prob"]] = probability_frame[["long_prob", "short_prob"]]
+    else:
+        predicted["long_prob"] = 0.0
+        predicted["short_prob"] = 0.0
+    return predicted
 
 
 def aggregate_backtest_summaries(summaries):
@@ -848,9 +1169,20 @@ def run_walk_forward_validation(log_file, context_backtester, metadata, feature_
 
     slices = build_walk_forward_slices(labeled_data.index, metadata)
     fold_summaries = []
+    threshold_candidates = (
+        build_walk_forward_threshold_candidates()
+        if _threshold_sweep_enabled()
+        else []
+    )
 
     with open(log_file, "a", encoding="utf-8") as file:
         file.write(f"walk-forward folds={len(slices)}\n")
+        if _threshold_sweep_enabled():
+            file.write(
+                "walk-forward threshold_sweep "
+                f"enabled=1 candidates={len(threshold_candidates)} "
+                f"diagnostic_threshold={walk_forward_diagnostic_threshold():.4f}\n"
+            )
 
     for fold in slices:
         train_df = labeled_data.iloc[fold["train_start_pos"]:fold["train_end_pos"]].copy()
@@ -882,6 +1214,15 @@ def run_walk_forward_validation(log_file, context_backtester, metadata, feature_
             fold_data.index.min(),
             fold_data.index.max(),
         )
+        fold_predicted_data = None
+        if _threshold_sweep_enabled() and threshold_candidates:
+            fold_predicted_data = add_walk_forward_probabilities(
+                fold_data,
+                feature_cols,
+                fold_models,
+                config.MODEL_WEIGHTS,
+                metadata,
+            )
 
         append_log_header(log_file, f"walk_forward_fold_{fold['fold']}")
         with open(log_file, "a", encoding="utf-8") as file:
@@ -911,6 +1252,28 @@ def run_walk_forward_validation(log_file, context_backtester, metadata, feature_
 
         if not fold_summary:
             raise RuntimeError(f"walk-forward fold={fold['fold']} 未返回 summary")
+        threshold_sweep = None
+        if _threshold_sweep_enabled() and threshold_candidates and fold_predicted_data is not None:
+            threshold_sweep = run_walk_forward_threshold_sweep(
+                {
+                    "interval": context_backtester.interval,
+                    "window": context_backtester.window,
+                    "data_dict": context_backtester.data_dict,
+                    "reward_risk": context_backtester.reward_risk,
+                    "precomputed_data": fold_predicted_data,
+                    "feature_cols": feature_cols,
+                    "models": fold_models,
+                    "model_weights": config.MODEL_WEIGHTS,
+                    "model_metadata": metadata,
+                    "funding_history": fold_funding_history,
+                    "enable_csv_dump": False,
+                    "show_progress": False,
+                    "emit_diagnostics": False,
+                    "use_precomputed_probabilities": True,
+                },
+                threshold_candidates,
+            )
+            write_walk_forward_threshold_sweep(log_file, fold["fold"], threshold_sweep)
         fold_summary.update({
             "fold": fold["fold"],
             "train_rows": int(len(train_df)),
@@ -919,6 +1282,8 @@ def run_walk_forward_validation(log_file, context_backtester, metadata, feature_
             "validation_end": validation_df.index.max().isoformat(),
             "fold_diagnostics": fold_diagnostics,
         })
+        if threshold_sweep is not None:
+            fold_summary["threshold_sweep"] = threshold_sweep
         fold_summaries.append(fold_summary)
 
     summary = aggregate_backtest_summaries(fold_summaries)

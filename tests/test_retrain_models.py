@@ -425,6 +425,64 @@ class RetrainBacktestValidationTests(unittest.TestCase):
         self.assertIn("signal_direction_counts", diagnostics["ensemble"])
         self.assertIn("predicted_trade_direction_counts", diagnostics["ensemble"])
 
+    @unittest.skipUnless(HAS_REAL_PANDAS, "requires pandas")
+    def test_walk_forward_fold_diagnostics_use_configurable_decision_threshold(self):
+        pd = retrain_models.pd
+
+        class CalibratedScaleModel:
+            classes_ = [0, 1]
+
+            def predict(self, X):
+                return [0 for _ in range(len(X))]
+
+            def predict_proba(self, X):
+                return [[0.7, 0.3] for _ in range(len(X))]
+
+        index = pd.date_range("2026-01-01", periods=2, freq="5min")
+        validation_df = pd.DataFrame({
+            "feature": [1.0, 1.0],
+            "target": [1, 0],
+            "5m_close": [102.0, 102.0],
+            "15m_ema_20": [102.0, 102.0],
+            "15m_ema_60": [100.0, 100.0],
+        }, index=index)
+
+        diagnostics = retrain_models.build_walk_forward_fold_diagnostics(
+            {"fold": 1},
+            validation_df.copy(),
+            validation_df,
+            ["feature"],
+            {"fake": CalibratedScaleModel()},
+            {"fake": 1.0},
+            {"target_schema": "binary_trade_quality"},
+            decision_threshold=0.25,
+        )
+
+        self.assertEqual(diagnostics["ensemble"]["decision_threshold"], 0.25)
+        self.assertEqual(diagnostics["ensemble"]["prediction_counts"], {"1": 2})
+        self.assertEqual(diagnostics["ensemble"]["confusion_matrix"], [[0, 1], [0, 1]])
+
+    def test_walk_forward_threshold_candidates_include_low_scale_and_current_config(self):
+        with patch("run.retrain_models.config.MODEL_WALK_FORWARD_THRESHOLD_SWEEP_THRESHOLDS", "0.12,0.30"):
+            with patch("run.retrain_models.config.MODEL_WALK_FORWARD_THRESHOLD_SWEEP_GAPS", "0.00"):
+                with patch("run.retrain_models.config.MODEL_WALK_FORWARD_THRESHOLD_SWEEP_MIN_TARGET_RATIOS", "0.005"):
+                    with patch("run.retrain_models.config.MODEL_WALK_FORWARD_THRESHOLD_SWEEP_POSITION_CENTERS", "0.05"):
+                        with patch("run.retrain_models.config.THRESHOLD_LONG", 0.56):
+                            with patch("run.retrain_models.config.THRESHOLD_SHORT", 0.56):
+                                with patch("run.retrain_models.config.SIGNAL_MIN_PROB_DIFF", 0.12):
+                                    with patch("run.retrain_models.config.MIN_SIGNAL_TARGET_RATIO", 0.04):
+                                        with patch("run.retrain_models.config.POSITION_PROBABILITY_CENTER", 0.45):
+                                            candidates = retrain_models.build_walk_forward_threshold_candidates()
+
+        names = {candidate["name"] for candidate in candidates}
+        self.assertIn("current", names)
+        self.assertIn("tl0.12_ts0.12_gap0.00_mt0.005_pc0.05", names)
+        low_candidate = next(
+            candidate for candidate in candidates
+            if candidate["name"] == "tl0.12_ts0.12_gap0.00_mt0.005_pc0.05"
+        )
+        self.assertEqual(low_candidate["overrides"]["BACKTEST_MIN_ADJUST_AMOUNT"], 5.0)
+
 
 if __name__ == "__main__":
     unittest.main()
