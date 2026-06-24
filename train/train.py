@@ -446,6 +446,34 @@ def _direction_quality_calibration_use_sample_weight():
     )
 
 
+def _direction_quality_regime_calibration_enabled():
+    return _env_bool(
+        "MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION",
+        getattr(config, "MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION", True),
+    )
+
+
+def _direction_quality_regime_calibration_min_rows():
+    return int(os.getenv(
+        "MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION_MIN_ROWS",
+        str(getattr(config, "MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION_MIN_ROWS", 50)),
+    ))
+
+
+def _direction_quality_regime_calibration_min_positives():
+    return int(os.getenv(
+        "MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION_MIN_POSITIVES",
+        str(getattr(config, "MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION_MIN_POSITIVES", 5)),
+    ))
+
+
+def _direction_quality_regime_calibration_min_negatives():
+    return int(os.getenv(
+        "MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION_MIN_NEGATIVES",
+        str(getattr(config, "MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION_MIN_NEGATIVES", 5)),
+    ))
+
+
 def create_labels(df, future_window=5, threshold=0.002, tradable_only=None, include_no_trade=None):
     """
     创建训练标签,二分类版本: trade vs no_trade
@@ -1056,8 +1084,13 @@ def train_direction_quality_bundle(X_train, y_train, sample_context=None):
     calibration_min_rows = max(1, _direction_quality_calibration_min_rows())
     calibration_min_positives = max(1, _direction_quality_calibration_min_positives())
     calibration_min_negatives = max(1, _direction_quality_calibration_min_negatives())
+    regime_calibration_enabled = bool(_direction_quality_regime_calibration_enabled())
+    regime_calibration_min_rows = max(1, _direction_quality_regime_calibration_min_rows())
+    regime_calibration_min_positives = max(1, _direction_quality_regime_calibration_min_positives())
+    regime_calibration_min_negatives = max(1, _direction_quality_regime_calibration_min_negatives())
     direction_models_by_name = {name: {} for name in global_models}
     direction_calibrators_by_name = {name: {} for name in global_models}
+    direction_regime_calibrators_by_name = {name: {} for name in global_models}
 
     for direction in ("long", "short"):
         X_dir, y_dir, context_dir = _direction_subset(X_train, y_train, sample_context, direction)
@@ -1128,6 +1161,7 @@ def train_direction_quality_bundle(X_train, y_train, sample_context=None):
                 sample_context=context_dir,
             )
         calibration_summary_by_model = {}
+        regime_calibration_summary_by_model = {}
         for name, model in dir_models.items():
             direction_models_by_name[name][direction] = model
             if X_calibration_dir.empty or calibration_method == "none":
@@ -1139,6 +1173,7 @@ def train_direction_quality_bundle(X_train, y_train, sample_context=None):
                     positive_rows=int((y_calibration_dir.astype(int) == TARGET_TRADE).sum()) if len(y_calibration_dir) else 0,
                     negative_rows=int((y_calibration_dir.astype(int) != TARGET_TRADE).sum()) if len(y_calibration_dir) else 0,
                 )
+                regime_calibration_summary_by_model[name] = {}
             else:
                 source_model = calibration_source_models.get(name, model)
                 raw_prob = np.asarray(source_model.predict_proba(X_calibration_dir), dtype=float)
@@ -1153,6 +1188,7 @@ def train_direction_quality_bundle(X_train, y_train, sample_context=None):
                         negative_rows=int((y_calibration_dir.astype(int) != TARGET_TRADE).sum()),
                     )
                     calibration_summary_by_model[name] = calibrator.summary()
+                    regime_calibration_summary_by_model[name] = {}
                     continue
                 raw_trade_prob = raw_prob[:, classes.index(TARGET_TRADE)]
                 calibration_weight = None
@@ -1174,6 +1210,41 @@ def train_direction_quality_bundle(X_train, y_train, sample_context=None):
                 )
                 if calibrator.active:
                     direction_calibrators_by_name[name][direction] = calibrator
+                model_regime_summaries = {}
+                if (
+                    regime_calibration_enabled
+                    and context_calibration_dir is not None
+                    and "label_regime" in context_calibration_dir
+                ):
+                    regime_series = (
+                        context_calibration_dir["label_regime"]
+                        .reindex(y_calibration_dir.index)
+                        .fillna("unknown")
+                        .astype(str)
+                        .str.lower()
+                    )
+                    for regime in sorted(regime_series.unique()):
+                        regime_mask = regime_series == regime
+                        regime_weight = None
+                        if calibration_weight is not None:
+                            regime_weight = calibration_weight.loc[regime_mask]
+                        regime_calibrator = fit_binary_probability_calibrator(
+                            raw_trade_prob[regime_mask.to_numpy()],
+                            y_calibration_dir.loc[regime_mask],
+                            method=calibration_method,
+                            direction=direction,
+                            regime=regime,
+                            sample_weight=regime_weight,
+                            min_rows=regime_calibration_min_rows,
+                            min_positive_rows=regime_calibration_min_positives,
+                            min_negative_rows=regime_calibration_min_negatives,
+                        )
+                        model_regime_summaries[regime] = regime_calibrator.summary()
+                        if regime_calibrator.active:
+                            direction_regime_calibrators_by_name[name].setdefault(direction, {})[
+                                regime
+                            ] = regime_calibrator
+                regime_calibration_summary_by_model[name] = model_regime_summaries
             calibration_summary_by_model[name] = calibrator.summary()
         direction_summary[direction].update({
             "enabled": True,
@@ -1186,6 +1257,7 @@ def train_direction_quality_bundle(X_train, y_train, sample_context=None):
             "sample_weight_summary": dir_weight_summary,
             "calibration_model_sample_weight_summary": calibration_model_weight_summary or {},
             "calibration": calibration_summary_by_model,
+            "regime_calibration": regime_calibration_summary_by_model,
         })
 
     wrapped_models = {}
@@ -1194,6 +1266,7 @@ def train_direction_quality_bundle(X_train, y_train, sample_context=None):
             global_model,
             direction_models=direction_models_by_name.get(name),
             direction_calibrators=direction_calibrators_by_name.get(name),
+            direction_regime_calibrators=direction_regime_calibrators_by_name.get(name),
             diagnostics=direction_summary,
         )
 
@@ -1207,6 +1280,12 @@ def train_direction_quality_bundle(X_train, y_train, sample_context=None):
         for calibrators_by_direction in direction_calibrators_by_name.values()
         for direction in calibrators_by_direction
     })
+    calibrated_direction_regimes = sorted({
+        f"{direction}:{regime}"
+        for calibrators_by_direction in direction_regime_calibrators_by_name.values()
+        for direction, calibrators_by_regime in calibrators_by_direction.items()
+        for regime in calibrators_by_regime
+    })
     diagnostics = {
         "enabled": bool(enabled_directions),
         "configured": True,
@@ -1217,8 +1296,13 @@ def train_direction_quality_bundle(X_train, y_train, sample_context=None):
         "calibration_min_rows": int(calibration_min_rows),
         "calibration_min_positive_rows": int(calibration_min_positives),
         "calibration_min_negative_rows": int(calibration_min_negatives),
+        "regime_calibration_enabled": bool(regime_calibration_enabled),
+        "regime_calibration_min_rows": int(regime_calibration_min_rows),
+        "regime_calibration_min_positive_rows": int(regime_calibration_min_positives),
+        "regime_calibration_min_negative_rows": int(regime_calibration_min_negatives),
         "enabled_directions": enabled_directions,
         "calibrated_directions": calibrated_directions,
+        "calibrated_direction_regimes": calibrated_direction_regimes,
         "directions": _json_safe(direction_summary),
     }
     return wrapped_models, X_balanced, y_balanced, sample_weight_summary, diagnostics

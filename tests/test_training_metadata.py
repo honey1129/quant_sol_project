@@ -356,6 +356,56 @@ class TrainingMetadataTests(unittest.TestCase):
         self.assertTrue(summary["directions"]["long"]["calibration"]["lgb_v1"]["active"])
         self.assertGreater(summary["directions"]["long"]["calibration"]["lgb_v1"]["fitted_rows"], 0)
 
+    def test_direction_quality_bundle_trains_regime_calibrators(self):
+        index = pd.date_range("2026-01-01", periods=48, freq="5min", tz="UTC")
+        X = pd.DataFrame({
+            "score": [
+                0.10, 0.20, 0.80, 0.90,
+                0.12, 0.22, 0.82, 0.92,
+                0.14, 0.24, 0.84, 0.94,
+            ] * 4,
+            "trend_bias_num": [1.0] * 24 + [-1.0] * 24,
+            "regime_trend_long": [1.0] * 24 + [0.0] * 24,
+            "regime_trend_short": [0.0] * 24 + [1.0] * 24,
+            "regime_range_high_vol": [0.0] * 48,
+        }, index=index)
+        y = pd.Series([0, 0, 1, 1] * 12, index=index)
+        context = pd.DataFrame({
+            "label_direction": ["long"] * 24 + ["short"] * 24,
+            "label_regime": ["trend_long"] * 24 + ["trend_short"] * 24,
+            "label_outcome": ["SL", "TIMEOUT", "TP", "TP"] * 12,
+            "label_reject_reason": ["outcome_sl", "outcome_timeout", "accepted", "accepted"] * 12,
+        }, index=index)
+
+        with patch("train.train.build_model_estimators", return_value={
+            "lgb_v1": FeatureProbabilityEstimator(),
+            "xgb_v1": FeatureProbabilityEstimator(),
+            "rf_v1": FeatureProbabilityEstimator(),
+        }):
+            with patch("train.train.config.MODEL_DIRECTION_QUALITY_MIN_ROWS", 4):
+                with patch("train.train.config.MODEL_DIRECTION_QUALITY_MIN_TRADE_ROWS", 2):
+                    with patch("train.train.config.MODEL_DIRECTION_QUALITY_CALIBRATION", "sigmoid"):
+                        with patch("train.train.config.MODEL_DIRECTION_QUALITY_CALIBRATION_RATIO", 0.25):
+                            with patch("train.train.config.MODEL_DIRECTION_QUALITY_CALIBRATION_MIN_ROWS", 4):
+                                with patch("train.train.config.MODEL_DIRECTION_QUALITY_CALIBRATION_MIN_POSITIVES", 1):
+                                    with patch("train.train.config.MODEL_DIRECTION_QUALITY_CALIBRATION_MIN_NEGATIVES", 1):
+                                        with patch("train.train.config.MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION", True):
+                                            with patch("train.train.config.MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION_MIN_ROWS", 4):
+                                                with patch("train.train.config.MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION_MIN_POSITIVES", 1):
+                                                    with patch("train.train.config.MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION_MIN_NEGATIVES", 1):
+                                                        models, _, _, _, summary = train_module.train_direction_quality_bundle(
+                                                            X,
+                                                            y,
+                                                            sample_context=context,
+                                                        )
+
+        self.assertTrue(summary["regime_calibration_enabled"])
+        self.assertEqual(summary["calibrated_direction_regimes"], ["long:trend_long", "short:trend_short"])
+        self.assertEqual(models["lgb_v1"].calibrated_direction_regimes, ["long:trend_long", "short:trend_short"])
+        self.assertTrue(
+            summary["directions"]["short"]["regime_calibration"]["lgb_v1"]["trend_short"]["active"]
+        )
+
     def test_write_json_atomic_round_trips_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "metadata.json")

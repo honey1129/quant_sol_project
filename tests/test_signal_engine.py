@@ -216,6 +216,61 @@ class WeightedPredictProbaTests(unittest.TestCase):
         self.assertAlmostEqual(float(long_out[0]), 0.0)
         self.assertAlmostEqual(float(long_out[1]), 0.45)
 
+    def test_direction_quality_model_prefers_regime_calibrator(self):
+        import pandas as pd
+
+        class FixedCalibrator(BinaryProbabilityCalibrator):
+            def __init__(self, value, **kwargs):
+                super().__init__(method="custom", **kwargs)
+                self.value = value
+
+            @property
+            def active(self):
+                return True
+
+            def predict_trade_probability(self, trade_probability):
+                return [self.value for _ in trade_probability]
+
+        model = DirectionQualityModel(
+            StubModel([0.80, 0.20], classes=[0, 1]),
+            direction_models={"short": StubModel([0.10, 0.90], classes=[0, 1])},
+            direction_calibrators={"short": FixedCalibrator(0.40, direction="short")},
+            direction_regime_calibrators={
+                "short": {
+                    "trend_short": FixedCalibrator(0.12, direction="short", regime="trend_short"),
+                },
+            },
+        )
+
+        trend_short_out = signal_engine.weighted_predict_proba(
+            {"lgb_v1": model},
+            pd.DataFrame({
+                "trend_bias_num": [-1.0],
+                "regime_trend_short": [1.0],
+                "regime_trend_long": [0.0],
+            }),
+            {"lgb_v1": 1.0},
+            trend_bias="short",
+            model_metadata={"target_schema": "binary_trade_quality"},
+        )
+        range_out = signal_engine.weighted_predict_proba(
+            {"lgb_v1": model},
+            pd.DataFrame({
+                "trend_bias_num": [-1.0],
+                "regime_trend_short": [0.0],
+                "regime_trend_long": [0.0],
+            }),
+            {"lgb_v1": 1.0},
+            trend_bias="short",
+            model_metadata={"target_schema": "binary_trade_quality"},
+        )
+
+        self.assertAlmostEqual(float(trend_short_out[0]), 0.12)
+        self.assertAlmostEqual(float(trend_short_out[1]), 0.0)
+        self.assertAlmostEqual(float(range_out[0]), 0.40)
+        self.assertAlmostEqual(float(range_out[1]), 0.0)
+        self.assertEqual(model.calibrated_direction_regimes, ["short:trend_short"])
+
     def test_empty_models_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "模型列表为空"):
             signal_engine.weighted_predict_proba({}, object(), {})
