@@ -12,7 +12,7 @@ import xgboost as xgb
 
 from core.ml_feature_engineering import merge_multi_period_features, add_advanced_features, model_feature_columns
 from core.okx_api import OKXClient
-from core.direction_quality import DirectionQualityModel
+from core.direction_quality import DirectionQualityModel, BinaryProbabilityCalibrator, fit_binary_probability_calibrator
 from core.regime_filter import derive_market_regime, regime_allows_direction
 from core.trend_filter import derive_trend_context, trend_allows_direction
 from utils.utils import log_info, BASE_DIR
@@ -402,6 +402,48 @@ def _direction_quality_min_trade_rows():
         "MODEL_DIRECTION_QUALITY_MIN_TRADE_ROWS",
         str(getattr(config, "MODEL_DIRECTION_QUALITY_MIN_TRADE_ROWS", 20)),
     ))
+
+
+def _direction_quality_calibration_method():
+    return str(os.getenv(
+        "MODEL_DIRECTION_QUALITY_CALIBRATION",
+        str(getattr(config, "MODEL_DIRECTION_QUALITY_CALIBRATION", "sigmoid")),
+    )).strip().lower()
+
+
+def _direction_quality_calibration_ratio():
+    return float(os.getenv(
+        "MODEL_DIRECTION_QUALITY_CALIBRATION_RATIO",
+        str(getattr(config, "MODEL_DIRECTION_QUALITY_CALIBRATION_RATIO", 0.20)),
+    ))
+
+
+def _direction_quality_calibration_min_rows():
+    return int(os.getenv(
+        "MODEL_DIRECTION_QUALITY_CALIBRATION_MIN_ROWS",
+        str(getattr(config, "MODEL_DIRECTION_QUALITY_CALIBRATION_MIN_ROWS", 50)),
+    ))
+
+
+def _direction_quality_calibration_min_positives():
+    return int(os.getenv(
+        "MODEL_DIRECTION_QUALITY_CALIBRATION_MIN_POSITIVES",
+        str(getattr(config, "MODEL_DIRECTION_QUALITY_CALIBRATION_MIN_POSITIVES", 5)),
+    ))
+
+
+def _direction_quality_calibration_min_negatives():
+    return int(os.getenv(
+        "MODEL_DIRECTION_QUALITY_CALIBRATION_MIN_NEGATIVES",
+        str(getattr(config, "MODEL_DIRECTION_QUALITY_CALIBRATION_MIN_NEGATIVES", 5)),
+    ))
+
+
+def _direction_quality_calibration_use_sample_weight():
+    return _env_bool(
+        "MODEL_DIRECTION_QUALITY_CALIBRATION_USE_SAMPLE_WEIGHT",
+        getattr(config, "MODEL_DIRECTION_QUALITY_CALIBRATION_USE_SAMPLE_WEIGHT", False),
+    )
 
 
 def create_labels(df, future_window=5, threshold=0.002, tradable_only=None, include_no_trade=None):
@@ -943,6 +985,55 @@ def _direction_subset(X, y, sample_context, direction):
     return X.loc[mask].copy(), y.loc[mask].copy(), subset_context
 
 
+def _split_direction_train_calibration(X_dir, y_dir, context_dir, *, min_rows, min_trade_rows):
+    rows = int(len(y_dir))
+    calibration_ratio = max(0.0, min(0.5, _direction_quality_calibration_ratio()))
+    if rows <= 1 or calibration_ratio <= 0:
+        return X_dir, y_dir, context_dir, X_dir.iloc[0:0].copy(), y_dir.iloc[0:0].copy(), (
+            context_dir.iloc[0:0].copy() if context_dir is not None else None
+        ), "disabled"
+
+    calibration_rows = int(round(rows * calibration_ratio))
+    calibration_rows = max(1, min(rows - 1, calibration_rows))
+    train_rows = rows - calibration_rows
+    y_model = y_dir.iloc[:train_rows].astype(int)
+    y_calibration = y_dir.iloc[train_rows:].astype(int)
+    model_trade_rows = int((y_model == TARGET_TRADE).sum())
+    calibration_trade_rows = int((y_calibration == TARGET_TRADE).sum())
+    calibration_no_trade_rows = int(len(y_calibration) - calibration_trade_rows)
+
+    min_calibration_rows = max(1, _direction_quality_calibration_min_rows())
+    min_calibration_positives = max(1, _direction_quality_calibration_min_positives())
+    min_calibration_negatives = max(1, _direction_quality_calibration_min_negatives())
+    if train_rows < int(min_rows) or model_trade_rows < int(min_trade_rows) or y_model.nunique() < 2:
+        reason = "disabled_model_split_below_minimum"
+    elif len(y_calibration) < min_calibration_rows:
+        reason = "disabled_calibration_rows_below_minimum"
+    elif calibration_trade_rows < min_calibration_positives:
+        reason = "disabled_calibration_positive_rows_below_minimum"
+    elif calibration_no_trade_rows < min_calibration_negatives:
+        reason = "disabled_calibration_negative_rows_below_minimum"
+    elif y_calibration.nunique() < 2:
+        reason = "disabled_single_class_calibration_split"
+    else:
+        reason = None
+
+    if reason is not None:
+        return X_dir, y_dir, context_dir, X_dir.iloc[0:0].copy(), y_dir.iloc[0:0].copy(), (
+            context_dir.iloc[0:0].copy() if context_dir is not None else None
+        ), reason
+
+    return (
+        X_dir.iloc[:train_rows].copy(),
+        y_dir.iloc[:train_rows].copy(),
+        context_dir.iloc[:train_rows].copy() if context_dir is not None else None,
+        X_dir.iloc[train_rows:].copy(),
+        y_dir.iloc[train_rows:].copy(),
+        context_dir.iloc[train_rows:].copy() if context_dir is not None else None,
+        None,
+    )
+
+
 def train_direction_quality_bundle(X_train, y_train, sample_context=None):
     """Train global binary quality models plus long/short quality submodels."""
     global_models, X_balanced, y_balanced, sample_weight_summary = train_model_bundle(
@@ -961,7 +1052,12 @@ def train_direction_quality_bundle(X_train, y_train, sample_context=None):
 
     min_rows = max(1, _direction_quality_min_rows())
     min_trade_rows = max(1, _direction_quality_min_trade_rows())
+    calibration_method = _direction_quality_calibration_method()
+    calibration_min_rows = max(1, _direction_quality_calibration_min_rows())
+    calibration_min_positives = max(1, _direction_quality_calibration_min_positives())
+    calibration_min_negatives = max(1, _direction_quality_calibration_min_negatives())
     direction_models_by_name = {name: {} for name in global_models}
+    direction_calibrators_by_name = {name: {} for name in global_models}
 
     for direction in ("long", "short"):
         X_dir, y_dir, context_dir = _direction_subset(X_train, y_train, sample_context, direction)
@@ -996,17 +1092,100 @@ def train_direction_quality_bundle(X_train, y_train, sample_context=None):
             })
             continue
 
-        dir_models, _, _, dir_weight_summary = train_model_bundle(
+        (
+            X_model_dir,
+            y_model_dir,
+            context_model_dir,
+            X_calibration_dir,
+            y_calibration_dir,
+            context_calibration_dir,
+            calibration_split_fallback,
+        ) = _split_direction_train_calibration(
             X_dir,
             y_dir,
-            sample_context=context_dir,
+            context_dir,
+            min_rows=min_rows,
+            min_trade_rows=min_trade_rows,
         )
+        calibration_source_models = {}
+        calibration_model_weight_summary = None
+        if X_calibration_dir.empty or calibration_method == "none":
+            dir_models, _, _, dir_weight_summary = train_model_bundle(
+                X_dir,
+                y_dir,
+                sample_context=context_dir,
+            )
+            calibration_source_models = dir_models
+        else:
+            calibration_source_models, _, _, calibration_model_weight_summary = train_model_bundle(
+                X_model_dir,
+                y_model_dir,
+                sample_context=context_model_dir,
+            )
+            dir_models, _, _, dir_weight_summary = train_model_bundle(
+                X_dir,
+                y_dir,
+                sample_context=context_dir,
+            )
+        calibration_summary_by_model = {}
         for name, model in dir_models.items():
             direction_models_by_name[name][direction] = model
+            if X_calibration_dir.empty or calibration_method == "none":
+                calibrator = BinaryProbabilityCalibrator(
+                    method=calibration_method,
+                    direction=direction,
+                    fallback_reason=calibration_split_fallback or "disabled",
+                    fitted_rows=int(len(y_calibration_dir)),
+                    positive_rows=int((y_calibration_dir.astype(int) == TARGET_TRADE).sum()) if len(y_calibration_dir) else 0,
+                    negative_rows=int((y_calibration_dir.astype(int) != TARGET_TRADE).sum()) if len(y_calibration_dir) else 0,
+                )
+            else:
+                source_model = calibration_source_models.get(name, model)
+                raw_prob = np.asarray(source_model.predict_proba(X_calibration_dir), dtype=float)
+                classes = list(getattr(source_model, "classes_", range(raw_prob.shape[1])))
+                if TARGET_TRADE not in classes:
+                    calibrator = BinaryProbabilityCalibrator(
+                        method=calibration_method,
+                        direction=direction,
+                        fallback_reason="trade_class_missing_in_calibration_source_model",
+                        fitted_rows=int(len(y_calibration_dir)),
+                        positive_rows=int((y_calibration_dir.astype(int) == TARGET_TRADE).sum()),
+                        negative_rows=int((y_calibration_dir.astype(int) != TARGET_TRADE).sum()),
+                    )
+                    calibration_summary_by_model[name] = calibrator.summary()
+                    continue
+                raw_trade_prob = raw_prob[:, classes.index(TARGET_TRADE)]
+                calibration_weight = None
+                if context_calibration_dir is not None and _direction_quality_calibration_use_sample_weight():
+                    calibration_weight, _ = build_sample_weights(
+                        X_calibration_dir,
+                        y_calibration_dir,
+                        sample_context=context_calibration_dir,
+                    )
+                calibrator = fit_binary_probability_calibrator(
+                    raw_trade_prob,
+                    y_calibration_dir,
+                    method=calibration_method,
+                    direction=direction,
+                    sample_weight=calibration_weight,
+                    min_rows=calibration_min_rows,
+                    min_positive_rows=calibration_min_positives,
+                    min_negative_rows=calibration_min_negatives,
+                )
+                if calibrator.active:
+                    direction_calibrators_by_name[name][direction] = calibrator
+            calibration_summary_by_model[name] = calibrator.summary()
         direction_summary[direction].update({
             "enabled": True,
             "fallback_reason": None,
+            "model_train_rows": int(len(y_model_dir)),
+            "model_train_trade_rows": int((y_model_dir.astype(int) == TARGET_TRADE).sum()),
+            "calibration_rows": int(len(y_calibration_dir)),
+            "calibration_trade_rows": int((y_calibration_dir.astype(int) == TARGET_TRADE).sum()) if len(y_calibration_dir) else 0,
+            "calibration_fallback_reason": calibration_split_fallback,
             "sample_weight_summary": dir_weight_summary,
+            "calibration_model_sample_weight_summary": calibration_model_weight_summary or {},
+            "calibration": calibration_summary_by_model,
         })
 
     wrapped_models = {}
@@ -1014,6 +1193,7 @@ def train_direction_quality_bundle(X_train, y_train, sample_context=None):
         wrapped_models[name] = DirectionQualityModel(
             global_model,
             direction_models=direction_models_by_name.get(name),
+            direction_calibrators=direction_calibrators_by_name.get(name),
             diagnostics=direction_summary,
         )
 
@@ -1022,12 +1202,23 @@ def train_direction_quality_bundle(X_train, y_train, sample_context=None):
         for models_by_direction in direction_models_by_name.values()
         for direction in models_by_direction
     })
+    calibrated_directions = sorted({
+        direction
+        for calibrators_by_direction in direction_calibrators_by_name.values()
+        for direction in calibrators_by_direction
+    })
     diagnostics = {
         "enabled": bool(enabled_directions),
         "configured": True,
         "min_rows": int(min_rows),
         "min_trade_rows": int(min_trade_rows),
+        "calibration_method": calibration_method,
+        "calibration_ratio": float(_direction_quality_calibration_ratio()),
+        "calibration_min_rows": int(calibration_min_rows),
+        "calibration_min_positive_rows": int(calibration_min_positives),
+        "calibration_min_negative_rows": int(calibration_min_negatives),
         "enabled_directions": enabled_directions,
+        "calibrated_directions": calibrated_directions,
         "directions": _json_safe(direction_summary),
     }
     return wrapped_models, X_balanced, y_balanced, sample_weight_summary, diagnostics

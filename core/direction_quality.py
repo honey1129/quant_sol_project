@@ -3,6 +3,151 @@ import math
 import numpy as np
 
 
+class BinaryProbabilityCalibrator:
+    """Calibrate a binary model's trade score while keeping the same interface."""
+
+    def __init__(
+        self,
+        *,
+        method="none",
+        model=None,
+        direction=None,
+        fallback_reason=None,
+        fitted_rows=0,
+        positive_rows=0,
+        negative_rows=0,
+        weighted=False,
+    ):
+        self.method = str(method or "none").lower()
+        self.model = model
+        self.direction = direction
+        self.fallback_reason = fallback_reason
+        self.fitted_rows = int(fitted_rows or 0)
+        self.positive_rows = int(positive_rows or 0)
+        self.negative_rows = int(negative_rows or 0)
+        self.weighted = bool(weighted)
+
+    @property
+    def active(self):
+        return self.model is not None and self.fallback_reason is None
+
+    def predict_trade_probability(self, trade_probability):
+        values = np.asarray(trade_probability, dtype=float)
+        values = np.clip(values, 0.0, 1.0)
+        if not self.active:
+            return values
+
+        if self.method == "sigmoid":
+            calibrated = self.model.predict_proba(values.reshape(-1, 1))[:, 1]
+        elif self.method == "isotonic":
+            calibrated = self.model.predict(values)
+        else:
+            return values
+        return np.clip(np.asarray(calibrated, dtype=float), 0.0, 1.0)
+
+    def summary(self):
+        payload = {
+            "method": self.method,
+            "direction": self.direction,
+            "active": bool(self.active),
+            "fallback_reason": self.fallback_reason,
+            "fitted_rows": int(self.fitted_rows),
+            "positive_rows": int(self.positive_rows),
+            "negative_rows": int(self.negative_rows),
+            "weighted": bool(self.weighted),
+        }
+        if self.active and self.method == "sigmoid":
+            payload["coef"] = float(self.model.coef_[0][0])
+            payload["intercept"] = float(self.model.intercept_[0])
+        elif self.active and self.method == "isotonic":
+            payload["x_thresholds"] = [float(value) for value in self.model.X_thresholds_]
+            payload["y_thresholds"] = [float(value) for value in self.model.y_thresholds_]
+        return payload
+
+
+def fit_binary_probability_calibrator(
+    trade_probability,
+    y,
+    *,
+    method="sigmoid",
+    direction=None,
+    sample_weight=None,
+    min_rows=50,
+    min_positive_rows=5,
+    min_negative_rows=5,
+):
+    method = str(method or "none").lower()
+    if method == "none":
+        return BinaryProbabilityCalibrator(
+            method=method,
+            direction=direction,
+            fallback_reason="disabled",
+        )
+
+    probs = np.asarray(trade_probability, dtype=float).reshape(-1)
+    targets = np.asarray(y, dtype=int).reshape(-1)
+    if len(probs) != len(targets):
+        raise ValueError("校准概率和标签长度不一致")
+
+    finite_mask = np.isfinite(probs)
+    probs = probs[finite_mask]
+    targets = targets[finite_mask]
+    weights = None
+    if sample_weight is not None:
+        weights = np.asarray(sample_weight, dtype=float).reshape(-1)
+        if len(weights) != len(finite_mask):
+            raise ValueError("校准权重和标签长度不一致")
+        weights = weights[finite_mask]
+
+    fitted_rows = int(len(targets))
+    positive_rows = int((targets == 1).sum())
+    negative_rows = int(fitted_rows - positive_rows)
+    base_payload = {
+        "method": method,
+        "direction": direction,
+        "fitted_rows": fitted_rows,
+        "positive_rows": positive_rows,
+        "negative_rows": negative_rows,
+        "weighted": weights is not None,
+    }
+
+    if fitted_rows < int(min_rows):
+        return BinaryProbabilityCalibrator(
+            **base_payload,
+            fallback_reason="calibration_rows_below_minimum",
+        )
+    if positive_rows < int(min_positive_rows):
+        return BinaryProbabilityCalibrator(
+            **base_payload,
+            fallback_reason="calibration_positive_rows_below_minimum",
+        )
+    if negative_rows < int(min_negative_rows):
+        return BinaryProbabilityCalibrator(
+            **base_payload,
+            fallback_reason="calibration_negative_rows_below_minimum",
+        )
+    if positive_rows == 0 or negative_rows == 0:
+        return BinaryProbabilityCalibrator(
+            **base_payload,
+            fallback_reason="single_class_calibration_data",
+        )
+
+    if method == "sigmoid":
+        from sklearn.linear_model import LogisticRegression
+
+        model = LogisticRegression(solver="lbfgs")
+        model.fit(probs.reshape(-1, 1), targets, sample_weight=weights)
+    elif method == "isotonic":
+        from sklearn.isotonic import IsotonicRegression
+
+        model = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
+        model.fit(probs, targets, sample_weight=weights)
+    else:
+        raise ValueError(f"不支持的方向质量概率校准方法: {method}")
+
+    return BinaryProbabilityCalibrator(**base_payload, model=model)
+
+
 def _binary_probabilities(model, X):
     raw = np.asarray(model.predict_proba(X), dtype=float)
     if raw.ndim != 2 or raw.shape[1] < 2:
@@ -25,9 +170,10 @@ class DirectionQualityModel:
 
     classes_ = np.asarray([0, 1], dtype=int)
 
-    def __init__(self, global_model, direction_models=None, diagnostics=None):
+    def __init__(self, global_model, direction_models=None, direction_calibrators=None, diagnostics=None):
         self.global_model = global_model
         self.direction_models = dict(direction_models or {})
+        self.direction_calibrators = dict(direction_calibrators or {})
         self.diagnostics = dict(diagnostics or {})
         self.classes_ = np.asarray([0, 1], dtype=int)
 
@@ -38,6 +184,16 @@ class DirectionQualityModel:
             values = np.zeros(len(X), dtype=float)
         values = np.asarray([0.0 if not math.isfinite(float(v)) else float(v) for v in values])
         return values
+
+    def _calibrate_probabilities(self, direction, probs):
+        calibrator = self.direction_calibrators.get(direction)
+        if calibrator is None:
+            return probs
+        trade_probability = np.asarray(
+            calibrator.predict_trade_probability(probs[:, 1]),
+            dtype=float,
+        )
+        return np.column_stack([1.0 - trade_probability, trade_probability]).astype(float)
 
     def predict_proba(self, X):
         probs = _binary_probabilities(self.global_model, X)
@@ -54,7 +210,8 @@ class DirectionQualityModel:
                 subset = X.iloc[np.where(mask)[0]]
             else:
                 subset = np.asarray(X)[mask]
-            probs[mask] = _binary_probabilities(model, subset)
+            direction_probs = _binary_probabilities(model, subset)
+            probs[mask] = self._calibrate_probabilities(direction, direction_probs)
 
         return np.clip(probs, 0.0, 1.0)
 
@@ -68,3 +225,11 @@ class DirectionQualityModel:
     @property
     def trained_directions(self):
         return sorted(str(direction) for direction in self.direction_models.keys())
+
+    @property
+    def calibrated_directions(self):
+        return sorted(
+            str(direction)
+            for direction, calibrator in self.direction_calibrators.items()
+            if bool(getattr(calibrator, "active", False))
+        )
