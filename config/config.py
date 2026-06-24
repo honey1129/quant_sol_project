@@ -73,8 +73,17 @@ TICK_SIZE = float(os.getenv("TICK_SIZE", 0.001))
 MODEL_PATH = os.getenv("MODEL_PATH", "models/model_okx.pkl")
 FEATURE_LIST_PATH = os.getenv("FEATURE_LIST_PATH", "models/feature_list.pkl")
 TRAINING_METADATA_PATH = os.getenv("TRAINING_METADATA_PATH", "models/training_metadata.json")
-MODEL_PATHS = parse_env_dict(os.getenv("MODEL_PATHS", ""), str)
-MODEL_WEIGHTS = parse_env_dict(os.getenv("MODEL_WEIGHTS", ""), float)
+MODEL_PATHS = parse_env_dict(
+    os.getenv(
+        "MODEL_PATHS",
+        "lgb_v1:models/lgb_model.pkl,xgb_v1:models/xgb_model.pkl,rf_v1:models/rf_model.pkl",
+    ),
+    str,
+)
+MODEL_WEIGHTS = parse_env_dict(
+    os.getenv("MODEL_WEIGHTS", "lgb_v1:0.5,xgb_v1:0.3,rf_v1:0.2"),
+    float,
+)
 MODEL_LABEL_FUTURE_WINDOW = int(os.getenv("MODEL_LABEL_FUTURE_WINDOW", 5))
 MODEL_LABEL_THRESHOLD = float(os.getenv("MODEL_LABEL_THRESHOLD", 0.002))
 MODEL_LABEL_USE_REALISTIC = parse_env_bool(os.getenv("MODEL_LABEL_USE_REALISTIC"), True)
@@ -86,6 +95,9 @@ MODEL_LABEL_MAX_MAE_RATIO = float(os.getenv("MODEL_LABEL_MAX_MAE_RATIO", 1.0))
 MODEL_LABEL_REQUIRE_REGIME_ALLOWED = parse_env_bool(os.getenv("MODEL_LABEL_REQUIRE_REGIME_ALLOWED"), True)
 MODEL_TRAIN_TRADABLE_LABELS = parse_env_bool(os.getenv("MODEL_TRAIN_TRADABLE_LABELS"), True)
 MODEL_TRAIN_NO_TRADE_LABELS = parse_env_bool(os.getenv("MODEL_TRAIN_NO_TRADE_LABELS"), True)
+MODEL_TRAIN_DIRECTION_QUALITY_MODELS = parse_env_bool(os.getenv("MODEL_TRAIN_DIRECTION_QUALITY_MODELS"), True)
+MODEL_DIRECTION_QUALITY_MIN_ROWS = int(os.getenv("MODEL_DIRECTION_QUALITY_MIN_ROWS", 200))
+MODEL_DIRECTION_QUALITY_MIN_TRADE_ROWS = int(os.getenv("MODEL_DIRECTION_QUALITY_MIN_TRADE_ROWS", 20))
 # 是否接入 Rubik(OI/taker/多空比)平稳特征。默认关闭,用 OOS 对比确认有效后再开。
 MODEL_USE_RUBIK_FEATURES = parse_env_bool(os.getenv("MODEL_USE_RUBIK_FEATURES"), False)
 # Rubik 统计粒度;5m 历史仅~2天不可用,1H 可回溯~30天。

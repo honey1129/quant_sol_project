@@ -12,6 +12,7 @@ import xgboost as xgb
 
 from core.ml_feature_engineering import merge_multi_period_features, add_advanced_features, model_feature_columns
 from core.okx_api import OKXClient
+from core.direction_quality import DirectionQualityModel
 from core.regime_filter import derive_market_regime, regime_allows_direction
 from core.trend_filter import derive_trend_context, trend_allows_direction
 from utils.utils import log_info, BASE_DIR
@@ -380,6 +381,27 @@ def summarize_label_quality(df):
             }
         summary["by_regime"] = by_regime
     return _json_safe(summary)
+
+
+def _direction_quality_enabled():
+    return _env_bool(
+        "MODEL_TRAIN_DIRECTION_QUALITY_MODELS",
+        getattr(config, "MODEL_TRAIN_DIRECTION_QUALITY_MODELS", True),
+    )
+
+
+def _direction_quality_min_rows():
+    return int(os.getenv(
+        "MODEL_DIRECTION_QUALITY_MIN_ROWS",
+        str(getattr(config, "MODEL_DIRECTION_QUALITY_MIN_ROWS", 200)),
+    ))
+
+
+def _direction_quality_min_trade_rows():
+    return int(os.getenv(
+        "MODEL_DIRECTION_QUALITY_MIN_TRADE_ROWS",
+        str(getattr(config, "MODEL_DIRECTION_QUALITY_MIN_TRADE_ROWS", 20)),
+    ))
 
 
 def create_labels(df, future_window=5, threshold=0.002, tradable_only=None, include_no_trade=None):
@@ -766,7 +788,7 @@ def write_json_atomic(path, payload):
     os.replace(tmp_path, path)
 
 
-def build_training_metadata(*, X, y, feature_cols, train_end, validation_start, validation_end, oos_start, original_train_rows, balanced_train_rows, validation_metrics, artifact_paths, label_filter_summary=None, label_quality_summary=None, sample_weight_summary=None, evaluation_sample_weight_summary=None, final_train_end=None):
+def build_training_metadata(*, X, y, feature_cols, train_end, validation_start, validation_end, oos_start, original_train_rows, balanced_train_rows, validation_metrics, artifact_paths, label_filter_summary=None, label_quality_summary=None, sample_weight_summary=None, evaluation_sample_weight_summary=None, direction_quality_summary=None, final_train_end=None):
     final_train_end = train_end if final_train_end is None else int(final_train_end)
     artifact_hashes = {
         os.path.relpath(path, BASE_DIR): sha256_file(path)
@@ -815,6 +837,7 @@ def build_training_metadata(*, X, y, feature_cols, train_end, validation_start, 
         "training_balance_strategy": "sample_weight_binary_target_regime_direction_recency",
         "sample_weight_summary": sample_weight_summary or {},
         "evaluation_sample_weight_summary": evaluation_sample_weight_summary or {},
+        "direction_quality_models": direction_quality_summary or {},
         "train_ratio": float(config.MODEL_TRAIN_RATIO),
         "validation_ratio": float(config.MODEL_VALIDATION_RATIO),
         "purge_bars": int(config.MODEL_PURGE_BARS),
@@ -877,6 +900,137 @@ def train_model_bundle(X_train, y_train, sample_context=None):
     for model in models.values():
         model.fit(X_balanced, y_balanced, sample_weight=sample_weight)
     return models, X_balanced, y_balanced, sample_weight_summary
+
+
+def direction_quality_sample_summary(y, sample_context):
+    summary = {}
+    if sample_context is None or "label_direction" not in sample_context:
+        return summary
+
+    context = sample_context.reindex(y.index)
+    direction_series = context["label_direction"].fillna("unknown").astype(str).str.lower()
+    for direction in ("long", "short"):
+        mask = direction_series == direction
+        subset_y = y.loc[mask].astype(int)
+        rows = int(len(subset_y))
+        trade_rows = int((subset_y == TARGET_TRADE).sum()) if rows else 0
+        item = {
+            "rows": rows,
+            "trade_rows": trade_rows,
+            "no_trade_rows": int(rows - trade_rows),
+            "trade_pct": float(trade_rows / rows * 100.0) if rows else 0.0,
+            "enabled": False,
+        }
+        if rows:
+            context_subset = context.loc[mask]
+            item.update({
+                "regime_counts": _value_counts(context_subset.get("label_regime")),
+                "outcome_counts": _value_counts(context_subset.get("label_outcome")),
+                "reject_reason_counts": _value_counts(context_subset.get("label_reject_reason")),
+            })
+        summary[direction] = item
+    return _json_safe(summary)
+
+
+def _direction_subset(X, y, sample_context, direction):
+    if sample_context is None or "label_direction" not in sample_context:
+        return X.iloc[0:0].copy(), y.iloc[0:0].copy(), None
+
+    context = sample_context.reindex(y.index)
+    direction_series = context["label_direction"].fillna("unknown").astype(str).str.lower()
+    mask = direction_series == str(direction).lower()
+    subset_context = context.loc[mask].copy()
+    return X.loc[mask].copy(), y.loc[mask].copy(), subset_context
+
+
+def train_direction_quality_bundle(X_train, y_train, sample_context=None):
+    """Train global binary quality models plus long/short quality submodels."""
+    global_models, X_balanced, y_balanced, sample_weight_summary = train_model_bundle(
+        X_train,
+        y_train,
+        sample_context=sample_context,
+    )
+
+    direction_summary = direction_quality_sample_summary(y_train, sample_context)
+    if not _direction_quality_enabled():
+        return global_models, X_balanced, y_balanced, sample_weight_summary, {
+            "enabled": False,
+            "fallback_reason": "disabled",
+            "directions": direction_summary,
+        }
+
+    min_rows = max(1, _direction_quality_min_rows())
+    min_trade_rows = max(1, _direction_quality_min_trade_rows())
+    direction_models_by_name = {name: {} for name in global_models}
+
+    for direction in ("long", "short"):
+        X_dir, y_dir, context_dir = _direction_subset(X_train, y_train, sample_context, direction)
+        rows = int(len(y_dir))
+        trade_rows = int((y_dir.astype(int) == TARGET_TRADE).sum()) if rows else 0
+        direction_summary.setdefault(direction, {})
+        direction_summary[direction].update({
+            "rows": rows,
+            "trade_rows": trade_rows,
+            "no_trade_rows": int(rows - trade_rows),
+            "trade_pct": float(trade_rows / rows * 100.0) if rows else 0.0,
+            "min_rows": int(min_rows),
+            "min_trade_rows": int(min_trade_rows),
+        })
+
+        if rows < min_rows:
+            direction_summary[direction].update({
+                "enabled": False,
+                "fallback_reason": "rows_below_minimum",
+            })
+            continue
+        if trade_rows < min_trade_rows:
+            direction_summary[direction].update({
+                "enabled": False,
+                "fallback_reason": "trade_rows_below_minimum",
+            })
+            continue
+        if y_dir.astype(int).nunique() < 2:
+            direction_summary[direction].update({
+                "enabled": False,
+                "fallback_reason": "single_class_direction_data",
+            })
+            continue
+
+        dir_models, _, _, dir_weight_summary = train_model_bundle(
+            X_dir,
+            y_dir,
+            sample_context=context_dir,
+        )
+        for name, model in dir_models.items():
+            direction_models_by_name[name][direction] = model
+        direction_summary[direction].update({
+            "enabled": True,
+            "fallback_reason": None,
+            "sample_weight_summary": dir_weight_summary,
+        })
+
+    wrapped_models = {}
+    for name, global_model in global_models.items():
+        wrapped_models[name] = DirectionQualityModel(
+            global_model,
+            direction_models=direction_models_by_name.get(name),
+            diagnostics=direction_summary,
+        )
+
+    enabled_directions = sorted({
+        direction
+        for models_by_direction in direction_models_by_name.values()
+        for direction in models_by_direction
+    })
+    diagnostics = {
+        "enabled": bool(enabled_directions),
+        "configured": True,
+        "min_rows": int(min_rows),
+        "min_trade_rows": int(min_trade_rows),
+        "enabled_directions": enabled_directions,
+        "directions": _json_safe(direction_summary),
+    }
+    return wrapped_models, X_balanced, y_balanced, sample_weight_summary, diagnostics
 
 
 def build_time_splits(length):
@@ -947,7 +1101,7 @@ def train():
 
     # 只在训练集内部计算评估模型的样本权重，避免把未来样本混回验证过程。
     eval_sample_context = merged_df.iloc[:train_end].copy()
-    eval_models, X_eval_train, _, evaluation_sample_weight_summary = train_model_bundle(
+    eval_models, X_eval_train, _, evaluation_sample_weight_summary, evaluation_direction_quality_summary = train_direction_quality_bundle(
         X_train,
         y_train,
         sample_context=eval_sample_context,
@@ -964,7 +1118,7 @@ def train():
     X_final_train = X.iloc[:final_train_end].copy()
     y_final_train = y.iloc[:final_train_end].copy()
     final_sample_context = merged_df.iloc[:final_train_end].copy()
-    models, X_final_train, _, sample_weight_summary = train_model_bundle(
+    models, X_final_train, _, sample_weight_summary, direction_quality_summary = train_direction_quality_bundle(
         X_final_train,
         y_final_train,
         sample_context=final_sample_context,
@@ -1000,7 +1154,11 @@ def train():
         label_filter_summary=label_filter_summary,
         label_quality_summary=label_quality_summary,
         sample_weight_summary=sample_weight_summary,
-        evaluation_sample_weight_summary=evaluation_sample_weight_summary,
+        evaluation_sample_weight_summary={
+            **(evaluation_sample_weight_summary or {}),
+            "direction_quality_models": evaluation_direction_quality_summary,
+        },
+        direction_quality_summary=direction_quality_summary,
         final_train_end=final_train_end,
     )
     write_json_atomic(training_metadata_path, metadata)

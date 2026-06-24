@@ -78,6 +78,7 @@ quant_sol_project/
 - `.env.example` 默认使用 `MODEL_LABEL_FUTURE_WINDOW=8` / `MODEL_LABEL_THRESHOLD=0.004`，让标签避开 5m 小噪声
 - 默认启用二分类交易质量标签：`trade / no_trade`；方向由 trend/regime 规则决定
 - realistic 标签要求规则允许开仓、未来先触发 TP、扣除估算手续费/滑点后仍有正收益，并记录 MFE/MAE 质量诊断
+- 默认训练 long/short 方向质量子模型，让模型分别学习可交易方向内哪些时刻值得入场，避免一套质量概率混淆多空排序
 - 可选接入 Rubik OI/taker/多空比平稳特征：`MODEL_USE_RUBIK_FEATURES=1` 时才拉取
 - 按时间顺序切分训练集 / 验证集 / 最终 OOS 回测集，中间留 purge gap，避免未来数据泄漏
 - 使用 sample weight 平衡 trade / no_trade，并在类别内部按 regime + direction 平衡，同时提高近期样本权重
@@ -468,6 +469,7 @@ POLL_SEC=10
 - `MODEL_LABEL_LOOKAHEAD_BARS=24` / `MODEL_LABEL_TAKE_PROFIT=0.016` / `MODEL_LABEL_STOP_LOSS=0.014`：realistic 二分类质量标签的当前校准口径，目标是让模型学习“当前规则方向是否值得交易”。
 - `MODEL_LABEL_MIN_NET_RETURN=0.0` / `MODEL_LABEL_MAX_MAE_RATIO=1.0`：trade 标签必须扣除估算手续费/滑点后仍不亏，且触发 TP 前的最大不利波动不超过止损距离。
 - `MODEL_LABEL_REQUIRE_REGIME_ALLOWED=1` / `MODEL_TRAIN_TRADABLE_LABELS=1` / `MODEL_TRAIN_NO_TRADE_LABELS=1`：标签与线上可交易规则保持一致；被 trend/regime 规则拒绝的样本标为 no_trade。
+- `MODEL_TRAIN_DIRECTION_QUALITY_MODELS=1` / `MODEL_DIRECTION_QUALITY_MIN_ROWS=200` / `MODEL_DIRECTION_QUALITY_MIN_TRADE_ROWS=20`：在全局质量模型外额外训练 long/short 子模型；方向样本或 trade 样本不足时自动回退到全局模型。
 - `MODEL_USE_RUBIK_FEATURES=0`：Rubik OI/taker/多空比特征默认关闭。开启前应重新训练并用 OOS 回测确认收益质量。
 - `THRESHOLD_LONG=0.56` / `THRESHOLD_SHORT=0.56` / `SIGNAL_MIN_PROB_DIFF=0.12`：当前示例阈值配合新版标签和模型概率尺度，复制旧模型时不要盲目套用。
 - `POSITION_PROBABILITY_CENTER=0.45`：仓位 sizing 的概率起点；二分类质量模型的概率更稀疏，需和阈值、`MIN_SIGNAL_TARGET_RATIO` 一起校准。

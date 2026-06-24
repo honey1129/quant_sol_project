@@ -9,6 +9,24 @@ import pandas as pd
 from train import train as train_module
 
 
+class TinyBinaryEstimator:
+    classes_ = [0, 1]
+
+    def __init__(self):
+        self.fit_rows = 0
+
+    def fit(self, X, y, sample_weight=None):
+        self.fit_rows = len(y)
+        self.trade_rate = float(pd.Series(y).astype(int).mean()) if len(y) else 0.0
+        return self
+
+    def predict(self, X):
+        return [1 if self.trade_rate >= 0.5 else 0 for _ in range(len(X))]
+
+    def predict_proba(self, X):
+        return [[1.0 - self.trade_rate, self.trade_rate] for _ in range(len(X))]
+
+
 class TrainingMetadataTests(unittest.TestCase):
     def test_build_training_metadata_includes_hashes_and_metrics(self):
         index = pd.date_range("2026-01-01", periods=20, freq="5min", tz="UTC")
@@ -50,6 +68,7 @@ class TrainingMetadataTests(unittest.TestCase):
         )
         self.assertEqual(metadata["sample_weight_summary"]["method"], "unit")
         self.assertEqual(metadata["evaluation_sample_weight_summary"], {})
+        self.assertEqual(metadata["direction_quality_models"], {})
         self.assertEqual(metadata["label_distribution"]["all"], {"0": 10, "1": 10})
         self.assertEqual(metadata["target_schema"], "binary_trade_quality")
         self.assertEqual(metadata["target_labels"], {"0": "no_trade", "1": "trade"})
@@ -239,6 +258,41 @@ class TrainingMetadataTests(unittest.TestCase):
         self.assertAlmostEqual(target_totals["trade"], target_totals["no_trade"])
         self.assertAlmostEqual(group_totals["no_trade:trend_long:long"], group_totals["no_trade:trend_short:short"])
         self.assertAlmostEqual(group_totals["no_trade:trend_short:short"], group_totals["no_trade:range_high_vol:none"])
+
+    def test_direction_quality_bundle_trains_long_and_short_submodels(self):
+        index = pd.date_range("2026-01-01", periods=12, freq="5min", tz="UTC")
+        X = pd.DataFrame({
+            "trend_bias_num": [1.0] * 6 + [-1.0] * 6,
+            "regime_trend_long": [1.0] * 6 + [0.0] * 6,
+            "regime_trend_short": [0.0] * 6 + [1.0] * 6,
+        }, index=index)
+        y = pd.Series([1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1], index=index)
+        context = pd.DataFrame({
+            "label_direction": ["long"] * 6 + ["short"] * 6,
+            "label_regime": ["trend_long"] * 6 + ["trend_short"] * 6,
+            "label_outcome": ["TP", "SL", "TP", "TIMEOUT", "SL", "TP"] * 2,
+            "label_reject_reason": ["accepted", "outcome_sl", "accepted", "outcome_timeout", "outcome_sl", "accepted"] * 2,
+        }, index=index)
+
+        with patch("train.train.build_model_estimators", return_value={
+            "lgb_v1": TinyBinaryEstimator(),
+            "xgb_v1": TinyBinaryEstimator(),
+            "rf_v1": TinyBinaryEstimator(),
+        }):
+            with patch("train.train.config.MODEL_DIRECTION_QUALITY_MIN_ROWS", 1):
+                with patch("train.train.config.MODEL_DIRECTION_QUALITY_MIN_TRADE_ROWS", 1):
+                    models, _, _, _, summary = train_module.train_direction_quality_bundle(
+                        X,
+                        y,
+                        sample_context=context,
+                    )
+
+        self.assertTrue(summary["enabled"])
+        self.assertEqual(summary["enabled_directions"], ["long", "short"])
+        self.assertTrue(summary["directions"]["long"]["enabled"])
+        self.assertTrue(summary["directions"]["short"]["enabled"])
+        self.assertTrue(models["lgb_v1"].direction_quality_enabled)
+        self.assertEqual(models["lgb_v1"].trained_directions, ["long", "short"])
 
     def test_write_json_atomic_round_trips_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:

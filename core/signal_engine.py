@@ -44,6 +44,10 @@ def _is_binary_trade_quality_model(model_metadata):
     return label_mode == "binary_trade_quality" or label_mode.startswith("binary_")
 
 
+def _model_is_direction_quality(model):
+    return bool(getattr(model, "direction_quality_enabled", False))
+
+
 def _class_probability(raw_prob, classes, label):
     return float(raw_prob[classes.index(label)]) if label in classes else 0.0
 
@@ -97,7 +101,7 @@ def weighted_predict_proba(models, X, model_weights=None, *, trend_bias=None, mo
             raise ValueError(f"模型 {name} 返回了非有限概率: {raw_prob!r}")
 
         classes = list(getattr(model, "classes_", range(len(raw_prob))))
-        if _is_binary_trade_quality_model(model_metadata) and 2 not in classes:
+        if (_is_binary_trade_quality_model(model_metadata) or _model_is_direction_quality(model)) and 2 not in classes:
             prob = _binary_trade_quality_to_directional(
                 trade_prob=_class_probability(raw_prob, classes, 1),
                 no_trade_prob=_class_probability(raw_prob, classes, 0),
