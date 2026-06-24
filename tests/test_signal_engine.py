@@ -14,7 +14,9 @@ if "requests" not in sys.modules:
     fake_requests.post = lambda *args, **kwargs: None
     sys.modules["requests"] = fake_requests
 
-if "joblib" not in sys.modules:
+try:
+    import joblib  # noqa: F401
+except ModuleNotFoundError:
     fake_joblib = types.ModuleType("joblib")
     fake_joblib.load = lambda path: object()
     sys.modules["joblib"] = fake_joblib
@@ -74,6 +76,7 @@ except ModuleNotFoundError:
     sys.modules["pandas"] = fake_pandas
 
 from core import signal_engine
+from core.direction_quality import DirectionQualityModel
 
 
 class StubModel:
@@ -153,6 +156,37 @@ class WeightedPredictProbaTests(unittest.TestCase):
         self.assertAlmostEqual(float(short_out[1]), 0.0)
         self.assertAlmostEqual(float(neutral_out[0]), 0.0)
         self.assertAlmostEqual(float(neutral_out[1]), 0.0)
+
+    def test_direction_quality_model_uses_direction_specific_submodel(self):
+        import pandas as pd
+
+        model = DirectionQualityModel(
+            StubModel([0.80, 0.20], classes=[0, 1]),
+            direction_models={
+                "long": StubModel([0.10, 0.90], classes=[0, 1]),
+                "short": StubModel([0.25, 0.75], classes=[0, 1]),
+            },
+        )
+
+        long_out = signal_engine.weighted_predict_proba(
+            {"lgb_v1": model},
+            pd.DataFrame({"trend_bias_num": [1.0]}),
+            {"lgb_v1": 1.0},
+            trend_bias="long",
+            model_metadata={"target_schema": "binary_trade_quality"},
+        )
+        short_out = signal_engine.weighted_predict_proba(
+            {"lgb_v1": model},
+            pd.DataFrame({"trend_bias_num": [-1.0]}),
+            {"lgb_v1": 1.0},
+            trend_bias="short",
+            model_metadata={"target_schema": "binary_trade_quality"},
+        )
+
+        self.assertAlmostEqual(float(long_out[0]), 0.0)
+        self.assertAlmostEqual(float(long_out[1]), 0.90)
+        self.assertAlmostEqual(float(short_out[0]), 0.75)
+        self.assertAlmostEqual(float(short_out[1]), 0.0)
 
     def test_empty_models_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "模型列表为空"):

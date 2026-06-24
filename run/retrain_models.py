@@ -831,7 +831,7 @@ def run_walk_forward_validation(log_file, context_backtester, metadata, feature_
         raise RuntimeError("训练元数据缺失，无法执行 walk-forward 验证")
 
     from backtest.backtest import Backtester
-    from train.train import create_labels, train_model_bundle
+    from train.train import create_labels, train_direction_quality_bundle
 
     append_log_header(log_file, "walk_forward_validation")
     labeled_data = create_labels(
@@ -862,7 +862,7 @@ def run_walk_forward_validation(log_file, context_backtester, metadata, feature_
 
         X_train = train_df[feature_cols].astype(float)
         y_train = train_df["target"]
-        fold_models, _, _, _ = train_model_bundle(X_train, y_train, sample_context=train_df)
+        fold_models, _, _, _, _ = train_direction_quality_bundle(X_train, y_train, sample_context=train_df)
         fold_diagnostics = build_walk_forward_fold_diagnostics(
             fold,
             train_df,

@@ -777,7 +777,7 @@ def build_candidate_metadata(index, feature_cols, candidate, split_positions, fi
 
 
 def fit_label_strength_candidate(seed_data, feature_cols, candidate, split):
-    from train.train import build_time_splits, train_model_bundle
+    from train.train import build_time_splits, train_direction_quality_bundle
 
     with temporary_env(_label_strength_env(candidate)):
         labeled = td.create_labels(
@@ -808,9 +808,10 @@ def fit_label_strength_candidate(seed_data, feature_cols, candidate, split):
     else:
         model_train_end = validation_end if bool(config.MODEL_FINAL_TRAIN_ON_VALIDATION) else train_end
 
-    models, _, _, sample_weight_summary = train_model_bundle(
+    models, _, _, sample_weight_summary, direction_quality_summary = train_direction_quality_bundle(
         X.iloc[:model_train_end].copy(),
         y.iloc[:model_train_end].copy(),
+        sample_context=labeled.iloc[:model_train_end].copy(),
     )
     metadata = build_candidate_metadata(
         X.index,
@@ -820,6 +821,7 @@ def fit_label_strength_candidate(seed_data, feature_cols, candidate, split):
         final_train_end=model_train_end,
         purge_bars=purge_bars,
     )
+    metadata["direction_quality_models"] = direction_quality_summary
     bundle = {
         "root_dir": PROJECT_ROOT,
         "models": models,

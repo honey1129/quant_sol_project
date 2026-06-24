@@ -19,6 +19,7 @@ if PROJECT_ROOT not in sys.path:
 
 from backtest.backtest import Backtester
 from config import config
+from core import signal_engine
 from core.regime_filter import derive_market_regime
 from core.trend_filter import derive_trend_context
 from train.train import create_labels
@@ -85,47 +86,26 @@ def load_model_bundle(model_root):
 
 
 def weighted_predict_matrix(models, X, model_weights, *, trend_biases=None, model_metadata=None):
-    weighted_sum = None
-    used_weight_total = 0.0
     binary_quality = is_binary_trade_quality(model_metadata)
     trend_biases = list(trend_biases) if trend_biases is not None else [None] * len(X)
-    for name, model in models.items():
-        weight = float(model_weights.get(name, 1.0))
-        if not math.isfinite(weight) or weight < 0:
-            raise ValueError(f"模型 {name} 的权重必须是非负有限数: {weight!r}")
-        if weight == 0:
-            continue
-
-        raw_probs = np.asarray(model.predict_proba(X), dtype=float)
-        if raw_probs.ndim != 2 or raw_probs.shape[1] < 2:
-            raise ValueError(f"模型 {name} 返回的概率矩阵维度不正确: {raw_probs.shape!r}")
-        classes = list(getattr(model, "classes_", range(raw_probs.shape[1])))
-        probs = np.zeros((len(X), 3), dtype=float)
-        if binary_quality and 2 not in classes:
-            trade_probs = raw_probs[:, classes.index(1)] if 1 in classes else np.zeros(len(X))
-            no_trade_probs = raw_probs[:, classes.index(0)] if 0 in classes else np.zeros(len(X))
-            for row_idx, trend_bias in enumerate(trend_biases):
-                trend_bias = str(trend_bias or "").lower()
-                if trend_bias == "long":
-                    probs[row_idx, 1] = trade_probs[row_idx]
-                    probs[row_idx, 2] = no_trade_probs[row_idx]
-                elif trend_bias == "short":
-                    probs[row_idx, 0] = trade_probs[row_idx]
-                    probs[row_idx, 2] = no_trade_probs[row_idx]
-                else:
-                    probs[row_idx, 2] = 1.0
+    rows = []
+    for row_idx in range(len(X)):
+        row_frame = X.iloc[row_idx:row_idx + 1] if hasattr(X, "iloc") else X[row_idx:row_idx + 1]
+        directional = signal_engine.weighted_predict_proba(
+            models,
+            row_frame,
+            model_weights,
+            trend_bias=trend_biases[row_idx],
+            model_metadata=model_metadata,
+        )
+        short_prob = float(directional[0])
+        long_prob = float(directional[1])
+        if binary_quality:
+            no_trade_prob = max(0.0, min(1.0, 1.0 - max(short_prob, long_prob)))
         else:
-            for label in (0, 1, 2):
-                if label in classes:
-                    probs[:, label] = raw_probs[:, classes.index(label)]
-        if weighted_sum is None:
-            weighted_sum = np.zeros_like(probs, dtype=float)
-        weighted_sum += probs * weight
-        used_weight_total += weight
-
-    if weighted_sum is None or used_weight_total <= 0:
-        raise ValueError("实际参与预测的模型权重总和必须大于 0")
-    return weighted_sum / used_weight_total
+            no_trade_prob = 0.0
+        rows.append([short_prob, long_prob, no_trade_prob])
+    return np.asarray(rows, dtype=float)
 
 
 def enrich_regime_context(data):

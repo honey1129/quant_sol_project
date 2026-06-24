@@ -6,7 +6,9 @@ import types
 from types import SimpleNamespace
 from unittest.mock import patch
 
-if "joblib" not in sys.modules:
+try:
+    import joblib  # noqa: F401
+except ModuleNotFoundError:
     fake_joblib = types.ModuleType("joblib")
     fake_joblib.load = lambda path: object()
     sys.modules["joblib"] = fake_joblib
