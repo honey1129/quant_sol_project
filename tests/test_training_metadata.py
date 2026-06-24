@@ -27,6 +27,21 @@ class TinyBinaryEstimator:
         return [[1.0 - self.trade_rate, self.trade_rate] for _ in range(len(X))]
 
 
+class FeatureProbabilityEstimator:
+    classes_ = [0, 1]
+
+    def fit(self, X, y, sample_weight=None):
+        self.fit_rows = len(y)
+        return self
+
+    def predict(self, X):
+        return [1 if row[0] >= 0.5 else 0 for row in self.predict_proba(X)]
+
+    def predict_proba(self, X):
+        score = pd.Series(X["score"]).astype(float).clip(0.01, 0.99)
+        return [[1.0 - float(value), float(value)] for value in score]
+
+
 class TrainingMetadataTests(unittest.TestCase):
     def test_build_training_metadata_includes_hashes_and_metrics(self):
         index = pd.date_range("2026-01-01", periods=20, freq="5min", tz="UTC")
@@ -293,6 +308,53 @@ class TrainingMetadataTests(unittest.TestCase):
         self.assertTrue(summary["directions"]["short"]["enabled"])
         self.assertTrue(models["lgb_v1"].direction_quality_enabled)
         self.assertEqual(models["lgb_v1"].trained_directions, ["long", "short"])
+
+    def test_direction_quality_bundle_trains_direction_calibrators(self):
+        index = pd.date_range("2026-01-01", periods=40, freq="5min", tz="UTC")
+        X = pd.DataFrame({
+            "score": [
+                0.05, 0.10, 0.15, 0.20, 0.75, 0.80, 0.85, 0.90,
+                0.12, 0.18, 0.78, 0.88, 0.08, 0.22, 0.82, 0.92,
+                0.05, 0.95, 0.10, 0.90,
+            ] * 2,
+            "trend_bias_num": [1.0] * 20 + [-1.0] * 20,
+            "regime_trend_long": [1.0] * 20 + [0.0] * 20,
+            "regime_trend_short": [0.0] * 20 + [1.0] * 20,
+        }, index=index)
+        y = pd.Series(
+            [0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1] * 2,
+            index=index,
+        )
+        context = pd.DataFrame({
+            "label_direction": ["long"] * 20 + ["short"] * 20,
+            "label_regime": ["trend_long"] * 20 + ["trend_short"] * 20,
+            "label_outcome": ["SL", "TIMEOUT", "SL", "TIMEOUT", "TP"] * 8,
+            "label_reject_reason": ["outcome_sl", "outcome_timeout", "outcome_sl", "outcome_timeout", "accepted"] * 8,
+        }, index=index)
+
+        with patch("train.train.build_model_estimators", return_value={
+            "lgb_v1": FeatureProbabilityEstimator(),
+            "xgb_v1": FeatureProbabilityEstimator(),
+            "rf_v1": FeatureProbabilityEstimator(),
+        }):
+            with patch("train.train.config.MODEL_DIRECTION_QUALITY_MIN_ROWS", 4):
+                with patch("train.train.config.MODEL_DIRECTION_QUALITY_MIN_TRADE_ROWS", 2):
+                    with patch("train.train.config.MODEL_DIRECTION_QUALITY_CALIBRATION", "sigmoid"):
+                        with patch("train.train.config.MODEL_DIRECTION_QUALITY_CALIBRATION_RATIO", 0.25):
+                            with patch("train.train.config.MODEL_DIRECTION_QUALITY_CALIBRATION_MIN_ROWS", 4):
+                                with patch("train.train.config.MODEL_DIRECTION_QUALITY_CALIBRATION_MIN_POSITIVES", 1):
+                                    with patch("train.train.config.MODEL_DIRECTION_QUALITY_CALIBRATION_MIN_NEGATIVES", 1):
+                                        models, _, _, _, summary = train_module.train_direction_quality_bundle(
+                                            X,
+                                            y,
+                                            sample_context=context,
+                                        )
+
+        self.assertEqual(summary["calibration_method"], "sigmoid")
+        self.assertEqual(summary["calibrated_directions"], ["long", "short"])
+        self.assertEqual(models["lgb_v1"].calibrated_directions, ["long", "short"])
+        self.assertTrue(summary["directions"]["long"]["calibration"]["lgb_v1"]["active"])
+        self.assertGreater(summary["directions"]["long"]["calibration"]["lgb_v1"]["fitted_rows"], 0)
 
     def test_write_json_atomic_round_trips_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:

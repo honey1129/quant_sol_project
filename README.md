@@ -470,6 +470,8 @@ POLL_SEC=10
 - `MODEL_LABEL_MIN_NET_RETURN=0.0` / `MODEL_LABEL_MAX_MAE_RATIO=1.0`：trade 标签必须扣除估算手续费/滑点后仍不亏，且触发 TP 前的最大不利波动不超过止损距离。
 - `MODEL_LABEL_REQUIRE_REGIME_ALLOWED=1` / `MODEL_TRAIN_TRADABLE_LABELS=1` / `MODEL_TRAIN_NO_TRADE_LABELS=1`：标签与线上可交易规则保持一致；被 trend/regime 规则拒绝的样本标为 no_trade。
 - `MODEL_TRAIN_DIRECTION_QUALITY_MODELS=1` / `MODEL_DIRECTION_QUALITY_MIN_ROWS=200` / `MODEL_DIRECTION_QUALITY_MIN_TRADE_ROWS=20`：在全局质量模型外额外训练 long/short 子模型；方向样本或 trade 样本不足时自动回退到全局模型。
+- `MODEL_DIRECTION_QUALITY_CALIBRATION=sigmoid` / `MODEL_DIRECTION_QUALITY_CALIBRATION_RATIO=0.20`：每个方向子模型用尾部方向样本单独做概率校准，降低 `trend_short` 高置信误报和 `trend_long` 概率压低这类方向内倒挂；最终子模型仍用全量方向样本训练。
+- `MODEL_DIRECTION_QUALITY_CALIBRATION_USE_SAMPLE_WEIGHT=0`：概率校准默认按真实样本分布拟合，不继承训练阶段为了召回而放大的 trade 权重。
 - `MODEL_USE_RUBIK_FEATURES=0`：Rubik OI/taker/多空比特征默认关闭。开启前应重新训练并用 OOS 回测确认收益质量。
 - `THRESHOLD_LONG=0.56` / `THRESHOLD_SHORT=0.56` / `SIGNAL_MIN_PROB_DIFF=0.12`：当前示例阈值配合新版标签和模型概率尺度，复制旧模型时不要盲目套用。
 - `POSITION_PROBABILITY_CENTER=0.45`：仓位 sizing 的概率起点；二分类质量模型的概率更稀疏，需和阈值、`MIN_SIGNAL_TARGET_RATIO` 一起校准。

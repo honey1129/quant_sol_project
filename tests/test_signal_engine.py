@@ -76,7 +76,7 @@ except ModuleNotFoundError:
     sys.modules["pandas"] = fake_pandas
 
 from core import signal_engine
-from core.direction_quality import DirectionQualityModel
+from core.direction_quality import DirectionQualityModel, BinaryProbabilityCalibrator
 
 
 class StubModel:
@@ -187,6 +187,34 @@ class WeightedPredictProbaTests(unittest.TestCase):
         self.assertAlmostEqual(float(long_out[1]), 0.90)
         self.assertAlmostEqual(float(short_out[0]), 0.75)
         self.assertAlmostEqual(float(short_out[1]), 0.0)
+
+    def test_direction_quality_model_applies_direction_calibrator(self):
+        import pandas as pd
+
+        class ScaleCalibrator(BinaryProbabilityCalibrator):
+            @property
+            def active(self):
+                return True
+
+            def predict_trade_probability(self, trade_probability):
+                return [float(value) * 0.5 for value in trade_probability]
+
+        model = DirectionQualityModel(
+            StubModel([0.80, 0.20], classes=[0, 1]),
+            direction_models={"long": StubModel([0.10, 0.90], classes=[0, 1])},
+            direction_calibrators={"long": ScaleCalibrator(method="custom", direction="long")},
+        )
+
+        long_out = signal_engine.weighted_predict_proba(
+            {"lgb_v1": model},
+            pd.DataFrame({"trend_bias_num": [1.0]}),
+            {"lgb_v1": 1.0},
+            trend_bias="long",
+            model_metadata={"target_schema": "binary_trade_quality"},
+        )
+
+        self.assertAlmostEqual(float(long_out[0]), 0.0)
+        self.assertAlmostEqual(float(long_out[1]), 0.45)
 
     def test_empty_models_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "模型列表为空"):
