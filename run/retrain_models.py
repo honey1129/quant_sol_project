@@ -1333,12 +1333,14 @@ def add_walk_forward_probabilities(data, feature_cols, fold_models, model_weight
     from core.trend_filter import derive_trend_context
 
     predicted = data.copy()
-    rows = []
+    if predicted.empty:
+        predicted["long_prob"] = 0.0
+        predicted["short_prob"] = 0.0
+        return predicted
+
+    X = predicted[feature_cols].astype(float)
+    trend_biases = []
     for _, row in predicted.iterrows():
-        X_row = pd.DataFrame(
-            [row[feature_cols].astype(float).to_numpy()],
-            columns=feature_cols,
-        )
         trend_context = derive_trend_context(
             row,
             interval=config.TREND_FILTER_INTERVAL,
@@ -1346,23 +1348,17 @@ def add_walk_forward_probabilities(data, feature_cols, fold_models, model_weight
             slow_col=config.TREND_FILTER_SLOW_COL,
             min_gap=config.TREND_FILTER_MIN_GAP,
         )
-        avg_pred = signal_engine.weighted_predict_proba(
-            fold_models,
-            X_row,
-            model_weights,
-            trend_bias=trend_context.get("trend_bias"),
-            model_metadata=metadata,
-        )
-        rows.append({
-            "long_prob": float(avg_pred[1]),
-            "short_prob": float(avg_pred[0]),
-        })
-    if rows:
-        probability_frame = pd.DataFrame(rows, index=predicted.index)
-        predicted[["long_prob", "short_prob"]] = probability_frame[["long_prob", "short_prob"]]
-    else:
-        predicted["long_prob"] = 0.0
-        predicted["short_prob"] = 0.0
+        trend_biases.append(str(trend_context.get("trend_bias") or "neutral"))
+
+    avg_pred = signal_engine.weighted_predict_proba_batch(
+        fold_models,
+        X,
+        model_weights,
+        trend_biases=trend_biases,
+        model_metadata=metadata,
+    )
+    probability_frame = pd.DataFrame(avg_pred, columns=["short_prob", "long_prob"], index=predicted.index)
+    predicted[["long_prob", "short_prob"]] = probability_frame[["long_prob", "short_prob"]]
     return predicted
 
 
