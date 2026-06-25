@@ -790,9 +790,9 @@ def _threshold_sweep_enabled():
 
 def _threshold_sweep_candidate_limit():
     try:
-        return max(1, int(getattr(config, "MODEL_WALK_FORWARD_THRESHOLD_SWEEP_MAX_CANDIDATES", 160)))
+        return max(1, int(getattr(config, "MODEL_WALK_FORWARD_THRESHOLD_SWEEP_MAX_CANDIDATES", 48)))
     except (TypeError, ValueError):
-        return 160
+        return 48
 
 
 def _threshold_sweep_top_n():
@@ -800,6 +800,35 @@ def _threshold_sweep_top_n():
         return max(1, int(getattr(config, "MODEL_WALK_FORWARD_THRESHOLD_SWEEP_TOP_N", 5)))
     except (TypeError, ValueError):
         return 5
+
+
+def _threshold_sweep_early_stop_enabled():
+    return bool(getattr(config, "MODEL_WALK_FORWARD_THRESHOLD_SWEEP_EARLY_STOP_ENABLED", True))
+
+
+def _threshold_sweep_early_stop_patience():
+    try:
+        return max(0, int(getattr(config, "MODEL_WALK_FORWARD_THRESHOLD_SWEEP_EARLY_STOP_PATIENCE", 16)))
+    except (TypeError, ValueError):
+        return 16
+
+
+def _threshold_sweep_early_stop_min_closed_trades():
+    try:
+        configured = int(getattr(config, "MODEL_WALK_FORWARD_THRESHOLD_SWEEP_EARLY_STOP_MIN_CLOSED_TRADES", 1))
+    except (TypeError, ValueError):
+        configured = 1
+    return max(HARD_MIN_CLOSED_TRADES, configured)
+
+
+def _threshold_sweep_early_stop_min_profit_factor():
+    try:
+        configured = float(getattr(config, "MODEL_WALK_FORWARD_THRESHOLD_SWEEP_EARLY_STOP_MIN_PROFIT_FACTOR", 1.05))
+    except (TypeError, ValueError):
+        configured = 1.05
+    if not math.isfinite(configured):
+        configured = 1.05
+    return max(HARD_MIN_PROFIT_FACTOR, configured)
 
 
 def _current_threshold_sweep_overrides():
@@ -832,6 +861,42 @@ def threshold_sweep_candidate_key(overrides):
             "BACKTEST_MIN_ADJUST_AMOUNT",
         )
     )
+
+
+def downsample_threshold_sweep_candidates(candidates, limit):
+    candidates = list(candidates or [])
+    limit = max(1, int(limit))
+    if len(candidates) <= limit:
+        return candidates
+
+    selected = {0}
+    if limit >= 2 and len(candidates) > 1:
+        selected.add(1)
+
+    remaining_slots = limit - len(selected)
+    remaining_indices = list(range(2, len(candidates)))
+    if remaining_slots > 0 and remaining_indices:
+        if remaining_slots >= len(remaining_indices):
+            selected.update(remaining_indices)
+        else:
+            denominator = max(1, remaining_slots - 1)
+            max_offset = len(remaining_indices) - 1
+            for slot in range(remaining_slots):
+                offset = round(slot * max_offset / denominator)
+                selected.add(remaining_indices[offset])
+            # Rounding can collide on tiny grids; fill deterministically from both ends.
+            left = 0
+            right = len(remaining_indices) - 1
+            take_left = True
+            while len(selected) < limit and left <= right:
+                selected.add(remaining_indices[left if take_left else right])
+                if take_left:
+                    left += 1
+                else:
+                    right -= 1
+                take_left = not take_left
+
+    return [candidates[index] for index in sorted(selected)[:limit]]
 
 
 def build_walk_forward_threshold_candidates():
@@ -872,7 +937,6 @@ def build_walk_forward_threshold_candidates():
         candidates.append({"name": name, "overrides": dict(overrides)})
 
     add_candidate("current", current)
-    limit = _threshold_sweep_candidate_limit()
     for threshold in thresholds:
         for gap in gaps:
             for min_target_ratio in min_target_ratios:
@@ -898,9 +962,7 @@ def build_walk_forward_threshold_candidates():
                         ),
                         overrides,
                     )
-                    if len(candidates) >= limit:
-                        return candidates
-    return candidates
+    return downsample_threshold_sweep_candidates(candidates, _threshold_sweep_candidate_limit())
 
 
 def apply_config_overrides(overrides):
@@ -955,6 +1017,17 @@ def threshold_sweep_score(summary):
     return (enough_trades, positive_pf, net, pf, -drawdown, closed)
 
 
+def threshold_sweep_candidate_is_good_enough(summary):
+    closed = int(summary.get("closed_trade_count") or 0)
+    net = float(summary.get("net_pnl_after_costs") or 0.0)
+    pf = float(summary.get("profit_factor") or 0.0)
+    return (
+        closed >= _threshold_sweep_early_stop_min_closed_trades()
+        and net > 0.0
+        and pf >= _threshold_sweep_early_stop_min_profit_factor()
+    )
+
+
 def run_backtest_with_overrides(backtester_kwargs, overrides):
     from backtest.backtest import Backtester
 
@@ -981,11 +1054,40 @@ def run_walk_forward_threshold_sweep(backtester_kwargs, candidates):
         return {"enabled": False, "reason": "no_candidates", "candidate_count": 0}
 
     results = []
+    best = None
+    best_score = None
+    no_improvement_count = 0
+    stopped_early = False
+    early_stop_reason = None
+    early_stop_enabled = _threshold_sweep_early_stop_enabled()
+    early_stop_patience = _threshold_sweep_early_stop_patience()
+
     for candidate in candidates:
         summary = run_backtest_with_overrides(backtester_kwargs, candidate["overrides"])
         summary["name"] = candidate["name"]
         summary["overrides"] = candidate["overrides"]
         results.append(summary)
+
+        score = threshold_sweep_score(summary)
+        if best_score is None or score > best_score:
+            best = summary
+            best_score = score
+            no_improvement_count = 0
+        else:
+            no_improvement_count += 1
+
+        if (
+            early_stop_enabled
+            and early_stop_patience > 0
+            and best is not None
+            and threshold_sweep_candidate_is_good_enough(best)
+            and no_improvement_count >= early_stop_patience
+        ):
+            stopped_early = True
+            early_stop_reason = (
+                f"no_improvement_patience_{early_stop_patience}_after_good_candidate"
+            )
+            break
 
     ranked = sorted(results, key=threshold_sweep_score, reverse=True)
     top_n = _threshold_sweep_top_n()
@@ -993,6 +1095,15 @@ def run_walk_forward_threshold_sweep(backtester_kwargs, candidates):
     return {
         "enabled": True,
         "candidate_count": int(len(candidates)),
+        "evaluated_count": int(len(results)),
+        "stopped_early": bool(stopped_early),
+        "early_stop_reason": early_stop_reason,
+        "early_stop_config": {
+            "enabled": bool(early_stop_enabled),
+            "patience": int(early_stop_patience),
+            "min_closed_trades": int(_threshold_sweep_early_stop_min_closed_trades()),
+            "min_profit_factor": float(_threshold_sweep_early_stop_min_profit_factor()),
+        },
         "top_n": int(top_n),
         "best": best,
         "recommended": ranked[:top_n],
@@ -1008,6 +1119,8 @@ def write_walk_forward_threshold_sweep(log_file, fold_number, sweep_summary):
             "walk_forward_threshold_sweep "
             f"fold={fold_number} "
             f"candidates={sweep_summary.get('candidate_count', 0)} "
+            f"evaluated={sweep_summary.get('evaluated_count', 0)} "
+            f"stopped_early={int(bool(sweep_summary.get('stopped_early')))} "
             f"best={best.get('name')} "
             f"closed={best.get('closed_trade_count', 0)} "
             f"net={float(best.get('net_pnl_after_costs') or 0.0):.2f} "

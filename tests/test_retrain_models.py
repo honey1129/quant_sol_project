@@ -483,6 +483,51 @@ class RetrainBacktestValidationTests(unittest.TestCase):
         )
         self.assertEqual(low_candidate["overrides"]["BACKTEST_MIN_ADJUST_AMOUNT"], 5.0)
 
+    def test_walk_forward_threshold_downsampling_preserves_current_and_low_scale(self):
+        candidates = [
+            {"name": f"c{i}", "overrides": {"id": i}}
+            for i in range(12)
+        ]
+
+        sampled = retrain_models.downsample_threshold_sweep_candidates(candidates, 5)
+
+        self.assertEqual(len(sampled), 5)
+        self.assertEqual(sampled[0]["name"], "c0")
+        self.assertEqual(sampled[1]["name"], "c1")
+        self.assertEqual(sampled[-1]["name"], "c11")
+
+    def test_walk_forward_threshold_sweep_stops_early_after_good_stable_candidate(self):
+        candidates = [
+            {"name": f"c{i}", "overrides": {"id": i}}
+            for i in range(6)
+        ]
+        summaries = [
+            {"closed_trade_count": 0, "net_pnl_after_costs": 0.0, "profit_factor": 0.0, "max_drawdown_pct": 0.0},
+            {"closed_trade_count": 1, "net_pnl_after_costs": 10.0, "profit_factor": 1.20, "max_drawdown_pct": -0.5},
+            {"closed_trade_count": 1, "net_pnl_after_costs": 8.0, "profit_factor": 1.10, "max_drawdown_pct": -0.5},
+            {"closed_trade_count": 1, "net_pnl_after_costs": 7.0, "profit_factor": 1.10, "max_drawdown_pct": -0.5},
+            {"closed_trade_count": 1, "net_pnl_after_costs": 6.0, "profit_factor": 1.10, "max_drawdown_pct": -0.5},
+            {"closed_trade_count": 1, "net_pnl_after_costs": 5.0, "profit_factor": 1.10, "max_drawdown_pct": -0.5},
+        ]
+        calls = []
+
+        def fake_backtest(_kwargs, overrides):
+            calls.append(overrides["id"])
+            return dict(summaries[overrides["id"]])
+
+        with patch("run.retrain_models.run_backtest_with_overrides", side_effect=fake_backtest):
+            with patch("run.retrain_models.config.MODEL_WALK_FORWARD_THRESHOLD_SWEEP_EARLY_STOP_ENABLED", True):
+                with patch("run.retrain_models.config.MODEL_WALK_FORWARD_THRESHOLD_SWEEP_EARLY_STOP_PATIENCE", 2):
+                    with patch("run.retrain_models.config.MODEL_WALK_FORWARD_THRESHOLD_SWEEP_EARLY_STOP_MIN_CLOSED_TRADES", 1):
+                        with patch("run.retrain_models.config.MODEL_WALK_FORWARD_THRESHOLD_SWEEP_EARLY_STOP_MIN_PROFIT_FACTOR", 1.05):
+                            sweep = retrain_models.run_walk_forward_threshold_sweep({}, candidates)
+
+        self.assertEqual(calls, [0, 1, 2, 3])
+        self.assertTrue(sweep["stopped_early"])
+        self.assertEqual(sweep["evaluated_count"], 4)
+        self.assertEqual(sweep["candidate_count"], 6)
+        self.assertEqual(sweep["best"]["name"], "c1")
+
 
 if __name__ == "__main__":
     unittest.main()
