@@ -535,6 +535,42 @@ def _direction_quality_regime_calibration_min_negatives():
     ))
 
 
+def _hard_negative_sample_weight_multiplier():
+    return max(0.0, float(os.getenv(
+        "MODEL_HARD_NEGATIVE_SAMPLE_WEIGHT_MULTIPLIER",
+        str(getattr(config, "MODEL_HARD_NEGATIVE_SAMPLE_WEIGHT_MULTIPLIER", 2.0)),
+    )))
+
+
+def infer_hard_negative_mask(y, sample_context=None):
+    if sample_context is None or len(y) == 0:
+        return pd.Series(False, index=y.index, dtype=bool)
+
+    context = sample_context.reindex(y.index)
+    if "label_outcome" not in context and "label_reject_reason" not in context:
+        return pd.Series(False, index=y.index, dtype=bool)
+
+    outcomes = (
+        context.get("label_outcome", pd.Series("", index=y.index))
+        .reindex(y.index)
+        .fillna("")
+        .astype(str)
+        .str.upper()
+    )
+    reject_reasons = (
+        context.get("label_reject_reason", pd.Series("", index=y.index))
+        .reindex(y.index)
+        .fillna("")
+        .astype(str)
+        .str.lower()
+    )
+    no_trade_mask = y.astype(int) == TARGET_NO_TRADE
+    hard_negative_mask = outcomes.isin({"SL", "TIMEOUT_WEAK_NEGATIVE"}) | reject_reasons.str.startswith(
+        ("outcome_sl", "timeout_weak_negative")
+    )
+    return (no_trade_mask & hard_negative_mask).astype(bool)
+
+
 def create_labels(df, future_window=5, threshold=0.002, tradable_only=None, include_no_trade=None):
     """
     创建训练标签,二分类版本: trade vs no_trade
@@ -789,8 +825,10 @@ def build_sample_weights(X, y, *, sample_context=None, recent_boost=None, min_we
     if len(y) == 0:
         return pd.Series(dtype=float, index=y.index, name="sample_weight"), {
             "enabled": True,
-            "method": "binary_target_regime_direction_with_recency",
+            "method": "binary_target_regime_direction_hard_negative_with_recency",
             "rows": 0,
+            "hard_negative_multiplier": float(_hard_negative_sample_weight_multiplier()),
+            "hard_negative_rows": 0,
         }
 
     recent_boost = max(
@@ -805,6 +843,7 @@ def build_sample_weights(X, y, *, sample_context=None, recent_boost=None, min_we
 
     trade_multiplier = max(0.0, float(config.MODEL_TRADE_SAMPLE_WEIGHT_MULTIPLIER))
     no_trade_multiplier = max(0.0, float(config.MODEL_NO_TRADE_SAMPLE_WEIGHT_MULTIPLIER))
+    hard_negative_multiplier = _hard_negative_sample_weight_multiplier()
 
     target_kinds = y.map(_target_direction)
     regimes = infer_sample_regimes(X, sample_context=sample_context)
@@ -837,6 +876,9 @@ def build_sample_weights(X, y, *, sample_context=None, recent_boost=None, min_we
     else:
         recency_weights = np.linspace(1.0, 1.0 + recent_boost, len(base_weights))
     weights = pd.Series(base_weights.to_numpy() * recency_weights, index=y.index, name="sample_weight")
+    hard_negative_mask = infer_hard_negative_mask(y, sample_context=sample_context)
+    if hard_negative_multiplier != 1.0 and hard_negative_mask.any():
+        weights.loc[hard_negative_mask] = weights.loc[hard_negative_mask] * hard_negative_multiplier
 
     if min_weight > 0 or max_weight is not None:
         weights = weights.clip(lower=min_weight, upper=max_weight)
@@ -845,6 +887,7 @@ def build_sample_weights(X, y, *, sample_context=None, recent_boost=None, min_we
         weights = weights / mean_weight
 
     weighted_groups = group_df.assign(sample_weight=weights, group=group_labels)
+    hard_negative_weights = weights.loc[hard_negative_mask]
     target_weight_mean = weighted_groups.groupby("target")["sample_weight"].mean()
     target_weight_total = weighted_groups.groupby("target")["sample_weight"].sum()
     group_weight_mean = weighted_groups.groupby("group")["sample_weight"].mean()
@@ -853,11 +896,15 @@ def build_sample_weights(X, y, *, sample_context=None, recent_boost=None, min_we
 
     summary = {
         "enabled": True,
-        "method": "binary_target_regime_direction_with_recency",
+        "method": "binary_target_regime_direction_hard_negative_with_recency",
         "rows": int(len(y)),
         "recent_boost": float(recent_boost),
         "trade_multiplier": float(trade_multiplier),
         "no_trade_multiplier": float(no_trade_multiplier),
+        "hard_negative_multiplier": float(hard_negative_multiplier),
+        "hard_negative_rows": int(hard_negative_mask.sum()),
+        "hard_negative_weight_mean": float(hard_negative_weights.mean()) if len(hard_negative_weights) else 0.0,
+        "hard_negative_weight_total": float(hard_negative_weights.sum()) if len(hard_negative_weights) else 0.0,
         "clip_min": float(min_weight),
         "clip_max": None if max_weight is None else float(max_weight),
         "mean": float(weights.mean()),
@@ -982,7 +1029,7 @@ def build_training_metadata(*, X, y, feature_cols, train_end, validation_start, 
         "label_mode": _label_mode(),
         "label_filter_summary": label_filter_summary or {},
         "label_quality_summary": label_quality_summary or {},
-        "training_balance_strategy": "sample_weight_binary_target_regime_direction_recency",
+        "training_balance_strategy": "sample_weight_binary_target_regime_direction_hard_negative_recency",
         "sample_weight_summary": sample_weight_summary or {},
         "evaluation_sample_weight_summary": evaluation_sample_weight_summary or {},
         "direction_quality_models": direction_quality_summary or {},

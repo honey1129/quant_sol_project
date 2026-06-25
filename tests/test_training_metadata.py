@@ -94,7 +94,7 @@ class TrainingMetadataTests(unittest.TestCase):
         self.assertIn("label_filter_summary", metadata)
         self.assertEqual(
             metadata["training_balance_strategy"],
-            "sample_weight_binary_target_regime_direction_recency",
+            "sample_weight_binary_target_regime_direction_hard_negative_recency",
         )
         self.assertEqual(metadata["sample_weight_summary"]["method"], "unit")
         self.assertEqual(metadata["evaluation_sample_weight_summary"], {})
@@ -177,6 +177,36 @@ class TrainingMetadataTests(unittest.TestCase):
         self.assertEqual(int(first["target"]), 1)
         self.assertEqual(first["label_outcome"], "TIMEOUT_WEAK_POSITIVE")
         self.assertEqual(first["label_reject_reason"], "accepted")
+
+    def test_realistic_quality_labels_reject_timeout_below_min_net_return(self):
+        index = pd.date_range("2026-01-01", periods=3, freq="5min", tz="UTC")
+        close = pd.Series([100.0, 100.5, 100.5], index=index)
+        df = pd.DataFrame({
+            "5m_close": close,
+            "5m_high": [100.0, 100.6, 100.6],
+            "5m_low": [100.0, 99.8, 100.0],
+            "5m_atr": 0.1,
+            "volatility_15": 0.0,
+            "money_flow_ratio": 1.0,
+            "15m_ema_20": close * 0.99,
+            "15m_ema_60": close * 0.98,
+        }, index=index)
+
+        with patch.dict(os.environ, {
+            "MODEL_LABEL_USE_REALISTIC": "1",
+            "MODEL_LABEL_LOOKAHEAD_BARS": "1",
+            "MODEL_LABEL_TAKE_PROFIT": "0.01",
+            "MODEL_LABEL_STOP_LOSS": "0.01",
+            "MODEL_LABEL_TIMEOUT_AS_TRADE": "1",
+            "MODEL_LABEL_TIMEOUT_MIN_NET_RETURN": "0.004",
+            "MODEL_LABEL_TIMEOUT_MAX_MAE_RATIO": "0.6",
+        }):
+            labeled = train_module.create_labels(df, future_window=1, threshold=0.01)
+
+        first = labeled.iloc[0]
+        self.assertEqual(int(first["target"]), 0)
+        self.assertEqual(first["label_outcome"], "TIMEOUT_WEAK_NEGATIVE")
+        self.assertEqual(first["label_reject_reason"], "timeout_weak_negative_net_return")
 
     def test_realistic_quality_labels_split_timeout_weak_negative(self):
         index = pd.date_range("2026-01-01", periods=3, freq="5min", tz="UTC")
@@ -313,7 +343,7 @@ class TrainingMetadataTests(unittest.TestCase):
         self.assertEqual(list(sample_weight.index), list(index))
         self.assertEqual(len(X_balanced), len(X))
         self.assertEqual(summary["rows"], len(y))
-        self.assertEqual(summary["method"], "binary_target_regime_direction_with_recency")
+        self.assertEqual(summary["method"], "binary_target_regime_direction_hard_negative_with_recency")
 
     def test_sample_weights_balance_targets_and_regime_direction_groups(self):
         index = pd.date_range("2026-01-01", periods=8, freq="5min", tz="UTC")
@@ -351,6 +381,49 @@ class TrainingMetadataTests(unittest.TestCase):
         self.assertAlmostEqual(target_totals["trade"], target_totals["no_trade"])
         self.assertAlmostEqual(group_totals["no_trade:trend_long:long"], group_totals["no_trade:trend_short:short"])
         self.assertAlmostEqual(group_totals["no_trade:trend_short:short"], group_totals["no_trade:range_high_vol:none"])
+
+    def test_sample_weights_boost_sl_and_timeout_weak_negative_rows(self):
+        index = pd.date_range("2026-01-01", periods=6, freq="5min", tz="UTC")
+        X = pd.DataFrame({
+            "trend_bias_num": [1.0] * 6,
+            "regime_trend_long": [1.0] * 6,
+            "regime_trend_short": [0.0] * 6,
+            "regime_range_high_vol": [0.0] * 6,
+        }, index=index)
+        y = pd.Series([1, 1, 0, 0, 0, 0], index=index)
+        sample_context = pd.DataFrame({
+            "label_regime": ["trend_long"] * 6,
+            "label_direction": ["long"] * 6,
+            "label_outcome": ["TP", "TIMEOUT_WEAK_POSITIVE", "SL", "TIMEOUT_WEAK_NEGATIVE", "NO_DIRECTION", "RULE_BLOCK"],
+            "label_reject_reason": [
+                "accepted",
+                "accepted",
+                "outcome_sl",
+                "timeout_weak_negative_net_return",
+                "neutral_trend",
+                "regime_block:range_high_vol",
+            ],
+        }, index=index)
+
+        with patch.dict(os.environ, {"MODEL_HARD_NEGATIVE_SAMPLE_WEIGHT_MULTIPLIER": "3.0"}):
+            with patch("train.train.config.MODEL_TRADE_SAMPLE_WEIGHT_MULTIPLIER", 1.0):
+                with patch("train.train.config.MODEL_NO_TRADE_SAMPLE_WEIGHT_MULTIPLIER", 1.0):
+                    sample_weight, summary = train_module.build_sample_weights(
+                        X,
+                        y,
+                        sample_context=sample_context,
+                        recent_boost=0.0,
+                        min_weight=0.0,
+                        max_weight=1000.0,
+                    )
+
+        hard_negative_mask = train_module.infer_hard_negative_mask(y, sample_context=sample_context)
+        ordinary_no_trade_mask = (y == 0) & ~hard_negative_mask
+
+        self.assertEqual(summary["hard_negative_multiplier"], 3.0)
+        self.assertEqual(summary["hard_negative_rows"], 2)
+        self.assertGreater(sample_weight.loc[hard_negative_mask].mean(), sample_weight.loc[ordinary_no_trade_mask].mean())
+        self.assertGreater(summary["hard_negative_weight_mean"], 0.0)
 
     def test_direction_quality_bundle_trains_long_and_short_submodels(self):
         index = pd.date_range("2026-01-01", periods=12, freq="5min", tz="UTC")
