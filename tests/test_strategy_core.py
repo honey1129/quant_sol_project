@@ -504,6 +504,25 @@ class StrategyCoreRebalanceTests(unittest.TestCase):
 
         self.assertEqual(out["action"], "HOLD")
         self.assertTrue(out["reason"].startswith("CostGate"))
+        self.assertAlmostEqual(out["required_trade_prob"], 0.9)
+        self.assertAlmostEqual(out["prob_edge_margin"], -0.25)
+        self.assertAlmostEqual(out["round_trip_cost"], 0.004)
+        self.assertAlmostEqual(out["cost_floor"], 0.008)
+
+    def test_required_probability_for_edge_includes_cost_buffer(self):
+        core = self.build_core(
+            target_ratio=0.3,
+            take_profit=0.03,
+            stop_loss=0.01,
+            fee_rate=0.0005,
+            slippage_bps=3.0,
+            cost_buffer_multiplier=2.0,
+            min_expected_net_edge=0.001,
+        )
+
+        required = core.required_probability_for_edge(0.03, 0.01)
+
+        self.assertAlmostEqual(required, (0.01 + 0.0032 + 0.001) / 0.04)
 
     def test_flat_cooldown_blocks_new_open_and_counts_down(self):
         core = self.build_core(target_ratio=0.5, trade_cooldown_bars=3)
