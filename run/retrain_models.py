@@ -591,9 +591,9 @@ def walk_forward_estimator_config():
     if not bool(getattr(config, "MODEL_WALK_FORWARD_LIGHTWEIGHT_TRAINING", True)):
         return None
     return {
-        "lgb_n_estimators": max(1, int(getattr(config, "MODEL_WALK_FORWARD_LGB_ESTIMATORS", 120))),
-        "xgb_n_estimators": max(1, int(getattr(config, "MODEL_WALK_FORWARD_XGB_ESTIMATORS", 120))),
-        "rf_n_estimators": max(1, int(getattr(config, "MODEL_WALK_FORWARD_RF_ESTIMATORS", 80))),
+        "lgb_n_estimators": max(1, int(getattr(config, "MODEL_WALK_FORWARD_LGB_ESTIMATORS", 40))),
+        "xgb_n_estimators": max(1, int(getattr(config, "MODEL_WALK_FORWARD_XGB_ESTIMATORS", 40))),
+        "rf_n_estimators": max(1, int(getattr(config, "MODEL_WALK_FORWARD_RF_ESTIMATORS", 30))),
     }
 
 

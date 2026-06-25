@@ -51,9 +51,12 @@ class TrainingMetadataTests(unittest.TestCase):
             "rf_n_estimators": 13,
         })
 
-        self.assertEqual(default_models["lgb_v1"].n_estimators, 500)
-        self.assertEqual(default_models["xgb_v1"].n_estimators, 500)
-        self.assertEqual(default_models["rf_v1"].n_estimators, 300)
+        self.assertEqual(default_models["lgb_v1"].n_estimators, 160)
+        self.assertEqual(default_models["xgb_v1"].n_estimators, 160)
+        self.assertEqual(default_models["rf_v1"].n_estimators, 100)
+        self.assertEqual(default_models["lgb_v1"].verbosity, -1)
+        self.assertEqual(default_models["xgb_v1"].verbosity, 0)
+        self.assertEqual(default_models["rf_v1"].n_jobs, -1)
         self.assertEqual(lightweight_models["lgb_v1"].n_estimators, 11)
         self.assertEqual(lightweight_models["xgb_v1"].n_estimators, 12)
         self.assertEqual(lightweight_models["rf_v1"].n_estimators, 13)
