@@ -465,6 +465,56 @@ class RetrainBacktestValidationTests(unittest.TestCase):
         self.assertEqual(diagnostics["ensemble"]["confusion_matrix"], [[0, 1], [0, 1]])
 
     @unittest.skipUnless(HAS_REAL_PANDAS, "requires pandas")
+    def test_walk_forward_fold_diagnostics_can_use_precomputed_probabilities(self):
+        pd = retrain_models.pd
+
+        class NoPredictModel:
+            classes_ = [0, 1]
+
+            def predict(self, X):
+                raise AssertionError("model diagnostics should be skipped")
+
+            def predict_proba(self, X):
+                raise AssertionError("precomputed probabilities should be used")
+
+        index = pd.date_range("2026-01-01", periods=3, freq="5min")
+        validation_df = pd.DataFrame({
+            "feature": [1.0, 1.0, 1.0],
+            "target": [1, 0, 1],
+            "5m_close": [102.0, 101.0, 100.0],
+            "15m_ema_20": [102.0, 101.0, 100.0],
+            "15m_ema_60": [100.0, 100.0, 100.0],
+        }, index=index)
+        probabilities = pd.DataFrame({
+            "long_prob": [0.80, 0.10, 0.20],
+            "short_prob": [0.05, 0.15, 0.75],
+        }, index=index)
+
+        diagnostics = retrain_models.build_walk_forward_fold_diagnostics(
+            {"fold": 1},
+            validation_df.copy(),
+            validation_df,
+            ["feature"],
+            {"fake": NoPredictModel()},
+            {"fake": 1.0},
+            {"target_schema": "binary_trade_quality"},
+            decision_threshold=0.50,
+            precomputed_probabilities=probabilities,
+            include_model_diagnostics=False,
+        )
+
+        self.assertEqual(diagnostics["ensemble"]["prediction_counts"], {"0": 1, "1": 2})
+        self.assertEqual(diagnostics["ensemble"]["confusion_matrix"], [[1, 0], [0, 2]])
+        self.assertEqual(diagnostics["models"], {})
+        signal_counts = diagnostics["ensemble"]["signal_direction_counts"]
+        self.assertEqual(signal_counts["long"], 1)
+        self.assertEqual(signal_counts["short"], 2)
+        self.assertEqual(signal_counts["flat"], 0)
+        self.assertAlmostEqual(signal_counts["long_pct"], 100 / 3)
+        self.assertAlmostEqual(signal_counts["short_pct"], 200 / 3)
+        self.assertAlmostEqual(signal_counts["flat_pct"], 0.0)
+
+    @unittest.skipUnless(HAS_REAL_PANDAS, "requires pandas")
     def test_walk_forward_fold_diagnostics_flags_probability_collapse(self):
         pd = retrain_models.pd
 
