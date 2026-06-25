@@ -58,6 +58,21 @@ class TrainingMetadataTests(unittest.TestCase):
         self.assertEqual(lightweight_models["xgb_v1"].n_estimators, 12)
         self.assertEqual(lightweight_models["rf_v1"].n_estimators, 13)
 
+    def test_validation_estimator_config_uses_lightweight_settings(self):
+        with patch.dict(os.environ, {
+            "MODEL_VALIDATION_LIGHTWEIGHT_TRAINING": "1",
+            "MODEL_VALIDATION_LGB_ESTIMATORS": "21",
+            "MODEL_VALIDATION_XGB_ESTIMATORS": "22",
+            "MODEL_VALIDATION_RF_ESTIMATORS": "23",
+        }):
+            estimator_config = train_module.validation_estimator_config()
+
+        self.assertEqual(estimator_config, {
+            "lgb_n_estimators": 21,
+            "xgb_n_estimators": 22,
+            "rf_n_estimators": 23,
+        })
+
     def test_build_training_metadata_includes_hashes_and_metrics(self):
         index = pd.date_range("2026-01-01", periods=20, freq="5min", tz="UTC")
         X = pd.DataFrame({"a": range(20), "b": range(20, 40)}, index=index)

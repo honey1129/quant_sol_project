@@ -342,6 +342,10 @@ MODEL_TRAIN_RATIO=0.70
 MODEL_VALIDATION_RATIO=0.15
 MODEL_PURGE_BARS=24
 MODEL_FINAL_TRAIN_ON_VALIDATION=1
+MODEL_VALIDATION_LIGHTWEIGHT_TRAINING=1
+MODEL_VALIDATION_LGB_ESTIMATORS=120
+MODEL_VALIDATION_XGB_ESTIMATORS=120
+MODEL_VALIDATION_RF_ESTIMATORS=80
 MODEL_WALK_FORWARD_ENABLED=1
 MODEL_WALK_FORWARD_FOLDS=3
 MODEL_WALK_FORWARD_MIN_FOLDS=2
@@ -516,6 +520,7 @@ POLL_SEC=10
 - `DYNAMIC_RISK_ENABLED=0`：新版示例先关闭动态风险缩放，避免和阈值校准同时改变；需要时再单独 A/B。
 - `MODEL_TRAIN_RATIO` / `MODEL_VALIDATION_RATIO` / `MODEL_PURGE_BARS`：训练区、验证区、最终 OOS 回测区按时间切开，中间留 purge gap；realistic 标签默认 lookahead 为 24 根，因此示例 purge 也设为 24。
 - `MODEL_FINAL_TRAIN_ON_VALIDATION=1`：验证指标仍来自严格时间切分；最终保存的模型用 OOS 之前的 train+validation 历史段重训，减少线上模型滞后。
+- `MODEL_VALIDATION_LIGHTWEIGHT_TRAINING=1` / `MODEL_VALIDATION_*_ESTIMATORS`：validation metrics 和 validation gate 只用于候选筛查，默认用轻量树数量快速发现概率坍缩；最终保存的候选模型仍使用正式训练参数。
 - `MODEL_WALK_FORWARD_ENABLED=1`：重训准入前会在验证区内做滚动 walk-forward 验证。
 - `MODEL_RETRAIN_VALIDATION_GATE_ENABLED=1` / `MODEL_RETRAIN_MIN_VALIDATION_TRADE_RECALL=0.01`：候选模型先用验证集 ensemble 概率做一次快速门禁；如果几乎不预测 trade，会在最终训练和 walk-forward 前直接失败回滚，避免一次坏候选空跑几十分钟。
 - `MODEL_RETRAIN_MIN_*` / `MODEL_RETRAIN_REGIME_GATE_*`：候选模型必须满足 OOS 交易数、胜率、PF、平均盈亏比、手续费后收益和 regime 偏置门槛；不达标会保留旧模型并回滚。
