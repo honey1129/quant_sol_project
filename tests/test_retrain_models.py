@@ -528,6 +528,23 @@ class RetrainBacktestValidationTests(unittest.TestCase):
             })
         )
 
+    def test_walk_forward_estimator_config_uses_lightweight_settings(self):
+        with patch("run.retrain_models.config.MODEL_WALK_FORWARD_LIGHTWEIGHT_TRAINING", True):
+            with patch("run.retrain_models.config.MODEL_WALK_FORWARD_LGB_ESTIMATORS", 31):
+                with patch("run.retrain_models.config.MODEL_WALK_FORWARD_XGB_ESTIMATORS", 32):
+                    with patch("run.retrain_models.config.MODEL_WALK_FORWARD_RF_ESTIMATORS", 33):
+                        estimator_config = retrain_models.walk_forward_estimator_config()
+
+        self.assertEqual(estimator_config, {
+            "lgb_n_estimators": 31,
+            "xgb_n_estimators": 32,
+            "rf_n_estimators": 33,
+        })
+
+    def test_walk_forward_estimator_config_can_be_disabled(self):
+        with patch("run.retrain_models.config.MODEL_WALK_FORWARD_LIGHTWEIGHT_TRAINING", False):
+            self.assertIsNone(retrain_models.walk_forward_estimator_config())
+
     def test_walk_forward_threshold_candidates_include_low_scale_and_current_config(self):
         with patch("run.retrain_models.config.MODEL_WALK_FORWARD_THRESHOLD_SWEEP_THRESHOLDS", "0.12,0.30"):
             with patch("run.retrain_models.config.MODEL_WALK_FORWARD_THRESHOLD_SWEEP_GAPS", "0.00"):
