@@ -89,6 +89,16 @@ class StubModel:
         return [self.probability]
 
 
+class BatchStubModel:
+    def __init__(self, probabilities, classes=None):
+        self.probabilities = probabilities
+        if classes is not None:
+            self.classes_ = classes
+
+    def predict_proba(self, X):
+        return self.probabilities[:len(X)]
+
+
 class WeightedPredictProbaTests(unittest.TestCase):
     def test_missing_weight_uses_default_and_extra_weight_is_ignored(self):
         models = {
@@ -156,6 +166,68 @@ class WeightedPredictProbaTests(unittest.TestCase):
         self.assertAlmostEqual(float(short_out[1]), 0.0)
         self.assertAlmostEqual(float(neutral_out[0]), 0.0)
         self.assertAlmostEqual(float(neutral_out[1]), 0.0)
+
+    def test_batch_binary_trade_quality_maps_each_row_trend_direction(self):
+        import pandas as pd
+
+        models = {
+            "lgb_v1": BatchStubModel(
+                [[0.80, 0.20], [0.30, 0.70], [0.10, 0.90]],
+                classes=[0, 1],
+            )
+        }
+
+        out = signal_engine.weighted_predict_proba_batch(
+            models,
+            pd.DataFrame({"feature": [1.0, 2.0, 3.0]}),
+            {"lgb_v1": 1.0},
+            trend_biases=["long", "short", "neutral"],
+            model_metadata={"target_schema": "binary_trade_quality"},
+        )
+
+        self.assertAlmostEqual(float(out[0][0]), 0.0)
+        self.assertAlmostEqual(float(out[0][1]), 0.20)
+        self.assertAlmostEqual(float(out[1][0]), 0.70)
+        self.assertAlmostEqual(float(out[1][1]), 0.0)
+        self.assertAlmostEqual(float(out[2][0]), 0.0)
+        self.assertAlmostEqual(float(out[2][1]), 0.0)
+
+    def test_batch_and_single_row_predictions_match(self):
+        import pandas as pd
+
+        models = {
+            "lgb_v1": BatchStubModel([[0.60, 0.40], [0.20, 0.80]], classes=[0, 1]),
+            "xgb_v1": BatchStubModel([[0.50, 0.50], [0.70, 0.30]], classes=[0, 1]),
+        }
+        X = pd.DataFrame({"feature": [1.0, 2.0]})
+        weights = {"lgb_v1": 0.75, "xgb_v1": 0.25}
+
+        batch = signal_engine.weighted_predict_proba_batch(
+            models,
+            X,
+            weights,
+            trend_biases=["long", "short"],
+            model_metadata={"target_schema": "binary_trade_quality"},
+        )
+        first = signal_engine.weighted_predict_proba(
+            {"lgb_v1": BatchStubModel([[0.60, 0.40]], classes=[0, 1]), "xgb_v1": BatchStubModel([[0.50, 0.50]], classes=[0, 1])},
+            X.iloc[:1],
+            weights,
+            trend_bias="long",
+            model_metadata={"target_schema": "binary_trade_quality"},
+        )
+        second = signal_engine.weighted_predict_proba(
+            {"lgb_v1": BatchStubModel([[0.20, 0.80]], classes=[0, 1]), "xgb_v1": BatchStubModel([[0.70, 0.30]], classes=[0, 1])},
+            X.iloc[1:2],
+            weights,
+            trend_bias="short",
+            model_metadata={"target_schema": "binary_trade_quality"},
+        )
+
+        self.assertAlmostEqual(float(batch[0][0]), float(first[0]))
+        self.assertAlmostEqual(float(batch[0][1]), float(first[1]))
+        self.assertAlmostEqual(float(batch[1][0]), float(second[0]))
+        self.assertAlmostEqual(float(batch[1][1]), float(second[1]))
 
     def test_direction_quality_model_uses_direction_specific_submodel(self):
         import pandas as pd

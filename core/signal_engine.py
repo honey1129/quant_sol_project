@@ -52,6 +52,11 @@ def _class_probability(raw_prob, classes, label):
     return float(raw_prob[classes.index(label)]) if label in classes else 0.0
 
 
+def _class_probabilities(raw_prob, classes, label):
+    raw_prob = np.asarray(raw_prob, dtype=float)
+    return raw_prob[:, classes.index(label)] if label in classes else np.zeros(raw_prob.shape[0], dtype=float)
+
+
 def _binary_trade_quality_to_directional(trade_prob, no_trade_prob, trend_bias):
     """Map trade/no-trade quality into directional strategy probabilities.
 
@@ -68,6 +73,75 @@ def _binary_trade_quality_to_directional(trade_prob, no_trade_prob, trend_bias):
     if trend_bias == "short":
         return np.asarray([trade_prob, 0.0], dtype=float)
     return np.asarray([0.0, 0.0], dtype=float)
+
+
+def _binary_trade_quality_to_directional_batch(trade_prob, no_trade_prob, trend_biases):
+    trade_prob = np.clip(np.asarray(trade_prob, dtype=float).reshape(-1), 0.0, 1.0)
+    trend_values = [str(value or "").lower() for value in (trend_biases or [])]
+    if len(trend_values) != len(trade_prob):
+        trend_values = ["neutral"] * len(trade_prob)
+
+    prob = np.zeros((len(trade_prob), 2), dtype=float)
+    for index, trend_bias in enumerate(trend_values):
+        if trend_bias == "long":
+            prob[index, 1] = trade_prob[index]
+        elif trend_bias == "short":
+            prob[index, 0] = trade_prob[index]
+    return prob
+
+
+def weighted_predict_proba_batch(models, X, model_weights=None, *, trend_biases=None, model_metadata=None):
+    """Return an Nx2 array of weighted [short_prob, long_prob] probabilities."""
+    if not models:
+        raise ValueError("模型列表为空，无法生成预测概率")
+
+    model_weights = model_weights or {}
+    weighted_sum = None
+    used_weight_total = 0.0
+    row_count = len(X)
+
+    for name, model in models.items():
+        try:
+            weight = float(model_weights.get(name, 1.0))
+        except (TypeError, ValueError):
+            raise ValueError(f"模型 {name} 的权重不是有效数字: {model_weights.get(name)!r}")
+        if not math.isfinite(weight) or weight < 0:
+            raise ValueError(f"模型 {name} 的权重必须是非负有限数: {weight!r}")
+        if weight == 0:
+            continue
+
+        raw_prob = np.asarray(model.predict_proba(X), dtype=float)
+        if raw_prob.ndim != 2 or raw_prob.shape[1] < 2:
+            raise ValueError(f"模型 {name} 返回的概率维度不足: {raw_prob!r}")
+        if raw_prob.shape[0] != row_count:
+            raise ValueError(
+                f"模型 {name} 返回的概率行数不一致: rows={raw_prob.shape[0]} expected={row_count}"
+            )
+        if not np.all(np.isfinite(raw_prob)):
+            raise ValueError(f"模型 {name} 返回了非有限概率: {raw_prob!r}")
+
+        classes = list(getattr(model, "classes_", range(raw_prob.shape[1])))
+        if (_is_binary_trade_quality_model(model_metadata) or _model_is_direction_quality(model)) and 2 not in classes:
+            prob = _binary_trade_quality_to_directional_batch(
+                trade_prob=_class_probabilities(raw_prob, classes, 1),
+                no_trade_prob=_class_probabilities(raw_prob, classes, 0),
+                trend_biases=trend_biases,
+            )
+        else:
+            prob = np.column_stack([
+                _class_probabilities(raw_prob, classes, 0),
+                _class_probabilities(raw_prob, classes, 1),
+            ]).astype(float)
+
+        if weighted_sum is None:
+            weighted_sum = np.zeros_like(prob, dtype=float)
+        weighted_sum += prob * weight
+        used_weight_total += weight
+
+    if weighted_sum is None or used_weight_total <= 0:
+        raise ValueError("实际参与预测的模型权重总和必须大于 0")
+
+    return weighted_sum / used_weight_total
 
 
 def weighted_predict_proba(models, X, model_weights=None, *, trend_bias=None, model_metadata=None):
