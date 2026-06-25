@@ -594,6 +594,75 @@ class RetrainBacktestValidationTests(unittest.TestCase):
         self.assertEqual(sweep["candidate_count"], 6)
         self.assertEqual(sweep["best"]["name"], "c1")
 
+    def test_walk_forward_threshold_sweep_keeps_current_candidate_for_comparison(self):
+        candidates = [
+            {"name": "current", "overrides": {"id": 0}},
+            {"name": "better", "overrides": {"id": 1}},
+        ]
+
+        def fake_backtest(_kwargs, overrides):
+            if overrides["id"] == 0:
+                return {
+                    "closed_trade_count": 0,
+                    "net_pnl_after_costs": 0.0,
+                    "profit_factor": 0.0,
+                    "max_drawdown_pct": 0.0,
+                    "decision_reason_top": [["SmallTarget", 10]],
+                    "decision_action_counts": {"HOLD": 10},
+                }
+            return {
+                "closed_trade_count": 2,
+                "net_pnl_after_costs": 1.5,
+                "profit_factor": 1.4,
+                "max_drawdown_pct": -0.1,
+                "decision_reason_top": [["OpenFromFlat", 2]],
+                "decision_action_counts": {"OPEN": 2, "CLOSE": 2},
+            }
+
+        with patch("run.retrain_models.run_backtest_with_overrides", side_effect=fake_backtest):
+            sweep = retrain_models.run_walk_forward_threshold_sweep({}, candidates)
+
+        self.assertEqual(sweep["current"]["name"], "current")
+        self.assertEqual(sweep["current"]["closed_trade_count"], 0)
+        self.assertEqual(sweep["best"]["name"], "better")
+
+    def test_threshold_sweep_candidate_comparison_summarizes_gate_difference(self):
+        current = {
+            "name": "current",
+            "closed_trade_count": 0,
+            "net_pnl_after_costs": 0.0,
+            "profit_factor": 0.0,
+            "decision_reason_top": [["SmallTarget", 517]],
+            "decision_action_counts": {"HOLD": 739},
+            "overrides": {
+                "THRESHOLD_LONG": 0.56,
+                "THRESHOLD_SHORT": 0.56,
+                "MIN_SIGNAL_TARGET_RATIO": 0.10,
+            },
+        }
+        best = {
+            "name": "low_gate",
+            "closed_trade_count": 3,
+            "net_pnl_after_costs": 0.61,
+            "profit_factor": 1.74,
+            "decision_reason_top": [["OpenFromFlat", 3]],
+            "decision_action_counts": {"OPEN": 3, "CLOSE": 2, "HOLD": 733},
+            "overrides": {
+                "THRESHOLD_LONG": 0.12,
+                "THRESHOLD_SHORT": 0.12,
+                "MIN_SIGNAL_TARGET_RATIO": 0.04,
+            },
+        }
+
+        current_summary = retrain_models.summarize_threshold_sweep_candidate(current)
+        best_summary = retrain_models.summarize_threshold_sweep_candidate(best)
+        diff = retrain_models.threshold_sweep_override_diff(current, best)
+
+        self.assertEqual(current_summary["top_reason"], "SmallTarget:517")
+        self.assertEqual(best_summary["closed"], 3)
+        self.assertEqual(diff["THRESHOLD_LONG"], [0.56, 0.12])
+        self.assertEqual(diff["MIN_SIGNAL_TARGET_RATIO"], [0.10, 0.04])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1070,6 +1070,60 @@ def compact_walk_forward_candidate_summary(summary):
     return {key: summary.get(key) for key in keys if key in summary}
 
 
+def summarize_threshold_sweep_candidate(summary):
+    if not summary:
+        return {
+            "name": None,
+            "closed": 0,
+            "net": 0.0,
+            "pf": 0.0,
+            "top_reason": "-",
+            "actions": {},
+        }
+
+    reason_top = summary.get("decision_reason_top") or []
+    top_reason = "-"
+    if reason_top:
+        first = reason_top[0]
+        if isinstance(first, (list, tuple)) and len(first) >= 2:
+            top_reason = f"{first[0]}:{first[1]}"
+        else:
+            top_reason = str(first)
+
+    return {
+        "name": summary.get("name"),
+        "closed": int(summary.get("closed_trade_count") or 0),
+        "net": float(summary.get("net_pnl_after_costs") or 0.0),
+        "pf": float(summary.get("profit_factor") or 0.0),
+        "top_reason": top_reason,
+        "actions": summary.get("decision_action_counts") or {},
+    }
+
+
+def threshold_sweep_override_diff(current, best):
+    current_overrides = (current or {}).get("overrides") or {}
+    best_overrides = (best or {}).get("overrides") or {}
+    keys = [
+        "THRESHOLD_LONG",
+        "THRESHOLD_SHORT",
+        "SIGNAL_MIN_PROB_DIFF",
+        "MIN_SIGNAL_TARGET_RATIO",
+        "REGIME_RANGE_MIN_SIGNAL_TARGET_RATIO",
+        "REGIME_HIGH_VOL_MIN_SIGNAL_TARGET_RATIO",
+        "POSITION_PROBABILITY_CENTER",
+        "BACKTEST_MIN_ADJUST_AMOUNT",
+    ]
+    diff = {}
+    for key in keys:
+        if key not in current_overrides and key not in best_overrides:
+            continue
+        current_value = current_overrides.get(key)
+        best_value = best_overrides.get(key)
+        if current_value != best_value:
+            diff[key] = [current_value, best_value]
+    return diff
+
+
 def threshold_sweep_score(summary):
     closed = int(summary.get("closed_trade_count") or 0)
     net = float(summary.get("net_pnl_after_costs") or 0.0)
@@ -1119,6 +1173,7 @@ def run_walk_forward_threshold_sweep(backtester_kwargs, candidates):
     results = []
     best = None
     best_score = None
+    current = None
     no_improvement_count = 0
     stopped_early = False
     early_stop_reason = None
@@ -1130,6 +1185,8 @@ def run_walk_forward_threshold_sweep(backtester_kwargs, candidates):
         summary["name"] = candidate["name"]
         summary["overrides"] = candidate["overrides"]
         results.append(summary)
+        if candidate.get("name") == "current":
+            current = summary
 
         score = threshold_sweep_score(summary)
         if best_score is None or score > best_score:
@@ -1168,6 +1225,7 @@ def run_walk_forward_threshold_sweep(backtester_kwargs, candidates):
             "min_profit_factor": float(_threshold_sweep_early_stop_min_profit_factor()),
         },
         "top_n": int(top_n),
+        "current": current,
         "best": best,
         "recommended": ranked[:top_n],
     }
@@ -1177,6 +1235,10 @@ def write_walk_forward_threshold_sweep(log_file, fold_number, sweep_summary):
     if not sweep_summary or not sweep_summary.get("enabled"):
         return
     best = sweep_summary.get("best") or {}
+    current = sweep_summary.get("current") or {}
+    current_summary = summarize_threshold_sweep_candidate(current)
+    best_summary = summarize_threshold_sweep_candidate(best)
+    override_diff = threshold_sweep_override_diff(current, best)
     with open(log_file, "a", encoding="utf-8") as file:
         file.write(
             "walk_forward_threshold_sweep "
@@ -1189,6 +1251,22 @@ def write_walk_forward_threshold_sweep(log_file, fold_number, sweep_summary):
             f"net={float(best.get('net_pnl_after_costs') or 0.0):.2f} "
             f"pf={float(best.get('profit_factor') or 0.0):.4f} "
             f"overrides={best.get('overrides', {})}\n"
+        )
+        file.write(
+            "walk_forward_threshold_sweep_compare "
+            f"fold={fold_number} "
+            f"current_closed={current_summary['closed']} "
+            f"current_net={current_summary['net']:.2f} "
+            f"current_pf={current_summary['pf']:.4f} "
+            f"current_top_reason={current_summary['top_reason']} "
+            f"current_actions={current_summary['actions']} "
+            f"best={best_summary['name']} "
+            f"best_closed={best_summary['closed']} "
+            f"best_net={best_summary['net']:.2f} "
+            f"best_pf={best_summary['pf']:.4f} "
+            f"best_top_reason={best_summary['top_reason']} "
+            f"best_actions={best_summary['actions']} "
+            f"override_diff={override_diff}\n"
         )
         file.write(
             "walk_forward_threshold_sweep_json "
