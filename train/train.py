@@ -1222,6 +1222,29 @@ def build_model_estimators(estimator_config=None):
     }
 
 
+def validation_estimator_config():
+    enabled = _env_bool(
+        "MODEL_VALIDATION_LIGHTWEIGHT_TRAINING",
+        getattr(config, "MODEL_VALIDATION_LIGHTWEIGHT_TRAINING", True),
+    )
+    if not enabled:
+        return None
+    return {
+        "lgb_n_estimators": int(os.getenv(
+            "MODEL_VALIDATION_LGB_ESTIMATORS",
+            str(getattr(config, "MODEL_VALIDATION_LGB_ESTIMATORS", 120)),
+        )),
+        "xgb_n_estimators": int(os.getenv(
+            "MODEL_VALIDATION_XGB_ESTIMATORS",
+            str(getattr(config, "MODEL_VALIDATION_XGB_ESTIMATORS", 120)),
+        )),
+        "rf_n_estimators": int(os.getenv(
+            "MODEL_VALIDATION_RF_ESTIMATORS",
+            str(getattr(config, "MODEL_VALIDATION_RF_ESTIMATORS", 80)),
+        )),
+    }
+
+
 def train_model_bundle(X_train, y_train, sample_context=None, estimator_config=None):
     X_balanced, y_balanced, sample_weight, sample_weight_summary = balance_samples(
         X_train,
@@ -1644,10 +1667,14 @@ def train():
 
     # 只在训练集内部计算评估模型的样本权重，避免把未来样本混回验证过程。
     eval_sample_context = merged_df.iloc[:train_end].copy()
+    eval_estimator_config = validation_estimator_config()
+    if eval_estimator_config:
+        log_info(f"验证/门禁评估使用轻量模型参数: {eval_estimator_config}")
     eval_models, X_eval_train, _, evaluation_sample_weight_summary, evaluation_direction_quality_summary = train_direction_quality_bundle(
         X_train,
         y_train,
         sample_context=eval_sample_context,
+        estimator_config=eval_estimator_config,
     )
     X_test = pd.DataFrame(X_test, columns=feature_cols)
 
@@ -1716,6 +1743,7 @@ def train():
         sample_weight_summary=sample_weight_summary,
         evaluation_sample_weight_summary={
             **(evaluation_sample_weight_summary or {}),
+            "estimator_config": eval_estimator_config or {},
             "direction_quality_models": evaluation_direction_quality_summary,
         },
         direction_quality_summary=direction_quality_summary,
