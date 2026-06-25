@@ -181,14 +181,26 @@ class StrategyCore:
         slippage_ratio = self.slippage_bps / 10000.0
         return 2.0 * (self.fee_rate + slippage_ratio)
 
+    def cost_floor_ratio(self):
+        return self.estimated_round_trip_cost_ratio() * self.cost_buffer_multiplier
+
+    def required_probability_for_edge(self, take_profit, stop_loss, *, min_expected_net_edge=None):
+        take_profit = max(0.0, float(take_profit))
+        stop_loss = max(0.0, float(stop_loss))
+        min_edge = self.min_expected_net_edge if min_expected_net_edge is None else float(min_expected_net_edge)
+        denominator = take_profit + stop_loss
+        if denominator <= 0:
+            return 1.0
+        required = (stop_loss + self.cost_floor_ratio() + min_edge) / denominator
+        return float(np.clip(required, 0.0, 1.0))
+
     def _expected_net_edge_ratio(self, dominant_prob, take_profit, stop_loss):
         dominant_prob = float(np.clip(float(dominant_prob), 0.0, 1.0))
         gross_edge = (
             dominant_prob * float(take_profit) -
             (1.0 - dominant_prob) * float(stop_loss)
         )
-        cost_floor = self.estimated_round_trip_cost_ratio() * self.cost_buffer_multiplier
-        return gross_edge - cost_floor
+        return gross_edge - self.cost_floor_ratio()
 
     def _next_hold_cooldown(self):
         return max(0, int(self.cooldown_bars_remaining) - 1)
@@ -601,12 +613,17 @@ class StrategyCore:
         target_position = target_ratio * equity / price
 
         def attach_signal_diagnostics(decision):
+            required_prob = self.required_probability_for_edge(take_profit, stop_loss)
             decision["raw_target_ratio"] = float(raw_target_ratio)
             decision["expected_net_edge"] = None if expected_net_edge is None else float(expected_net_edge)
             decision["take_profit"] = float(take_profit)
             decision["stop_loss"] = float(stop_loss)
             decision["signal_prob_gap"] = float(signal_prob_gap)
             decision["dominant_prob"] = float(dominant_prob)
+            decision["required_trade_prob"] = float(required_prob)
+            decision["prob_edge_margin"] = float(dominant_prob - required_prob)
+            decision["round_trip_cost"] = float(self.estimated_round_trip_cost_ratio())
+            decision["cost_floor"] = float(self.cost_floor_ratio())
             return decision
         target_direction = None
         if target_ratio > 0:

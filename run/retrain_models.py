@@ -389,6 +389,23 @@ def aggregate_regime_signal_summaries(summaries):
     return aggregate
 
 
+def aggregate_edge_gate_summaries(summaries):
+    counts = {}
+    for summary in summaries:
+        edge_summary = summary.get("decision_edge_gate_summary") or {}
+        for key, count in (edge_summary.get("counts") or {}).items():
+            counts[str(key)] = counts.get(str(key), 0) + int(count)
+
+    total = sum(counts.values())
+    passed = int(counts.get("pass", 0))
+    failed = int(counts.get("fail", 0))
+    return {
+        "counts": counts,
+        "pass_pct": float(passed / total * 100.0) if total else 0.0,
+        "fail_pct": float(failed / total * 100.0) if total else 0.0,
+    }
+
+
 def _json_safe(value):
     if isinstance(value, dict):
         return {str(k): _json_safe(v) for k, v in value.items()}
@@ -1118,6 +1135,7 @@ def compact_walk_forward_candidate_summary(summary):
         "decision_direction_counts",
         "decision_regime_counts",
         "decision_probability_quantiles",
+        "decision_edge_gate_summary",
         "decision_gate_config",
     ]
     return {key: summary.get(key) for key in keys if key in summary}
@@ -1150,6 +1168,7 @@ def summarize_threshold_sweep_candidate(summary):
         "pf": float(summary.get("profit_factor") or 0.0),
         "top_reason": top_reason,
         "actions": summary.get("decision_action_counts") or {},
+        "edge_gate": summary.get("decision_edge_gate_summary") or {},
     }
 
 
@@ -1422,6 +1441,7 @@ def aggregate_backtest_summaries(summaries):
         "slippage_cost": float(slippage_cost),
         "funding_pnl": float(funding_pnl),
         "decision_regime_signal_summary": aggregate_regime_signal_summaries(summaries),
+        "decision_edge_gate_summary": aggregate_edge_gate_summaries(summaries),
         "folds": summaries,
     }
 

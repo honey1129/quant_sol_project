@@ -175,6 +175,15 @@ class Backtester:
         self.decision_target_ratios = []
         self.decision_raw_target_ratios = []
         self.decision_edge_values = []
+        self.decision_required_trade_probs = []
+        self.decision_prob_edge_margins = []
+        self.decision_round_trip_costs = []
+        self.decision_cost_floors = []
+        self.decision_take_profits = []
+        self.decision_stop_losses = []
+        self.decision_edge_gate_counts = Counter()
+        self.decision_regime_edge_margins = {}
+        self.decision_direction_edge_margins = {}
         self.decision_examples = []
 
         # 初始化 position_manager
@@ -426,8 +435,37 @@ class Backtester:
         self.decision_prob_gaps.append(prob_gap)
         self.decision_target_ratios.append(abs(float(out.get("target_ratio") or 0.0)))
         self.decision_raw_target_ratios.append(abs(float(out.get("raw_target_ratio") or 0.0)))
-        expected_edge = self.core._expected_net_edge_ratio(dominant_prob, take_profit, stop_loss)
+        expected_edge = out.get("expected_net_edge")
+        if expected_edge is None:
+            expected_edge = self.core._expected_net_edge_ratio(dominant_prob, take_profit, stop_loss)
+        expected_edge = float(expected_edge)
+        required_prob = out.get("required_trade_prob")
+        if required_prob is None:
+            required_prob = self.core.required_probability_for_edge(take_profit, stop_loss)
+        required_prob = float(required_prob)
+        prob_edge_margin = out.get("prob_edge_margin")
+        if prob_edge_margin is None:
+            prob_edge_margin = dominant_prob - required_prob
+        prob_edge_margin = float(prob_edge_margin)
+        round_trip_cost = out.get("round_trip_cost")
+        if round_trip_cost is None:
+            round_trip_cost = self.core.estimated_round_trip_cost_ratio()
+        cost_floor = out.get("cost_floor")
+        if cost_floor is None:
+            cost_floor = self.core.cost_floor_ratio()
+        weak_signal = str(reason).startswith("WeakSignal") or str(reason) in {"FlatNoSignal", "Neutral"}
+        edge_gate_passed = expected_edge > self.core.min_expected_net_edge
         self.decision_edge_values.append(expected_edge)
+        self.decision_required_trade_probs.append(required_prob)
+        self.decision_prob_edge_margins.append(prob_edge_margin)
+        self.decision_round_trip_costs.append(float(round_trip_cost))
+        self.decision_cost_floors.append(float(cost_floor))
+        self.decision_take_profits.append(float(take_profit))
+        self.decision_stop_losses.append(float(stop_loss))
+        if not weak_signal:
+            self.decision_edge_gate_counts["pass" if edge_gate_passed else "fail"] += 1
+        self.decision_regime_edge_margins.setdefault(market_regime, []).append(prob_edge_margin)
+        self.decision_direction_edge_margins.setdefault(direction, []).append(prob_edge_margin)
 
         if len(self.decision_examples) < 12 and out.get("action") == "HOLD":
             self.decision_examples.append({
@@ -443,6 +481,8 @@ class Backtester:
                 "target_ratio": round(float(out.get("target_ratio") or 0.0), 4),
                 "raw_target_ratio": round(float(out.get("raw_target_ratio") or 0.0), 4),
                 "expected_edge": round(float(expected_edge), 6),
+                "required_trade_prob": round(required_prob, 4),
+                "prob_edge_margin": round(prob_edge_margin, 4),
             })
 
     def _top_counts_by_primary(self, counter, limit=8):
@@ -452,6 +492,25 @@ class Backtester:
         return {
             primary: counts.most_common(limit)
             for primary, counts in sorted(grouped.items())
+        }
+
+    def _quantiles_by_key(self, values_by_key):
+        return {
+            str(key): _quantiles(values)
+            for key, values in sorted(values_by_key.items())
+            if values
+        }
+
+    def _decision_edge_gate_summary(self):
+        total = sum(self.decision_edge_gate_counts.values())
+        passed = int(self.decision_edge_gate_counts.get("pass", 0))
+        failed = int(self.decision_edge_gate_counts.get("fail", 0))
+        return {
+            "counts": dict(self.decision_edge_gate_counts),
+            "pass_pct": float(passed / total * 100.0) if total else 0.0,
+            "fail_pct": float(failed / total * 100.0) if total else 0.0,
+            "prob_edge_margin_by_regime": self._quantiles_by_key(self.decision_regime_edge_margins),
+            "prob_edge_margin_by_direction": self._quantiles_by_key(self.decision_direction_edge_margins),
         }
 
     def _log_decision_diagnostics(self):
@@ -469,6 +528,9 @@ class Backtester:
         log_info(f"目标仓位比例分位: {_quantiles(self.decision_target_ratios)}")
         log_info(f"原始目标仓位比例分位: {_quantiles(self.decision_raw_target_ratios)}")
         log_info(f"预期净边际分位: {_quantiles(self.decision_edge_values)}")
+        log_info(f"交易所需概率分位: {_quantiles(self.decision_required_trade_probs)}")
+        log_info(f"概率-edge余量分位: {_quantiles(self.decision_prob_edge_margins)}")
+        log_info(f"成本门槛通过率: {self._decision_edge_gate_summary()}")
         log_info(f"Regime原因TOP: {self._top_counts_by_primary(self.decision_regime_reason_counts, limit=5)}")
         log_info(f"方向原因TOP: {self._top_counts_by_primary(self.decision_direction_reason_counts, limit=5)}")
         if self.decision_examples:
@@ -857,7 +919,14 @@ class Backtester:
                 "target_ratio": _quantiles(self.decision_target_ratios),
                 "raw_target_ratio": _quantiles(self.decision_raw_target_ratios),
                 "expected_net_edge": _quantiles(self.decision_edge_values),
+                "required_trade_prob": _quantiles(self.decision_required_trade_probs),
+                "prob_edge_margin": _quantiles(self.decision_prob_edge_margins),
+                "take_profit": _quantiles(self.decision_take_profits),
+                "stop_loss": _quantiles(self.decision_stop_losses),
+                "round_trip_cost": _quantiles(self.decision_round_trip_costs),
+                "cost_floor": _quantiles(self.decision_cost_floors),
             },
+            "decision_edge_gate_summary": self._decision_edge_gate_summary(),
             "decision_gate_config": {
                 "threshold_long": float(self.core.threshold_long),
                 "threshold_short": float(self.core.threshold_short),
@@ -866,6 +935,11 @@ class Backtester:
                 "min_adjust_amount": float(self.core.min_adjust_amount),
                 "live_min_adjust_amount": float(config.MIN_ADJUST_AMOUNT),
                 "min_expected_net_edge": float(self.core.min_expected_net_edge),
+                "fee_rate": float(self.core.fee_rate),
+                "slippage_bps": float(self.core.slippage_bps),
+                "round_trip_cost": float(self.core.estimated_round_trip_cost_ratio()),
+                "cost_buffer_multiplier": float(self.core.cost_buffer_multiplier),
+                "cost_floor": float(self.core.cost_floor_ratio()),
                 "position_probability_center": float(self.position_manager.probability_center),
                 "force_close_on_end": bool(self.force_close_on_end),
             },

@@ -376,6 +376,37 @@ class RetrainBacktestValidationTests(unittest.TestCase):
         self.assertEqual(regime["dominant_long_count"], 85)
         self.assertAlmostEqual(regime["dominant_long_pct"], 85.0)
 
+    def test_walk_forward_aggregation_combines_edge_gate_summaries(self):
+        summary = retrain_models.aggregate_backtest_summaries([
+            build_summary(
+                max_drawdown_pct=-1.0,
+                trade_count=1,
+                closed_trade_count=1,
+                winning_trade_count=1,
+                losing_trade_count=0,
+                gross_profit=10.0,
+                gross_loss=0.0,
+                net_pnl_after_costs=10.0,
+                decision_edge_gate_summary={"counts": {"pass": 3, "fail": 7}},
+            ),
+            build_summary(
+                max_drawdown_pct=-2.0,
+                trade_count=1,
+                closed_trade_count=1,
+                winning_trade_count=0,
+                losing_trade_count=1,
+                gross_profit=0.0,
+                gross_loss=5.0,
+                net_pnl_after_costs=-5.0,
+                decision_edge_gate_summary={"counts": {"pass": 2, "fail": 8}},
+            ),
+        ])
+
+        edge = summary["decision_edge_gate_summary"]
+        self.assertEqual(edge["counts"], {"pass": 5, "fail": 15})
+        self.assertAlmostEqual(edge["pass_pct"], 25.0)
+        self.assertAlmostEqual(edge["fail_pct"], 75.0)
+
     @unittest.skipUnless(HAS_REAL_PANDAS, "requires pandas")
     def test_walk_forward_fold_diagnostics_include_label_and_prediction_quality(self):
         pd = retrain_models.pd
@@ -701,6 +732,7 @@ class RetrainBacktestValidationTests(unittest.TestCase):
             "profit_factor": 0.0,
             "decision_reason_top": [["SmallTarget", 517]],
             "decision_action_counts": {"HOLD": 739},
+            "decision_edge_gate_summary": {"counts": {"pass": 0, "fail": 12}, "pass_pct": 0.0},
             "overrides": {
                 "THRESHOLD_LONG": 0.56,
                 "THRESHOLD_SHORT": 0.56,
@@ -714,6 +746,7 @@ class RetrainBacktestValidationTests(unittest.TestCase):
             "profit_factor": 1.74,
             "decision_reason_top": [["OpenFromFlat", 3]],
             "decision_action_counts": {"OPEN": 3, "CLOSE": 2, "HOLD": 733},
+            "decision_edge_gate_summary": {"counts": {"pass": 9, "fail": 1}, "pass_pct": 90.0},
             "overrides": {
                 "THRESHOLD_LONG": 0.12,
                 "THRESHOLD_SHORT": 0.12,
@@ -726,7 +759,9 @@ class RetrainBacktestValidationTests(unittest.TestCase):
         diff = retrain_models.threshold_sweep_override_diff(current, best)
 
         self.assertEqual(current_summary["top_reason"], "SmallTarget:517")
+        self.assertEqual(current_summary["edge_gate"]["counts"]["fail"], 12)
         self.assertEqual(best_summary["closed"], 3)
+        self.assertEqual(best_summary["edge_gate"]["pass_pct"], 90.0)
         self.assertEqual(diff["THRESHOLD_LONG"], [0.56, 0.12])
         self.assertEqual(diff["MIN_SIGNAL_TARGET_RATIO"], [0.10, 0.04])
 

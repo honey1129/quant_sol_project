@@ -506,6 +506,7 @@ POLL_SEC=10
 - `MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION=1` / `MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION_MIN_ROWS=50`：在方向校准之上按 `label_regime` 继续校准，优先修正 `short:trend_short` 这类局部高置信误报；样本不足时自动回退到方向校准。
 - `MODEL_WALK_FORWARD_DIAGNOSTIC_THRESHOLD=0.35`：walk-forward 诊断里的 trade/no-trade precision/recall 使用校准后概率尺度，不再固定按 0.5 判断。
 - `MODEL_WALK_FORWARD_FAIL_FAST=1`：每折真实回测写完诊断和 threshold sweep 后，如果当前折已经违反硬性准入，立即停止后续折，避免一次失败重训继续空跑几十分钟。
+- walk-forward/回测 summary 会额外输出 `required_trade_prob`、`prob_edge_margin`、`round_trip_cost`、`cost_floor` 和 `decision_edge_gate_summary`，用来判断模型概率是否真的覆盖 TP/SL、手续费与滑点成本，而不是只看阈值有没有通过。
 - `MODEL_WALK_FORWARD_LIGHTWEIGHT_TRAINING=1` / `MODEL_WALK_FORWARD_*_ESTIMATORS`：只降低 walk-forward 每折临时模型的树数量，加快验证诊断；最终保存的候选模型仍使用正式训练参数。`MODEL_WALK_FORWARD_MODEL_DIAGNOSTICS=0` 默认跳过折内单模型报告，只保留 ensemble 交易质量诊断。日志会输出 `walk_forward_stage_timing` 和拆分后的 `walk_forward_fold_timing`，方便定位慢在训练、概率预计算、真实回测还是 sweep。
 - `MODEL_WALK_FORWARD_THRESHOLD_SWEEP_*`：重训验证时额外扫描一组低概率门槛、概率差、最小目标仓位和 sizing center，输出每折推荐候选；默认最多评估 48 个确定性抽样候选，并在找到稳定正收益候选后早停。它只用于诊断和推荐，不会自动改线上 `.env` 或绕过当前准入门槛。
 - `MODEL_USE_RUBIK_FEATURES=0`：Rubik OI/taker/多空比特征默认关闭。开启前应重新训练并用 OOS 回测确认收益质量。
