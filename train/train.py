@@ -1007,10 +1007,14 @@ def build_training_metadata(*, X, y, feature_cols, train_end, validation_start, 
     }
 
 
-def build_model_estimators():
+def build_model_estimators(estimator_config=None):
+    estimator_config = dict(estimator_config or {})
+    lgb_estimators = int(estimator_config.get("lgb_n_estimators", 500))
+    xgb_estimators = int(estimator_config.get("xgb_n_estimators", 500))
+    rf_estimators = int(estimator_config.get("rf_n_estimators", 300))
     return {
         "lgb_v1": lgb.LGBMClassifier(
-            n_estimators=500,
+            n_estimators=lgb_estimators,
             learning_rate=0.02,
             max_depth=6,
             subsample=0.8,
@@ -1023,7 +1027,7 @@ def build_model_estimators():
             random_state=42
         ),
         "xgb_v1": xgb.XGBClassifier(
-            n_estimators=500,
+            n_estimators=xgb_estimators,
             learning_rate=0.02,
             max_depth=6,
             subsample=0.8,
@@ -1032,11 +1036,11 @@ def build_model_estimators():
             reg_lambda=1.0,
             random_state=42
         ),
-        "rf_v1": RandomForestClassifier(n_estimators=300, max_depth=6, random_state=42),
+        "rf_v1": RandomForestClassifier(n_estimators=rf_estimators, max_depth=6, random_state=42),
     }
 
 
-def train_model_bundle(X_train, y_train, sample_context=None):
+def train_model_bundle(X_train, y_train, sample_context=None, estimator_config=None):
     X_balanced, y_balanced, sample_weight, sample_weight_summary = balance_samples(
         X_train,
         y_train,
@@ -1044,7 +1048,7 @@ def train_model_bundle(X_train, y_train, sample_context=None):
     )
     X_balanced = pd.DataFrame(X_balanced, columns=X_train.columns)
 
-    models = build_model_estimators()
+    models = build_model_estimators(estimator_config=estimator_config)
     for model in models.values():
         model.fit(X_balanced, y_balanced, sample_weight=sample_weight)
     return models, X_balanced, y_balanced, sample_weight_summary
@@ -1140,12 +1144,13 @@ def _split_direction_train_calibration(X_dir, y_dir, context_dir, *, min_rows, m
     )
 
 
-def train_direction_quality_bundle(X_train, y_train, sample_context=None):
+def train_direction_quality_bundle(X_train, y_train, sample_context=None, estimator_config=None):
     """Train global binary quality models plus long/short quality submodels."""
     global_models, X_balanced, y_balanced, sample_weight_summary = train_model_bundle(
         X_train,
         y_train,
         sample_context=sample_context,
+        estimator_config=estimator_config,
     )
 
     direction_summary = direction_quality_sample_summary(y_train, sample_context)
@@ -1225,6 +1230,7 @@ def train_direction_quality_bundle(X_train, y_train, sample_context=None):
                 X_dir,
                 y_dir,
                 sample_context=context_dir,
+                estimator_config=estimator_config,
             )
             calibration_source_models = dir_models
         else:
@@ -1232,11 +1238,13 @@ def train_direction_quality_bundle(X_train, y_train, sample_context=None):
                 X_model_dir,
                 y_model_dir,
                 sample_context=context_model_dir,
+                estimator_config=estimator_config,
             )
             dir_models, _, _, dir_weight_summary = train_model_bundle(
                 X_dir,
                 y_dir,
                 sample_context=context_dir,
+                estimator_config=estimator_config,
             )
         calibration_summary_by_model = {}
         regime_calibration_summary_by_model = {}

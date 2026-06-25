@@ -570,6 +570,24 @@ def walk_forward_fail_fast_enabled():
     return bool(getattr(config, "MODEL_WALK_FORWARD_FAIL_FAST", True))
 
 
+def walk_forward_estimator_config():
+    if not bool(getattr(config, "MODEL_WALK_FORWARD_LIGHTWEIGHT_TRAINING", True)):
+        return None
+    return {
+        "lgb_n_estimators": max(1, int(getattr(config, "MODEL_WALK_FORWARD_LGB_ESTIMATORS", 120))),
+        "xgb_n_estimators": max(1, int(getattr(config, "MODEL_WALK_FORWARD_XGB_ESTIMATORS", 120))),
+        "rf_n_estimators": max(1, int(getattr(config, "MODEL_WALK_FORWARD_RF_ESTIMATORS", 80))),
+    }
+
+
+def write_walk_forward_stage_timing(log_file, fold_number, stage, elapsed_sec):
+    with open(log_file, "a", encoding="utf-8") as file:
+        file.write(
+            "walk_forward_stage_timing "
+            f"fold={fold_number} stage={stage} elapsed_sec={float(elapsed_sec):.2f}\n"
+        )
+
+
 def _probability_scale_diagnostics(trade_prob, y_true, y_pred, threshold):
     series = pd.to_numeric(pd.Series(trade_prob), errors="coerce").fillna(0.0).astype(float).reset_index(drop=True)
     rows = int(len(series))
@@ -1445,9 +1463,15 @@ def run_walk_forward_validation(log_file, context_backtester, metadata, feature_
         if _threshold_sweep_enabled()
         else []
     )
+    estimator_config = walk_forward_estimator_config()
 
     with open(log_file, "a", encoding="utf-8") as file:
         file.write(f"walk-forward folds={len(slices)}\n")
+        file.write(
+            "walk-forward estimator_config "
+            f"lightweight={int(estimator_config is not None)} "
+            f"config={estimator_config or {}}\n"
+        )
         if _threshold_sweep_enabled():
             file.write(
                 "walk-forward threshold_sweep "
@@ -1466,7 +1490,21 @@ def run_walk_forward_validation(log_file, context_backtester, metadata, feature_
 
         X_train = train_df[feature_cols].astype(float)
         y_train = train_df["target"]
-        fold_models, _, _, _, _ = train_direction_quality_bundle(X_train, y_train, sample_context=train_df)
+        stage_started_at = time.monotonic()
+        fold_models, _, _, _, _ = train_direction_quality_bundle(
+            X_train,
+            y_train,
+            sample_context=train_df,
+            estimator_config=estimator_config,
+        )
+        train_elapsed_sec = time.monotonic() - stage_started_at
+        write_walk_forward_stage_timing(
+            log_file,
+            fold["fold"],
+            "train_models",
+            train_elapsed_sec,
+        )
+        stage_started_at = time.monotonic()
         fold_diagnostics = build_walk_forward_fold_diagnostics(
             fold,
             train_df,
@@ -1475,6 +1513,13 @@ def run_walk_forward_validation(log_file, context_backtester, metadata, feature_
             fold_models,
             config.MODEL_WEIGHTS,
             metadata,
+        )
+        diagnostics_elapsed_sec = time.monotonic() - stage_started_at
+        write_walk_forward_stage_timing(
+            log_file,
+            fold["fold"],
+            "diagnostics",
+            diagnostics_elapsed_sec,
         )
         write_walk_forward_fold_diagnostics(log_file, fold_diagnostics)
         fold_data = context_backtester.data.loc[
@@ -1487,7 +1532,9 @@ def run_walk_forward_validation(log_file, context_backtester, metadata, feature_
             fold_data.index.max(),
         )
         fold_predicted_data = None
+        probabilities_elapsed_sec = 0.0
         if _threshold_sweep_enabled() and threshold_candidates:
+            stage_started_at = time.monotonic()
             fold_predicted_data = add_walk_forward_probabilities(
                 fold_data,
                 feature_cols,
@@ -1495,8 +1542,16 @@ def run_walk_forward_validation(log_file, context_backtester, metadata, feature_
                 config.MODEL_WEIGHTS,
                 metadata,
             )
+            probabilities_elapsed_sec = time.monotonic() - stage_started_at
+            write_walk_forward_stage_timing(
+                log_file,
+                fold["fold"],
+                "precompute_probabilities",
+                probabilities_elapsed_sec,
+            )
 
         append_log_header(log_file, f"walk_forward_fold_{fold['fold']}")
+        stage_started_at = time.monotonic()
         with open(log_file, "a", encoding="utf-8") as file:
             file.write(
                 "fold_range "
@@ -1521,11 +1576,20 @@ def run_walk_forward_validation(log_file, context_backtester, metadata, feature_
                     emit_diagnostics=False,
                 )
                 fold_summary = backtester.run_backtest()
+        backtest_elapsed_sec = time.monotonic() - stage_started_at
+        write_walk_forward_stage_timing(
+            log_file,
+            fold["fold"],
+            "backtest_current",
+            backtest_elapsed_sec,
+        )
 
         if not fold_summary:
             raise RuntimeError(f"walk-forward fold={fold['fold']} 未返回 summary")
         threshold_sweep = None
+        threshold_sweep_elapsed_sec = 0.0
         if _threshold_sweep_enabled() and threshold_candidates and fold_predicted_data is not None:
+            stage_started_at = time.monotonic()
             threshold_sweep = run_walk_forward_threshold_sweep(
                 {
                     "interval": context_backtester.interval,
@@ -1545,7 +1609,14 @@ def run_walk_forward_validation(log_file, context_backtester, metadata, feature_
                 },
                 threshold_candidates,
             )
+            threshold_sweep_elapsed_sec = time.monotonic() - stage_started_at
             write_walk_forward_threshold_sweep(log_file, fold["fold"], threshold_sweep)
+            write_walk_forward_stage_timing(
+                log_file,
+                fold["fold"],
+                "threshold_sweep",
+                threshold_sweep_elapsed_sec,
+            )
         fold_summary.update({
             "fold": fold["fold"],
             "train_rows": int(len(train_df)),
@@ -1554,6 +1625,13 @@ def run_walk_forward_validation(log_file, context_backtester, metadata, feature_
             "validation_end": validation_df.index.max().isoformat(),
             "fold_diagnostics": fold_diagnostics,
             "elapsed_sec": float(time.monotonic() - fold_started_at),
+            "stage_timing": {
+                "train_models": float(train_elapsed_sec),
+                "diagnostics": float(diagnostics_elapsed_sec),
+                "precompute_probabilities": float(probabilities_elapsed_sec),
+                "backtest_current": float(backtest_elapsed_sec),
+                "threshold_sweep": float(threshold_sweep_elapsed_sec),
+            },
         })
         if threshold_sweep is not None:
             fold_summary["threshold_sweep"] = threshold_sweep
@@ -1563,6 +1641,11 @@ def run_walk_forward_validation(log_file, context_backtester, metadata, feature_
                 "walk_forward_fold_timing "
                 f"fold={fold['fold']} "
                 f"elapsed_sec={fold_summary['elapsed_sec']:.2f} "
+                f"train_models_sec={train_elapsed_sec:.2f} "
+                f"diagnostics_sec={diagnostics_elapsed_sec:.2f} "
+                f"precompute_probabilities_sec={probabilities_elapsed_sec:.2f} "
+                f"backtest_current_sec={backtest_elapsed_sec:.2f} "
+                f"threshold_sweep_sec={threshold_sweep_elapsed_sec:.2f} "
                 f"threshold_sweep_evaluated="
                 f"{(threshold_sweep or {}).get('evaluated_count', 0)}\n"
             )

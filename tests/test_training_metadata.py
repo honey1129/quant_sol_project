@@ -43,6 +43,21 @@ class FeatureProbabilityEstimator:
 
 
 class TrainingMetadataTests(unittest.TestCase):
+    def test_model_estimators_accept_lightweight_estimator_config(self):
+        default_models = train_module.build_model_estimators()
+        lightweight_models = train_module.build_model_estimators({
+            "lgb_n_estimators": 11,
+            "xgb_n_estimators": 12,
+            "rf_n_estimators": 13,
+        })
+
+        self.assertEqual(default_models["lgb_v1"].n_estimators, 500)
+        self.assertEqual(default_models["xgb_v1"].n_estimators, 500)
+        self.assertEqual(default_models["rf_v1"].n_estimators, 300)
+        self.assertEqual(lightweight_models["lgb_v1"].n_estimators, 11)
+        self.assertEqual(lightweight_models["xgb_v1"].n_estimators, 12)
+        self.assertEqual(lightweight_models["rf_v1"].n_estimators, 13)
+
     def test_build_training_metadata_includes_hashes_and_metrics(self):
         index = pd.date_range("2026-01-01", periods=20, freq="5min", tz="UTC")
         X = pd.DataFrame({"a": range(20), "b": range(20, 40)}, index=index)
