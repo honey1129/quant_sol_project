@@ -649,6 +649,8 @@ def build_walk_forward_fold_diagnostics(
     metadata,
     *,
     decision_threshold=None,
+    precomputed_probabilities=None,
+    include_model_diagnostics=True,
 ):
     from core import signal_engine
     from core.trend_filter import derive_trend_context
@@ -664,6 +666,11 @@ def build_walk_forward_fold_diagnostics(
     proba_sum = None
     used_weight_total = 0.0
     trend_biases = []
+    precomputed_probabilities = (
+        precomputed_probabilities.reindex(validation_df.index)
+        if precomputed_probabilities is not None
+        else None
+    )
 
     for _, row in validation_df.iterrows():
         trend_context = derive_trend_context(
@@ -676,19 +683,22 @@ def build_walk_forward_fold_diagnostics(
         trend_biases.append(str(trend_context.get("trend_bias") or "neutral"))
 
     for name, model in fold_models.items():
-        raw_pred = pd.Series(model.predict(X_validation), index=X_validation.index).astype(int)
-        model_predictions[name] = {
-            "prediction_counts": _target_counts(raw_pred),
-            "classification_report": _json_safe(_safe_classification_report(y_true, raw_pred)),
-            "confusion_matrix": _confusion_matrix(y_true, raw_pred),
-            **_binary_metrics(y_true, raw_pred),
-        }
+        if include_model_diagnostics:
+            raw_pred = pd.Series(model.predict(X_validation), index=X_validation.index).astype(int)
+            model_predictions[name] = {
+                "prediction_counts": _target_counts(raw_pred),
+                "classification_report": _json_safe(_safe_classification_report(y_true, raw_pred)),
+                "confusion_matrix": _confusion_matrix(y_true, raw_pred),
+                **_binary_metrics(y_true, raw_pred),
+            }
 
         try:
             weight = float(model_weights.get(name, 1.0))
         except (TypeError, ValueError):
             weight = 1.0
         if weight <= 0:
+            continue
+        if precomputed_probabilities is not None:
             continue
         weighted_rows = []
         for row_idx in range(len(X_validation)):
@@ -708,7 +718,32 @@ def build_walk_forward_fold_diagnostics(
             proba_sum = proba_sum.add(model_proba * weight, fill_value=0.0)
         used_weight_total += weight
 
-    if proba_sum is not None and used_weight_total > 0:
+    if precomputed_probabilities is not None:
+        ensemble_proba = pd.DataFrame(
+            {
+                "short_prob": pd.to_numeric(
+                    precomputed_probabilities["short_prob"],
+                    errors="coerce",
+                ).fillna(0.0).astype(float),
+                "long_prob": pd.to_numeric(
+                    precomputed_probabilities["long_prob"],
+                    errors="coerce",
+                ).fillna(0.0).astype(float),
+            },
+            index=validation_df.index,
+        )
+        trade_prob = ensemble_proba.max(axis=1)
+        y_pred = (trade_prob >= decision_threshold).astype(int)
+        signal_direction_counts = _direction_counts_from_probabilities(
+            ensemble_proba["long_prob"],
+            ensemble_proba["short_prob"],
+        )
+        predicted_trade_direction_counts = _active_direction_counts(
+            ensemble_proba["long_prob"],
+            ensemble_proba["short_prob"],
+            y_pred,
+        )
+    elif proba_sum is not None and used_weight_total > 0:
         ensemble_proba = proba_sum / used_weight_total
         trade_prob = ensemble_proba.max(axis=1)
         y_pred = (trade_prob >= decision_threshold).astype(int)
@@ -1504,24 +1539,6 @@ def run_walk_forward_validation(log_file, context_backtester, metadata, feature_
             "train_models",
             train_elapsed_sec,
         )
-        stage_started_at = time.monotonic()
-        fold_diagnostics = build_walk_forward_fold_diagnostics(
-            fold,
-            train_df,
-            validation_df,
-            feature_cols,
-            fold_models,
-            config.MODEL_WEIGHTS,
-            metadata,
-        )
-        diagnostics_elapsed_sec = time.monotonic() - stage_started_at
-        write_walk_forward_stage_timing(
-            log_file,
-            fold["fold"],
-            "diagnostics",
-            diagnostics_elapsed_sec,
-        )
-        write_walk_forward_fold_diagnostics(log_file, fold_diagnostics)
         fold_data = context_backtester.data.loc[
             (context_backtester.data.index >= validation_df.index.min()) &
             (context_backtester.data.index <= validation_df.index.max())
@@ -1531,24 +1548,44 @@ def run_walk_forward_validation(log_file, context_backtester, metadata, feature_
             fold_data.index.min(),
             fold_data.index.max(),
         )
-        fold_predicted_data = None
-        probabilities_elapsed_sec = 0.0
-        if _threshold_sweep_enabled() and threshold_candidates:
-            stage_started_at = time.monotonic()
-            fold_predicted_data = add_walk_forward_probabilities(
-                fold_data,
-                feature_cols,
-                fold_models,
-                config.MODEL_WEIGHTS,
-                metadata,
-            )
-            probabilities_elapsed_sec = time.monotonic() - stage_started_at
-            write_walk_forward_stage_timing(
-                log_file,
-                fold["fold"],
-                "precompute_probabilities",
-                probabilities_elapsed_sec,
-            )
+        stage_started_at = time.monotonic()
+        fold_predicted_data = add_walk_forward_probabilities(
+            fold_data,
+            feature_cols,
+            fold_models,
+            config.MODEL_WEIGHTS,
+            metadata,
+        )
+        probabilities_elapsed_sec = time.monotonic() - stage_started_at
+        write_walk_forward_stage_timing(
+            log_file,
+            fold["fold"],
+            "precompute_probabilities",
+            probabilities_elapsed_sec,
+        )
+
+        stage_started_at = time.monotonic()
+        fold_diagnostics = build_walk_forward_fold_diagnostics(
+            fold,
+            train_df,
+            validation_df,
+            feature_cols,
+            fold_models,
+            config.MODEL_WEIGHTS,
+            metadata,
+            precomputed_probabilities=fold_predicted_data[["long_prob", "short_prob"]],
+            include_model_diagnostics=bool(
+                getattr(config, "MODEL_WALK_FORWARD_MODEL_DIAGNOSTICS", False)
+            ),
+        )
+        diagnostics_elapsed_sec = time.monotonic() - stage_started_at
+        write_walk_forward_stage_timing(
+            log_file,
+            fold["fold"],
+            "diagnostics",
+            diagnostics_elapsed_sec,
+        )
+        write_walk_forward_fold_diagnostics(log_file, fold_diagnostics)
 
         append_log_header(log_file, f"walk_forward_fold_{fold['fold']}")
         stage_started_at = time.monotonic()
@@ -1565,7 +1602,7 @@ def run_walk_forward_validation(log_file, context_backtester, metadata, feature_
                     context_backtester.window,
                     data_dict=context_backtester.data_dict,
                     reward_risk=context_backtester.reward_risk,
-                    precomputed_data=fold_data,
+                    precomputed_data=fold_predicted_data,
                     feature_cols=feature_cols,
                     models=fold_models,
                     model_weights=config.MODEL_WEIGHTS,
@@ -1575,7 +1612,12 @@ def run_walk_forward_validation(log_file, context_backtester, metadata, feature_
                     show_progress=False,
                     emit_diagnostics=False,
                 )
-                fold_summary = backtester.run_backtest()
+                original_predict_row = backtester._predict_row
+                backtester._predict_row = lambda row: (row["long_prob"], row["short_prob"])
+                try:
+                    fold_summary = backtester.run_backtest()
+                finally:
+                    backtester._predict_row = original_predict_row
         backtest_elapsed_sec = time.monotonic() - stage_started_at
         write_walk_forward_stage_timing(
             log_file,
