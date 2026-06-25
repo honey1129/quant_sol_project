@@ -342,6 +342,9 @@ MODEL_TRAIN_RATIO=0.70
 MODEL_VALIDATION_RATIO=0.15
 MODEL_PURGE_BARS=24
 MODEL_FINAL_TRAIN_ON_VALIDATION=1
+MODEL_TRAIN_LGB_ESTIMATORS=160
+MODEL_TRAIN_XGB_ESTIMATORS=160
+MODEL_TRAIN_RF_ESTIMATORS=100
 MODEL_VALIDATION_LIGHTWEIGHT_TRAINING=1
 MODEL_VALIDATION_LGB_ESTIMATORS=40
 MODEL_VALIDATION_XGB_ESTIMATORS=40
@@ -353,9 +356,9 @@ MODEL_WALK_FORWARD_MIN_VALIDATION_ROWS=100
 MODEL_WALK_FORWARD_DIAGNOSTIC_THRESHOLD=0.35
 MODEL_WALK_FORWARD_FAIL_FAST=1
 MODEL_WALK_FORWARD_LIGHTWEIGHT_TRAINING=1
-MODEL_WALK_FORWARD_LGB_ESTIMATORS=120
-MODEL_WALK_FORWARD_XGB_ESTIMATORS=120
-MODEL_WALK_FORWARD_RF_ESTIMATORS=80
+MODEL_WALK_FORWARD_LGB_ESTIMATORS=40
+MODEL_WALK_FORWARD_XGB_ESTIMATORS=40
+MODEL_WALK_FORWARD_RF_ESTIMATORS=30
 MODEL_WALK_FORWARD_MODEL_DIAGNOSTICS=0
 MODEL_WALK_FORWARD_THRESHOLD_SWEEP_ENABLED=1
 MODEL_WALK_FORWARD_THRESHOLD_SWEEP_THRESHOLDS=0.12,0.20,0.30,0.40,0.50
@@ -507,7 +510,8 @@ POLL_SEC=10
 - `MODEL_WALK_FORWARD_DIAGNOSTIC_THRESHOLD=0.35`：walk-forward 诊断里的 trade/no-trade precision/recall 使用校准后概率尺度，不再固定按 0.5 判断。
 - `MODEL_WALK_FORWARD_FAIL_FAST=1`：每折真实回测写完诊断和 threshold sweep 后，如果当前折已经违反硬性准入，立即停止后续折，避免一次失败重训继续空跑几十分钟。
 - walk-forward/回测 summary 会额外输出 `required_trade_prob`、`prob_edge_margin`、`round_trip_cost`、`cost_floor` 和 `decision_edge_gate_summary`，用来判断模型概率是否真的覆盖 TP/SL、手续费与滑点成本，而不是只看阈值有没有通过。
-- `MODEL_WALK_FORWARD_LIGHTWEIGHT_TRAINING=1` / `MODEL_WALK_FORWARD_*_ESTIMATORS`：只降低 walk-forward 每折临时模型的树数量，加快验证诊断；最终保存的候选模型仍使用正式训练参数。`MODEL_WALK_FORWARD_MODEL_DIAGNOSTICS=0` 默认跳过折内单模型报告，只保留 ensemble 交易质量诊断。日志会输出 `walk_forward_stage_timing` 和拆分后的 `walk_forward_fold_timing`，方便定位慢在训练、概率预计算、真实回测还是 sweep。
+- `MODEL_TRAIN_*_ESTIMATORS`：正式候选模型的树数量也可配置，默认先用较轻的 `160/160/100` 加快失败反馈；确认标签/门槛有效后再逐步加大。
+- `MODEL_WALK_FORWARD_LIGHTWEIGHT_TRAINING=1` / `MODEL_WALK_FORWARD_*_ESTIMATORS`：降低 walk-forward 每折临时模型的树数量，加快验证诊断；默认 `40/40/30`。`MODEL_WALK_FORWARD_MODEL_DIAGNOSTICS=0` 默认跳过折内单模型报告，只保留 ensemble 交易质量诊断。日志会输出 `walk_forward_stage_timing` 和拆分后的 `walk_forward_fold_timing`，方便定位慢在训练、概率预计算、真实回测还是 sweep。
 - `MODEL_WALK_FORWARD_THRESHOLD_SWEEP_*`：重训验证时额外扫描一组低概率门槛、概率差、最小目标仓位和 sizing center，输出每折推荐候选；默认最多评估 48 个确定性抽样候选，并在找到稳定正收益候选后早停。它只用于诊断和推荐，不会自动改线上 `.env` 或绕过当前准入门槛。
 - `MODEL_USE_RUBIK_FEATURES=0`：Rubik OI/taker/多空比特征默认关闭。开启前应重新训练并用 OOS 回测确认收益质量。
 - `THRESHOLD_LONG=0.56` / `THRESHOLD_SHORT=0.56` / `SIGNAL_MIN_PROB_DIFF=0.12`：当前示例阈值配合新版标签和模型概率尺度，复制旧模型时不要盲目套用。
@@ -521,7 +525,7 @@ POLL_SEC=10
 - `DYNAMIC_RISK_ENABLED=0`：新版示例先关闭动态风险缩放，避免和阈值校准同时改变；需要时再单独 A/B。
 - `MODEL_TRAIN_RATIO` / `MODEL_VALIDATION_RATIO` / `MODEL_PURGE_BARS`：训练区、验证区、最终 OOS 回测区按时间切开，中间留 purge gap；realistic 标签默认 lookahead 为 24 根，因此示例 purge 也设为 24。
 - `MODEL_FINAL_TRAIN_ON_VALIDATION=1`：验证指标仍来自严格时间切分；最终保存的模型用 OOS 之前的 train+validation 历史段重训，减少线上模型滞后。
-- `MODEL_VALIDATION_LIGHTWEIGHT_TRAINING=1` / `MODEL_VALIDATION_*_ESTIMATORS`：validation metrics 和 validation gate 只用于候选筛查，默认用轻量树数量快速发现概率坍缩；最终保存的候选模型仍使用正式训练参数。
+- `MODEL_VALIDATION_LIGHTWEIGHT_TRAINING=1` / `MODEL_VALIDATION_*_ESTIMATORS`：validation metrics 和 validation gate 只用于候选筛查，默认用轻量树数量快速发现概率坍缩。
 - `MODEL_WALK_FORWARD_ENABLED=1`：重训准入前会在验证区内做滚动 walk-forward 验证。
 - `MODEL_RETRAIN_VALIDATION_GATE_ENABLED=1` / `MODEL_RETRAIN_MIN_VALIDATION_TRADE_RECALL=0.01`：候选模型先用验证集 ensemble 概率做一次快速门禁；如果几乎不预测 trade，会在最终训练和 walk-forward 前直接失败回滚，避免一次坏候选空跑几十分钟。
 - `MODEL_RETRAIN_MIN_*` / `MODEL_RETRAIN_REGIME_GATE_*`：候选模型必须满足 OOS 交易数、胜率、PF、平均盈亏比、手续费后收益和 regime 偏置门槛；不达标会保留旧模型并回滚。

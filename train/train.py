@@ -1191,9 +1191,18 @@ def build_training_metadata(*, X, y, feature_cols, train_end, validation_start, 
 
 def build_model_estimators(estimator_config=None):
     estimator_config = dict(estimator_config or {})
-    lgb_estimators = int(estimator_config.get("lgb_n_estimators", 500))
-    xgb_estimators = int(estimator_config.get("xgb_n_estimators", 500))
-    rf_estimators = int(estimator_config.get("rf_n_estimators", 300))
+    lgb_estimators = int(estimator_config.get(
+        "lgb_n_estimators",
+        getattr(config, "MODEL_TRAIN_LGB_ESTIMATORS", 160),
+    ))
+    xgb_estimators = int(estimator_config.get(
+        "xgb_n_estimators",
+        getattr(config, "MODEL_TRAIN_XGB_ESTIMATORS", 160),
+    ))
+    rf_estimators = int(estimator_config.get(
+        "rf_n_estimators",
+        getattr(config, "MODEL_TRAIN_RF_ESTIMATORS", 100),
+    ))
     return {
         "lgb_v1": lgb.LGBMClassifier(
             n_estimators=lgb_estimators,
@@ -1206,6 +1215,7 @@ def build_model_estimators(estimator_config=None):
             min_child_samples=5,
             min_split_gain=0.0,
             force_col_wise=True,
+            verbosity=-1,
             random_state=42
         ),
         "xgb_v1": xgb.XGBClassifier(
@@ -1216,9 +1226,15 @@ def build_model_estimators(estimator_config=None):
             colsample_bytree=0.8,
             reg_alpha=0.1,
             reg_lambda=1.0,
+            verbosity=0,
             random_state=42
         ),
-        "rf_v1": RandomForestClassifier(n_estimators=rf_estimators, max_depth=6, random_state=42),
+        "rf_v1": RandomForestClassifier(
+            n_estimators=rf_estimators,
+            max_depth=6,
+            random_state=42,
+            n_jobs=-1,
+        ),
     }
 
 
