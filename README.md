@@ -77,7 +77,7 @@ quant_sol_project/
 - 训练时通过 `model_feature_columns()` 排除绝对价格水位、原始成交量、累计 OBV、confirm 标志等非平稳列
 - `.env.example` 默认使用 `MODEL_LABEL_FUTURE_WINDOW=8` / `MODEL_LABEL_THRESHOLD=0.004`，让标签避开 5m 小噪声
 - 默认启用二分类交易质量标签：`trade / no_trade`；方向由 trend/regime 规则决定
-- realistic 标签要求规则允许开仓、未来先触发 TP、扣除估算手续费/滑点后仍有正收益，并记录 MFE/MAE 质量诊断
+- realistic 标签要求规则允许开仓；TP 样本与扣费后仍不亏、MAE 较低的 TIMEOUT 弱正样本可标为 trade，并记录 MFE/MAE 质量诊断
 - 默认训练 long/short 方向质量子模型，让模型分别学习可交易方向内哪些时刻值得入场，避免一套质量概率混淆多空排序
 - 可选接入 Rubik OI/taker/多空比平稳特征：`MODEL_USE_RUBIK_FEATURES=1` 时才拉取
 - 按时间顺序切分训练集 / 验证集 / 最终 OOS 回测集，中间留 purge gap，避免未来数据泄漏
@@ -324,6 +324,9 @@ MODEL_LABEL_TAKE_PROFIT=0.016
 MODEL_LABEL_STOP_LOSS=0.014
 MODEL_LABEL_MIN_NET_RETURN=0.0
 MODEL_LABEL_MAX_MAE_RATIO=1.0
+MODEL_LABEL_TIMEOUT_AS_TRADE=1
+MODEL_LABEL_TIMEOUT_MIN_NET_RETURN=0.0
+MODEL_LABEL_TIMEOUT_MAX_MAE_RATIO=0.60
 MODEL_LABEL_REQUIRE_REGIME_ALLOWED=1
 MODEL_TRAIN_TRADABLE_LABELS=1
 MODEL_TRAIN_NO_TRADE_LABELS=1
@@ -348,8 +351,12 @@ MODEL_WALK_FORWARD_THRESHOLD_SWEEP_THRESHOLDS=0.12,0.20,0.30,0.40,0.50
 MODEL_WALK_FORWARD_THRESHOLD_SWEEP_GAPS=0.00,0.08,0.12
 MODEL_WALK_FORWARD_THRESHOLD_SWEEP_MIN_TARGET_RATIOS=0.005,0.010
 MODEL_WALK_FORWARD_THRESHOLD_SWEEP_POSITION_CENTERS=0.05,0.10,0.20,0.30
-MODEL_WALK_FORWARD_THRESHOLD_SWEEP_MAX_CANDIDATES=160
+MODEL_WALK_FORWARD_THRESHOLD_SWEEP_MAX_CANDIDATES=48
 MODEL_WALK_FORWARD_THRESHOLD_SWEEP_TOP_N=5
+MODEL_WALK_FORWARD_THRESHOLD_SWEEP_EARLY_STOP_ENABLED=1
+MODEL_WALK_FORWARD_THRESHOLD_SWEEP_EARLY_STOP_PATIENCE=16
+MODEL_WALK_FORWARD_THRESHOLD_SWEEP_EARLY_STOP_MIN_CLOSED_TRADES=1
+MODEL_WALK_FORWARD_THRESHOLD_SWEEP_EARLY_STOP_MIN_PROFIT_FACTOR=1.05
 
 # 仓位边界
 POSITION_MIN=0.08
@@ -475,14 +482,15 @@ POLL_SEC=10
 - `WINDOWS=5m:15000,15m:6000,1H:2000`：拉长训练窗口；模型输入已平稳化，跨价位段样本更可复用。
 - `MODEL_LABEL_FUTURE_WINDOW=8` / `MODEL_LABEL_THRESHOLD=0.004`：threshold 标签备用口径，目标是避开 5m 细碎噪声。
 - `MODEL_LABEL_LOOKAHEAD_BARS=24` / `MODEL_LABEL_TAKE_PROFIT=0.016` / `MODEL_LABEL_STOP_LOSS=0.014`：realistic 二分类质量标签的当前校准口径，目标是让模型学习“当前规则方向是否值得交易”。
-- `MODEL_LABEL_MIN_NET_RETURN=0.0` / `MODEL_LABEL_MAX_MAE_RATIO=1.0`：trade 标签必须扣除估算手续费/滑点后仍不亏，且触发 TP 前的最大不利波动不超过止损距离。
+- `MODEL_LABEL_MIN_NET_RETURN=0.0` / `MODEL_LABEL_MAX_MAE_RATIO=1.0`：TP trade 标签必须扣除估算手续费/滑点后仍不亏，且触发 TP 前的最大不利波动不超过止损距离。
+- `MODEL_LABEL_TIMEOUT_AS_TRADE=1` / `MODEL_LABEL_TIMEOUT_MIN_NET_RETURN=0.0` / `MODEL_LABEL_TIMEOUT_MAX_MAE_RATIO=0.60`：TIMEOUT 不再只按 TP/SL 二元结果处理；扣费后仍不亏、最大不利波动不超过 60% 止损距离的样本标为 `TIMEOUT_WEAK_POSITIVE`，否则标为 `TIMEOUT_WEAK_NEGATIVE`。
 - `MODEL_LABEL_REQUIRE_REGIME_ALLOWED=1` / `MODEL_TRAIN_TRADABLE_LABELS=1` / `MODEL_TRAIN_NO_TRADE_LABELS=1`：标签与线上可交易规则保持一致；被 trend/regime 规则拒绝的样本标为 no_trade。
 - `MODEL_TRAIN_DIRECTION_QUALITY_MODELS=1` / `MODEL_DIRECTION_QUALITY_MIN_ROWS=200` / `MODEL_DIRECTION_QUALITY_MIN_TRADE_ROWS=20`：在全局质量模型外额外训练 long/short 子模型；方向样本或 trade 样本不足时自动回退到全局模型。
 - `MODEL_DIRECTION_QUALITY_CALIBRATION=sigmoid` / `MODEL_DIRECTION_QUALITY_CALIBRATION_RATIO=0.20`：每个方向子模型用尾部方向样本单独做概率校准，降低 `trend_short` 高置信误报和 `trend_long` 概率压低这类方向内倒挂；最终子模型仍用全量方向样本训练。
 - `MODEL_DIRECTION_QUALITY_CALIBRATION_USE_SAMPLE_WEIGHT=0`：概率校准默认按真实样本分布拟合，不继承训练阶段为了召回而放大的 trade 权重。
 - `MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION=1` / `MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION_MIN_ROWS=50`：在方向校准之上按 `label_regime` 继续校准，优先修正 `short:trend_short` 这类局部高置信误报；样本不足时自动回退到方向校准。
 - `MODEL_WALK_FORWARD_DIAGNOSTIC_THRESHOLD=0.35`：walk-forward 诊断里的 trade/no-trade precision/recall 使用校准后概率尺度，不再固定按 0.5 判断。
-- `MODEL_WALK_FORWARD_THRESHOLD_SWEEP_*`：重训验证时额外扫描一组低概率门槛、概率差、最小目标仓位和 sizing center，输出每折推荐候选；它只用于诊断和推荐，不会自动改线上 `.env` 或绕过当前准入门槛。
+- `MODEL_WALK_FORWARD_THRESHOLD_SWEEP_*`：重训验证时额外扫描一组低概率门槛、概率差、最小目标仓位和 sizing center，输出每折推荐候选；默认最多评估 48 个确定性抽样候选，并在找到稳定正收益候选后早停。它只用于诊断和推荐，不会自动改线上 `.env` 或绕过当前准入门槛。
 - `MODEL_USE_RUBIK_FEATURES=0`：Rubik OI/taker/多空比特征默认关闭。开启前应重新训练并用 OOS 回测确认收益质量。
 - `THRESHOLD_LONG=0.56` / `THRESHOLD_SHORT=0.56` / `SIGNAL_MIN_PROB_DIFF=0.12`：当前示例阈值配合新版标签和模型概率尺度，复制旧模型时不要盲目套用。
 - `POSITION_PROBABILITY_CENTER=0.45`：仓位 sizing 的概率起点；二分类质量模型的概率更稀疏，需和阈值、`MIN_SIGNAL_TARGET_RATIO` 一起校准。

@@ -68,6 +68,24 @@ def _label_max_mae_ratio():
     return float(os.getenv("MODEL_LABEL_MAX_MAE_RATIO", str(config.MODEL_LABEL_MAX_MAE_RATIO)))
 
 
+def _label_timeout_as_trade():
+    return _env_bool("MODEL_LABEL_TIMEOUT_AS_TRADE", config.MODEL_LABEL_TIMEOUT_AS_TRADE)
+
+
+def _label_timeout_min_net_return():
+    return float(os.getenv(
+        "MODEL_LABEL_TIMEOUT_MIN_NET_RETURN",
+        str(config.MODEL_LABEL_TIMEOUT_MIN_NET_RETURN),
+    ))
+
+
+def _label_timeout_max_mae_ratio():
+    return float(os.getenv(
+        "MODEL_LABEL_TIMEOUT_MAX_MAE_RATIO",
+        str(config.MODEL_LABEL_TIMEOUT_MAX_MAE_RATIO),
+    ))
+
+
 def _label_require_regime_allowed():
     return _env_bool("MODEL_LABEL_REQUIRE_REGIME_ALLOWED", config.MODEL_LABEL_REQUIRE_REGIME_ALLOWED)
 
@@ -306,8 +324,51 @@ def _check_tp_sl_outcome(entry_price, future_bars, direction, take_profit_pct, s
     )["outcome"]
 
 
-def _label_reject_reason(quality, *, min_net_return, max_mae_ratio):
+def _timeout_is_weak_positive(quality, *, min_net_return, max_mae_ratio):
+    if float(quality.get("net_return", 0.0)) < min_net_return:
+        return False
+    if max_mae_ratio > 0 and float(quality.get("mae_ratio", 0.0)) > max_mae_ratio:
+        return False
+    return True
+
+
+def _label_outcome_bucket(quality, *, timeout_as_trade, timeout_min_net_return, timeout_max_mae_ratio):
     outcome = str(quality.get("outcome") or "UNKNOWN")
+    if outcome != "TIMEOUT":
+        return outcome
+    if timeout_as_trade and _timeout_is_weak_positive(
+        quality,
+        min_net_return=timeout_min_net_return,
+        max_mae_ratio=timeout_max_mae_ratio,
+    ):
+        return "TIMEOUT_WEAK_POSITIVE"
+    return "TIMEOUT_WEAK_NEGATIVE" if timeout_as_trade else "TIMEOUT"
+
+
+def _label_reject_reason(
+    quality,
+    *,
+    min_net_return,
+    max_mae_ratio,
+    timeout_as_trade,
+    timeout_min_net_return,
+    timeout_max_mae_ratio,
+):
+    outcome = str(quality.get("outcome") or "UNKNOWN")
+    if outcome == "TIMEOUT":
+        if not timeout_as_trade:
+            return "outcome_timeout"
+        if _timeout_is_weak_positive(
+            quality,
+            min_net_return=timeout_min_net_return,
+            max_mae_ratio=timeout_max_mae_ratio,
+        ):
+            return None
+        if float(quality.get("net_return", 0.0)) < timeout_min_net_return:
+            return "timeout_weak_negative_net_return"
+        if timeout_max_mae_ratio > 0 and float(quality.get("mae_ratio", 0.0)) > timeout_max_mae_ratio:
+            return "timeout_weak_negative_mae"
+        return "timeout_weak_negative"
     if outcome != "TP":
         return f"outcome_{outcome.lower()}"
     if float(quality.get("net_return", 0.0)) < min_net_return:
@@ -496,12 +557,17 @@ def create_labels(df, future_window=5, threshold=0.002, tradable_only=None, incl
         stop_loss_pct = _label_stop_loss()
         min_net_return = _label_min_net_return()
         max_mae_ratio = _label_max_mae_ratio()
+        timeout_as_trade = _label_timeout_as_trade()
+        timeout_min_net_return = _label_timeout_min_net_return()
+        timeout_max_mae_ratio = _label_timeout_max_mae_ratio()
         cost_ratio = _round_trip_cost_ratio()
 
         log_info(
             "使用二分类交易质量标签: "
             f"lookahead={lookahead_bars}根K线, TP={take_profit_pct:.2%}, SL={stop_loss_pct:.2%}, "
             f"cost={cost_ratio:.2%}, min_net={min_net_return:.2%}, max_mae_ratio={max_mae_ratio:.2f}, "
+            f"timeout_as_trade={timeout_as_trade}, timeout_min_net={timeout_min_net_return:.2%}, "
+            f"timeout_max_mae_ratio={timeout_max_mae_ratio:.2f}, "
             f"require_regime_allowed={_label_require_regime_allowed()}"
         )
 
@@ -581,10 +647,19 @@ def create_labels(df, future_window=5, threshold=0.002, tradable_only=None, incl
                 quality,
                 min_net_return=min_net_return,
                 max_mae_ratio=max_mae_ratio,
+                timeout_as_trade=timeout_as_trade,
+                timeout_min_net_return=timeout_min_net_return,
+                timeout_max_mae_ratio=timeout_max_mae_ratio,
+            )
+            label_outcome = _label_outcome_bucket(
+                quality,
+                timeout_as_trade=timeout_as_trade,
+                timeout_min_net_return=timeout_min_net_return,
+                timeout_max_mae_ratio=timeout_max_mae_ratio,
             )
             base_record.update({
                 "target": TARGET_TRADE if reject_reason is None else TARGET_NO_TRADE,
-                "label_outcome": quality["outcome"],
+                "label_outcome": label_outcome,
                 "label_reject_reason": "accepted" if reject_reason is None else reject_reason,
                 "label_exit_bars": quality["exit_bars"],
                 "label_gross_return": quality["gross_return"],
@@ -895,6 +970,9 @@ def build_training_metadata(*, X, y, feature_cols, train_end, validation_start, 
         "label_estimated_round_trip_cost": float(_round_trip_cost_ratio()),
         "label_min_net_return": float(_label_min_net_return()),
         "label_max_mae_ratio": float(_label_max_mae_ratio()),
+        "label_timeout_as_trade": bool(_label_timeout_as_trade()),
+        "label_timeout_min_net_return": float(_label_timeout_min_net_return()),
+        "label_timeout_max_mae_ratio": float(_label_timeout_max_mae_ratio()),
         "label_require_regime_allowed": bool(_label_require_regime_allowed()),
         "target_schema": "binary_trade_quality",
         "target_labels": {

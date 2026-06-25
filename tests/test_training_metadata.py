@@ -93,6 +93,9 @@ class TrainingMetadataTests(unittest.TestCase):
         self.assertEqual(metadata["label_estimated_round_trip_cost"], train_module._round_trip_cost_ratio())
         self.assertEqual(metadata["label_min_net_return"], train_module._label_min_net_return())
         self.assertEqual(metadata["label_max_mae_ratio"], train_module._label_max_mae_ratio())
+        self.assertEqual(metadata["label_timeout_as_trade"], train_module._label_timeout_as_trade())
+        self.assertEqual(metadata["label_timeout_min_net_return"], train_module._label_timeout_min_net_return())
+        self.assertEqual(metadata["label_timeout_max_mae_ratio"], train_module._label_timeout_max_mae_ratio())
         self.assertEqual(metadata["label_require_regime_allowed"], train_module._label_require_regime_allowed())
         self.assertIn("label_quality_summary", metadata)
         self.assertTrue(metadata["final_train_on_validation"])
@@ -129,6 +132,66 @@ class TrainingMetadataTests(unittest.TestCase):
         self.assertIn("label_net_return", labeled.columns)
         self.assertIn("label_quality_summary", labeled.attrs)
         self.assertGreater(labeled.attrs["label_quality_summary"]["trade_rows"], 0)
+
+    def test_realistic_quality_labels_split_timeout_weak_positive(self):
+        index = pd.date_range("2026-01-01", periods=3, freq="5min", tz="UTC")
+        close = pd.Series([100.0, 100.5, 100.5], index=index)
+        df = pd.DataFrame({
+            "5m_close": close,
+            "5m_high": [100.0, 100.6, 100.6],
+            "5m_low": [100.0, 99.8, 100.0],
+            "5m_atr": 0.1,
+            "volatility_15": 0.0,
+            "money_flow_ratio": 1.0,
+            "15m_ema_20": close * 0.99,
+            "15m_ema_60": close * 0.98,
+        }, index=index)
+
+        with patch.dict(os.environ, {
+            "MODEL_LABEL_USE_REALISTIC": "1",
+            "MODEL_LABEL_LOOKAHEAD_BARS": "1",
+            "MODEL_LABEL_TAKE_PROFIT": "0.01",
+            "MODEL_LABEL_STOP_LOSS": "0.01",
+            "MODEL_LABEL_TIMEOUT_AS_TRADE": "1",
+            "MODEL_LABEL_TIMEOUT_MIN_NET_RETURN": "0.0",
+            "MODEL_LABEL_TIMEOUT_MAX_MAE_RATIO": "0.6",
+        }):
+            labeled = train_module.create_labels(df, future_window=1, threshold=0.01)
+
+        first = labeled.iloc[0]
+        self.assertEqual(int(first["target"]), 1)
+        self.assertEqual(first["label_outcome"], "TIMEOUT_WEAK_POSITIVE")
+        self.assertEqual(first["label_reject_reason"], "accepted")
+
+    def test_realistic_quality_labels_split_timeout_weak_negative(self):
+        index = pd.date_range("2026-01-01", periods=3, freq="5min", tz="UTC")
+        close = pd.Series([100.0, 100.5, 100.5], index=index)
+        df = pd.DataFrame({
+            "5m_close": close,
+            "5m_high": [100.0, 100.6, 100.6],
+            "5m_low": [100.0, 99.2, 100.0],
+            "5m_atr": 0.1,
+            "volatility_15": 0.0,
+            "money_flow_ratio": 1.0,
+            "15m_ema_20": close * 0.99,
+            "15m_ema_60": close * 0.98,
+        }, index=index)
+
+        with patch.dict(os.environ, {
+            "MODEL_LABEL_USE_REALISTIC": "1",
+            "MODEL_LABEL_LOOKAHEAD_BARS": "1",
+            "MODEL_LABEL_TAKE_PROFIT": "0.01",
+            "MODEL_LABEL_STOP_LOSS": "0.01",
+            "MODEL_LABEL_TIMEOUT_AS_TRADE": "1",
+            "MODEL_LABEL_TIMEOUT_MIN_NET_RETURN": "0.0",
+            "MODEL_LABEL_TIMEOUT_MAX_MAE_RATIO": "0.6",
+        }):
+            labeled = train_module.create_labels(df, future_window=1, threshold=0.01)
+
+        first = labeled.iloc[0]
+        self.assertEqual(int(first["target"]), 0)
+        self.assertEqual(first["label_outcome"], "TIMEOUT_WEAK_NEGATIVE")
+        self.assertEqual(first["label_reject_reason"], "timeout_weak_negative_mae")
 
     def test_quality_labels_keep_small_moves_as_no_trade(self):
         index = pd.date_range("2026-01-01", periods=4, freq="5min", tz="UTC")
