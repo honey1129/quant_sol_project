@@ -952,6 +952,140 @@ def evaluate_model(model, model_name, X_test, y_test):
     }
 
 
+def _validation_gate_enabled():
+    return _env_bool(
+        "MODEL_RETRAIN_VALIDATION_GATE_ENABLED",
+        getattr(config, "MODEL_RETRAIN_VALIDATION_GATE_ENABLED", True),
+    )
+
+
+def _validation_gate_min_trade_recall():
+    return max(0.0, float(os.getenv(
+        "MODEL_RETRAIN_MIN_VALIDATION_TRADE_RECALL",
+        str(getattr(config, "MODEL_RETRAIN_MIN_VALIDATION_TRADE_RECALL", 0.01)),
+    )))
+
+
+def _validation_gate_min_predicted_trades():
+    return max(0, int(os.getenv(
+        "MODEL_RETRAIN_MIN_VALIDATION_PREDICTED_TRADES",
+        str(getattr(config, "MODEL_RETRAIN_MIN_VALIDATION_PREDICTED_TRADES", 1)),
+    )))
+
+
+def _validation_gate_threshold():
+    try:
+        threshold = float(getattr(config, "MODEL_WALK_FORWARD_DIAGNOSTIC_THRESHOLD", 0.35))
+    except (TypeError, ValueError):
+        threshold = 0.35
+    if not np.isfinite(threshold):
+        threshold = 0.35
+    return max(0.0, min(1.0, threshold))
+
+
+def _trade_probability_from_model(model, X):
+    probability = np.asarray(model.predict_proba(X), dtype=float)
+    if probability.ndim != 2 or probability.shape[1] == 0:
+        raise ValueError(f"模型概率维度不正确: {probability.shape!r}")
+    classes = list(getattr(model, "classes_", range(probability.shape[1])))
+    if TARGET_TRADE not in classes:
+        return np.zeros(len(X), dtype=float)
+    return probability[:, classes.index(TARGET_TRADE)].astype(float)
+
+
+def _binary_metrics_for_gate(y_true, y_pred):
+    y_true = pd.Series(y_true).astype(int).reset_index(drop=True)
+    y_pred = pd.Series(y_pred).astype(int).reset_index(drop=True)
+    tp = int(((y_true == TARGET_TRADE) & (y_pred == TARGET_TRADE)).sum())
+    fp = int(((y_true == TARGET_NO_TRADE) & (y_pred == TARGET_TRADE)).sum())
+    fn = int(((y_true == TARGET_TRADE) & (y_pred == TARGET_NO_TRADE)).sum())
+    precision = tp / (tp + fp) if (tp + fp) else 0.0
+    recall = tp / (tp + fn) if (tp + fn) else 0.0
+    f1 = 2.0 * precision * recall / (precision + recall) if (precision + recall) else 0.0
+    return {
+        "trade_precision": float(precision),
+        "trade_recall": float(recall),
+        "trade_f1": float(f1),
+        "trade_true_positive_rows": tp,
+        "trade_false_positive_rows": fp,
+        "trade_false_negative_rows": fn,
+    }
+
+
+def build_validation_gate_summary(models, model_weights, X_validation, y_validation, *, threshold=None):
+    threshold = _validation_gate_threshold() if threshold is None else max(0.0, min(1.0, float(threshold)))
+    X_validation = pd.DataFrame(X_validation)
+    y_validation = pd.Series(y_validation).astype(int)
+    weighted_probability = np.zeros(len(X_validation), dtype=float)
+    used_weight_total = 0.0
+    model_summaries = {}
+
+    for name, model in models.items():
+        try:
+            weight = float(model_weights.get(name, 1.0))
+        except (TypeError, ValueError):
+            weight = 1.0
+        if weight <= 0:
+            continue
+        trade_probability = _trade_probability_from_model(model, X_validation)
+        trade_probability = np.nan_to_num(trade_probability, nan=0.0, posinf=1.0, neginf=0.0)
+        trade_probability = np.clip(trade_probability, 0.0, 1.0)
+        weighted_probability += trade_probability * weight
+        used_weight_total += weight
+        model_pred = pd.Series((trade_probability >= threshold).astype(int), index=y_validation.index)
+        model_summaries[name] = {
+            "weight": float(weight),
+            "predicted_trade_rows": int((model_pred == TARGET_TRADE).sum()),
+            "trade_probability_mean": float(trade_probability.mean()) if len(trade_probability) else 0.0,
+            **_binary_metrics_for_gate(y_validation, model_pred),
+        }
+
+    if used_weight_total > 0:
+        weighted_probability = weighted_probability / used_weight_total
+    y_pred = pd.Series((weighted_probability >= threshold).astype(int), index=y_validation.index)
+    trade_rows = int((y_validation == TARGET_TRADE).sum())
+    predicted_trade_rows = int((y_pred == TARGET_TRADE).sum())
+    summary = {
+        "enabled": bool(_validation_gate_enabled()),
+        "decision_threshold": float(threshold),
+        "rows": int(len(y_validation)),
+        "trade_rows": trade_rows,
+        "no_trade_rows": int(len(y_validation) - trade_rows),
+        "predicted_trade_rows": predicted_trade_rows,
+        "prediction_counts": {
+            "no_trade": int((y_pred == TARGET_NO_TRADE).sum()),
+            "trade": predicted_trade_rows,
+        },
+        "trade_probability_mean": float(weighted_probability.mean()) if len(weighted_probability) else 0.0,
+        "trade_probability_quantiles": _series_quantiles(pd.Series(weighted_probability)),
+        "model_summaries": model_summaries,
+        **_binary_metrics_for_gate(y_validation, y_pred),
+    }
+    return _json_safe(summary)
+
+
+def validate_retrain_validation_gate(validation_gate_summary):
+    if not _validation_gate_enabled():
+        return
+    trade_rows = int(validation_gate_summary.get("trade_rows", 0))
+    if trade_rows <= 0:
+        return
+    predicted_trade_rows = int(validation_gate_summary.get("predicted_trade_rows", 0))
+    min_predicted_trades = _validation_gate_min_predicted_trades()
+    if predicted_trade_rows < min_predicted_trades:
+        raise ValueError(
+            "验证集候选交易数不足: "
+            f"predicted_trade_rows={predicted_trade_rows} < {min_predicted_trades}"
+        )
+    trade_recall = float(validation_gate_summary.get("trade_recall", 0.0))
+    min_trade_recall = _validation_gate_min_trade_recall()
+    if trade_recall < min_trade_recall:
+        raise ValueError(
+            "验证集 trade recall 过低: "
+            f"trade_recall={trade_recall:.4f} < {min_trade_recall:.4f}"
+        )
+
+
 def _json_safe(value):
     if isinstance(value, dict):
         return {str(k): _json_safe(v) for k, v in value.items()}
@@ -980,7 +1114,7 @@ def write_json_atomic(path, payload):
     os.replace(tmp_path, path)
 
 
-def build_training_metadata(*, X, y, feature_cols, train_end, validation_start, validation_end, oos_start, original_train_rows, balanced_train_rows, validation_metrics, artifact_paths, label_filter_summary=None, label_quality_summary=None, sample_weight_summary=None, evaluation_sample_weight_summary=None, direction_quality_summary=None, final_train_end=None):
+def build_training_metadata(*, X, y, feature_cols, train_end, validation_start, validation_end, oos_start, original_train_rows, balanced_train_rows, validation_metrics, artifact_paths, label_filter_summary=None, label_quality_summary=None, sample_weight_summary=None, evaluation_sample_weight_summary=None, direction_quality_summary=None, validation_gate_summary=None, final_train_end=None):
     final_train_end = train_end if final_train_end is None else int(final_train_end)
     artifact_hashes = {
         os.path.relpath(path, BASE_DIR): sha256_file(path)
@@ -1032,6 +1166,7 @@ def build_training_metadata(*, X, y, feature_cols, train_end, validation_start, 
         "training_balance_strategy": "sample_weight_binary_target_regime_direction_hard_negative_recency",
         "sample_weight_summary": sample_weight_summary or {},
         "evaluation_sample_weight_summary": evaluation_sample_weight_summary or {},
+        "validation_gate_summary": validation_gate_summary or {},
         "direction_quality_models": direction_quality_summary or {},
         "train_ratio": float(config.MODEL_TRAIN_RATIO),
         "validation_ratio": float(config.MODEL_VALIDATION_RATIO),
@@ -1521,6 +1656,23 @@ def train():
         "xgb_v1": evaluate_model(eval_models["xgb_v1"], "XGBoost", X_test, y_test),
         "rf_v1": evaluate_model(eval_models["rf_v1"], "RandomForest", X_test, y_test),
     }
+    validation_gate_summary = build_validation_gate_summary(
+        eval_models,
+        config.MODEL_WEIGHTS,
+        X_test,
+        y_test,
+    )
+    validation_metrics["ensemble_threshold"] = validation_gate_summary
+    log_info(
+        "验证集候选交易门禁: "
+        f"threshold={validation_gate_summary.get('decision_threshold', 0.0):.4f} "
+        f"trade_rows={validation_gate_summary.get('trade_rows', 0)} "
+        f"predicted_trade_rows={validation_gate_summary.get('predicted_trade_rows', 0)} "
+        f"trade_precision={validation_gate_summary.get('trade_precision', 0.0):.4f} "
+        f"trade_recall={validation_gate_summary.get('trade_recall', 0.0):.4f} "
+        f"prob_q={validation_gate_summary.get('trade_probability_quantiles', {})}"
+    )
+    validate_retrain_validation_gate(validation_gate_summary)
 
     final_train_end = validation_end if bool(config.MODEL_FINAL_TRAIN_ON_VALIDATION) else train_end
     X_final_train = X.iloc[:final_train_end].copy()
@@ -1567,6 +1719,7 @@ def train():
             "direction_quality_models": evaluation_direction_quality_summary,
         },
         direction_quality_summary=direction_quality_summary,
+        validation_gate_summary=validation_gate_summary,
         final_train_end=final_train_end,
     )
     write_json_atomic(training_metadata_path, metadata)

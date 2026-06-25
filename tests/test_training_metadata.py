@@ -98,6 +98,7 @@ class TrainingMetadataTests(unittest.TestCase):
         )
         self.assertEqual(metadata["sample_weight_summary"]["method"], "unit")
         self.assertEqual(metadata["evaluation_sample_weight_summary"], {})
+        self.assertEqual(metadata["validation_gate_summary"], {})
         self.assertEqual(metadata["direction_quality_models"], {})
         self.assertEqual(metadata["label_distribution"]["all"], {"0": 10, "1": 10})
         self.assertEqual(metadata["target_schema"], "binary_trade_quality")
@@ -118,6 +119,41 @@ class TrainingMetadataTests(unittest.TestCase):
         self.assertEqual(metadata["validation_rows"], 4)
         self.assertEqual(metadata["oos_rows"], 2)
         self.assertTrue(metadata["artifact_hashes"])
+
+    def test_validation_gate_summary_uses_probability_threshold(self):
+        index = pd.date_range("2026-01-01", periods=4, freq="5min", tz="UTC")
+        X = pd.DataFrame({"score": [0.10, 0.80, 0.90, 0.20]}, index=index)
+        y = pd.Series([0, 1, 1, 0], index=index)
+
+        summary = train_module.build_validation_gate_summary(
+            {"lgb_v1": FeatureProbabilityEstimator()},
+            {"lgb_v1": 1.0},
+            X,
+            y,
+            threshold=0.5,
+        )
+
+        self.assertEqual(summary["trade_rows"], 2)
+        self.assertEqual(summary["predicted_trade_rows"], 2)
+        self.assertAlmostEqual(summary["trade_precision"], 1.0)
+        self.assertAlmostEqual(summary["trade_recall"], 1.0)
+
+    def test_validation_gate_rejects_collapsed_trade_predictions(self):
+        summary = {
+            "trade_rows": 5,
+            "predicted_trade_rows": 0,
+            "trade_recall": 0.0,
+        }
+
+        with patch.dict(os.environ, {
+            "MODEL_RETRAIN_VALIDATION_GATE_ENABLED": "1",
+            "MODEL_RETRAIN_MIN_VALIDATION_TRADE_RECALL": "0.01",
+            "MODEL_RETRAIN_MIN_VALIDATION_PREDICTED_TRADES": "1",
+        }):
+            with self.assertRaises(ValueError) as context:
+                train_module.validate_retrain_validation_gate(summary)
+
+        self.assertIn("验证集候选交易数不足", str(context.exception))
 
     def test_realistic_quality_labels_mark_only_tp_before_sl_as_trade(self):
         index = pd.date_range("2026-01-01", periods=4, freq="5min", tz="UTC")
