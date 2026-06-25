@@ -566,6 +566,61 @@ def walk_forward_diagnostic_threshold():
     return max(0.0, min(1.0, threshold))
 
 
+def walk_forward_fail_fast_enabled():
+    return bool(getattr(config, "MODEL_WALK_FORWARD_FAIL_FAST", True))
+
+
+def _probability_scale_diagnostics(trade_prob, y_true, y_pred, threshold):
+    series = pd.to_numeric(pd.Series(trade_prob), errors="coerce").fillna(0.0).astype(float).reset_index(drop=True)
+    rows = int(len(series))
+    if rows == 0:
+        return {
+            "rows": 0,
+            "near_threshold_band": float(0.0),
+            "above_threshold_pct": 0.0,
+            "p90_below_threshold": True,
+            "p95_below_threshold": True,
+            "true_trade_p90_below_threshold": True,
+            "active_trade_pct": 0.0,
+            "collapse_warning": False,
+        }
+
+    threshold = max(0.0, min(1.0, float(threshold)))
+    y_true_series = pd.Series(y_true).astype(int).reset_index(drop=True)
+    y_pred_series = pd.Series(y_pred).astype(int).reset_index(drop=True)
+    band = min(0.10, max(0.02, threshold * 0.20))
+    p90 = float(series.quantile(0.90))
+    p95 = float(series.quantile(0.95))
+    true_trade = series.loc[y_true_series == 1]
+    true_trade_p90 = float(true_trade.quantile(0.90)) if not true_trade.empty else 0.0
+    above_threshold_count = int((series >= threshold).sum())
+    active_trade_count = int((y_pred_series == 1).sum())
+    true_trade_rows = int((y_true_series == 1).sum())
+    collapse_warning = bool(
+        true_trade_rows > 0
+        and active_trade_count <= max(1, int(rows * 0.02))
+        and p95 < threshold
+    )
+    return {
+        "rows": rows,
+        "near_threshold_band": float(band),
+        "above_threshold_count": above_threshold_count,
+        "above_threshold_pct": float(above_threshold_count / rows * 100.0),
+        "active_trade_count": active_trade_count,
+        "active_trade_pct": float(active_trade_count / rows * 100.0),
+        "p90": p90,
+        "p95": p95,
+        "threshold": float(threshold),
+        "p90_below_threshold": bool(p90 < threshold),
+        "p95_below_threshold": bool(p95 < threshold),
+        "true_trade_rows": true_trade_rows,
+        "true_trade_p90": float(true_trade_p90),
+        "true_trade_p90_below_threshold": bool(true_trade_p90 < threshold),
+        "rows_near_threshold": int(((series >= threshold - band) & (series < threshold)).sum()),
+        "collapse_warning": collapse_warning,
+    }
+
+
 def build_walk_forward_fold_diagnostics(
     fold,
     train_df,
@@ -727,6 +782,12 @@ def build_walk_forward_fold_diagnostics(
             "classification_report": _json_safe(_safe_classification_report(y_true, y_pred)),
             "signal_direction_counts": signal_direction_counts,
             "predicted_trade_direction_counts": predicted_trade_direction_counts,
+            "probability_scale_diagnostics": _probability_scale_diagnostics(
+                trade_prob,
+                y_true,
+                y_pred,
+                decision_threshold,
+            ),
             "trade_prob_quantiles": trade_prob_quantiles,
             "error_slices": error_slices,
             **_binary_metrics(y_true, y_pred),
@@ -740,6 +801,7 @@ def build_walk_forward_fold_diagnostics(
 def write_walk_forward_fold_diagnostics(log_file, diagnostics):
     ensemble = diagnostics.get("ensemble") or {}
     validation = diagnostics.get("validation") or {}
+    scale_diagnostics = ensemble.get("probability_scale_diagnostics") or {}
     with open(log_file, "a", encoding="utf-8") as file:
         file.write(
             "fold_label_diagnostics "
@@ -759,6 +821,7 @@ def write_walk_forward_fold_diagnostics(log_file, diagnostics):
             f"trade_f1={float(ensemble.get('trade_f1', 0.0)):.4f} "
             f"signal_directions={ensemble.get('signal_direction_counts', {})} "
             f"active_directions={ensemble.get('predicted_trade_direction_counts', {})} "
+            f"prob_scale={scale_diagnostics} "
             f"trade_prob_q={ensemble.get('trade_prob_quantiles', {})} "
             f"errors={ensemble.get('error_slices', {})} "
             f"confusion_matrix={ensemble.get('confusion_matrix', [])}\n"
@@ -1258,6 +1321,23 @@ def validate_walk_forward_summary(summary):
     validate_backtest_summary(summary)
 
 
+def walk_forward_fold_failure_reason(fold_summary):
+    fold_id = fold_summary.get("fold")
+    closed_trades = int(fold_summary.get("closed_trade_count", 0))
+    if closed_trades < HARD_MIN_CLOSED_TRADES:
+        return (
+            "walk-forward 单折平仓交易数不足: "
+            f"fold={fold_id}, closed_trade_count={closed_trades}"
+        )
+    profit_factor = float(fold_summary.get("profit_factor", 0.0))
+    if profit_factor <= HARD_MIN_PROFIT_FACTOR:
+        return (
+            "walk-forward 单折盈利因子必须大于1: "
+            f"fold={fold_id}, profit_factor={profit_factor:.4f}"
+        )
+    return None
+
+
 def run_walk_forward_validation(log_file, context_backtester, metadata, feature_cols):
     if not bool(config.MODEL_WALK_FORWARD_ENABLED):
         return None
@@ -1298,6 +1378,7 @@ def run_walk_forward_validation(log_file, context_backtester, metadata, feature_
             )
 
     for fold in slices:
+        fold_started_at = time.monotonic()
         train_df = labeled_data.iloc[fold["train_start_pos"]:fold["train_end_pos"]].copy()
         validation_df = labeled_data.iloc[
             fold["validation_start_pos"]:fold["validation_end_pos"]
@@ -1394,10 +1475,28 @@ def run_walk_forward_validation(log_file, context_backtester, metadata, feature_
             "validation_start": validation_df.index.min().isoformat(),
             "validation_end": validation_df.index.max().isoformat(),
             "fold_diagnostics": fold_diagnostics,
+            "elapsed_sec": float(time.monotonic() - fold_started_at),
         })
         if threshold_sweep is not None:
             fold_summary["threshold_sweep"] = threshold_sweep
         fold_summaries.append(fold_summary)
+        with open(log_file, "a", encoding="utf-8") as file:
+            file.write(
+                "walk_forward_fold_timing "
+                f"fold={fold['fold']} "
+                f"elapsed_sec={fold_summary['elapsed_sec']:.2f} "
+                f"threshold_sweep_evaluated="
+                f"{(threshold_sweep or {}).get('evaluated_count', 0)}\n"
+            )
+
+        failure_reason = walk_forward_fold_failure_reason(fold_summary)
+        if failure_reason and walk_forward_fail_fast_enabled():
+            with open(log_file, "a", encoding="utf-8") as file:
+                file.write(
+                    "walk_forward_fail_fast "
+                    f"fold={fold['fold']} reason={failure_reason}\n"
+                )
+            raise RuntimeError(failure_reason)
 
     summary = aggregate_backtest_summaries(fold_summaries)
     validate_walk_forward_summary(summary)

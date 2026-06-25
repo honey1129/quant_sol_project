@@ -424,6 +424,8 @@ class RetrainBacktestValidationTests(unittest.TestCase):
         self.assertIn("trend_long", diagnostics["by_regime"])
         self.assertIn("signal_direction_counts", diagnostics["ensemble"])
         self.assertIn("predicted_trade_direction_counts", diagnostics["ensemble"])
+        self.assertIn("probability_scale_diagnostics", diagnostics["ensemble"])
+        self.assertFalse(diagnostics["ensemble"]["probability_scale_diagnostics"]["collapse_warning"])
 
     @unittest.skipUnless(HAS_REAL_PANDAS, "requires pandas")
     def test_walk_forward_fold_diagnostics_use_configurable_decision_threshold(self):
@@ -461,6 +463,70 @@ class RetrainBacktestValidationTests(unittest.TestCase):
         self.assertEqual(diagnostics["ensemble"]["decision_threshold"], 0.25)
         self.assertEqual(diagnostics["ensemble"]["prediction_counts"], {"1": 2})
         self.assertEqual(diagnostics["ensemble"]["confusion_matrix"], [[0, 1], [0, 1]])
+
+    @unittest.skipUnless(HAS_REAL_PANDAS, "requires pandas")
+    def test_walk_forward_fold_diagnostics_flags_probability_collapse(self):
+        pd = retrain_models.pd
+
+        class LowScaleModel:
+            classes_ = [0, 1]
+
+            def predict(self, X):
+                return [0 for _ in range(len(X))]
+
+            def predict_proba(self, X):
+                return [[0.70, 0.30] for _ in range(len(X))]
+
+        index = pd.date_range("2026-01-01", periods=20, freq="5min")
+        validation_df = pd.DataFrame({
+            "feature": [1.0] * 20,
+            "target": [1] * 10 + [0] * 10,
+            "5m_close": [102.0] * 20,
+            "15m_ema_20": [102.0] * 20,
+            "15m_ema_60": [100.0] * 20,
+        }, index=index)
+
+        diagnostics = retrain_models.build_walk_forward_fold_diagnostics(
+            {"fold": 1},
+            validation_df.copy(),
+            validation_df,
+            ["feature"],
+            {"fake": LowScaleModel()},
+            {"fake": 1.0},
+            {"target_schema": "binary_trade_quality"},
+            decision_threshold=0.35,
+        )
+
+        scale = diagnostics["ensemble"]["probability_scale_diagnostics"]
+        self.assertTrue(scale["collapse_warning"])
+        self.assertTrue(scale["p95_below_threshold"])
+        self.assertTrue(scale["true_trade_p90_below_threshold"])
+        self.assertEqual(scale["active_trade_count"], 0)
+
+    def test_walk_forward_fold_failure_reason_matches_hard_gates(self):
+        self.assertIn(
+            "平仓交易数不足",
+            retrain_models.walk_forward_fold_failure_reason({
+                "fold": 1,
+                "closed_trade_count": 0,
+                "profit_factor": 2.0,
+            }),
+        )
+        self.assertIn(
+            "盈利因子必须大于1",
+            retrain_models.walk_forward_fold_failure_reason({
+                "fold": 2,
+                "closed_trade_count": 1,
+                "profit_factor": 1.0,
+            }),
+        )
+        self.assertIsNone(
+            retrain_models.walk_forward_fold_failure_reason({
+                "fold": 3,
+                "closed_trade_count": 1,
+                "profit_factor": 1.01,
+            })
+        )
 
     def test_walk_forward_threshold_candidates_include_low_scale_and_current_config(self):
         with patch("run.retrain_models.config.MODEL_WALK_FORWARD_THRESHOLD_SWEEP_THRESHOLDS", "0.12,0.30"):
