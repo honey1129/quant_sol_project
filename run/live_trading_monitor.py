@@ -210,6 +210,7 @@ class LiveTrader:
         model_paths = {n: os.path.join(BASE_DIR, p) for n, p in config.MODEL_PATHS.items()} if "BASE_DIR" in globals() else config.MODEL_PATHS
         self.models = signal_engine.load_models(model_paths)
         self.model_weights = config.MODEL_WEIGHTS
+        self.direction_model_weights = getattr(config, "MODEL_DIRECTION_MODEL_WEIGHTS", {})
 
 
         self.reward_risk = self._load_reward_risk()
@@ -328,6 +329,7 @@ class LiveTrader:
             self.model_weights,
             trend_bias=trend_context.get("trend_bias"),
             model_metadata=self.model_metadata,
+            direction_model_weights=self.direction_model_weights,
         )
         long_prob, short_prob = float(avg[1]), float(avg[0])
         return long_prob, short_prob

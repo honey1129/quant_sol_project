@@ -119,7 +119,11 @@ def preserve_candidate_training_metadata(backup_dir):
     if not backup_dir:
         return None
 
-    metadata_path = os.path.join(BASE_DIR, config.TRAINING_METADATA_PATH)
+    metadata_dir = os.path.dirname(os.path.join(BASE_DIR, config.TRAINING_METADATA_PATH))
+    candidate_metadata_path = os.path.join(metadata_dir, "candidate_training_metadata.json")
+    metadata_path = candidate_metadata_path
+    if not os.path.exists(metadata_path):
+        metadata_path = os.path.join(BASE_DIR, config.TRAINING_METADATA_PATH)
     if not os.path.exists(metadata_path):
         return None
 
@@ -127,6 +131,29 @@ def preserve_candidate_training_metadata(backup_dir):
     os.makedirs(os.path.dirname(dst_path), exist_ok=True)
     shutil.copy2(metadata_path, dst_path)
     return dst_path
+
+
+def update_candidate_training_metadata(**updates):
+    metadata_dir = os.path.dirname(os.path.join(BASE_DIR, config.TRAINING_METADATA_PATH))
+    candidate_metadata_path = os.path.join(metadata_dir, "candidate_training_metadata.json")
+    metadata_path = candidate_metadata_path
+    if not os.path.exists(metadata_path):
+        metadata_path = os.path.join(BASE_DIR, config.TRAINING_METADATA_PATH)
+    payload = read_json(metadata_path, {})
+    if not isinstance(payload, dict):
+        payload = {}
+    payload.update(updates)
+    write_json_atomic(candidate_metadata_path, payload)
+    return candidate_metadata_path
+
+
+def remove_candidate_training_metadata():
+    metadata_dir = os.path.dirname(os.path.join(BASE_DIR, config.TRAINING_METADATA_PATH))
+    candidate_metadata_path = os.path.join(metadata_dir, "candidate_training_metadata.json")
+    try:
+        os.remove(candidate_metadata_path)
+    except FileNotFoundError:
+        pass
 
 
 def prune_backups(keep_count):
@@ -656,6 +683,51 @@ def _probability_scale_diagnostics(trade_prob, y_true, y_pred, threshold):
     }
 
 
+def _model_group_diagnostics(validation_df, model_probability_frames, decision_threshold):
+    if not model_probability_frames:
+        return {}
+
+    diagnostics = {}
+    for name, proba in model_probability_frames.items():
+        frame = pd.DataFrame(proba).reindex(validation_df.index)
+        if "long_prob" not in frame:
+            frame["long_prob"] = 0.0
+        if "short_prob" not in frame:
+            frame["short_prob"] = 0.0
+        trade_prob = frame[["long_prob", "short_prob"]].astype(float).max(axis=1)
+        y_pred = (trade_prob >= float(decision_threshold)).astype(int)
+        working = validation_df.copy()
+        working["_pred_target"] = y_pred.to_numpy()
+        working["_trade_prob"] = trade_prob.reindex(validation_df.index).fillna(0.0).to_numpy()
+
+        def summarize(group_cols):
+            groups = {}
+            for key, group in working.groupby(group_cols, dropna=False, sort=True):
+                if not isinstance(key, tuple):
+                    key = (key,)
+                label = ":".join(str(part) for part in key)
+                group_true = group["target"].astype(int)
+                group_pred = group["_pred_target"].astype(int)
+                groups[label] = {
+                    "rows": int(len(group)),
+                    "target_counts": _target_counts(group_true),
+                    "prediction_counts": _target_counts(group_pred),
+                    "confusion_matrix": _confusion_matrix(group_true, group_pred),
+                    "trade_prob_quantiles": _quantiles(group["_trade_prob"]),
+                    **_binary_metrics(group_true, group_pred),
+                }
+            return groups
+
+        item = {
+            "by_direction": summarize(["label_direction"]) if "label_direction" in working else {},
+            "by_regime": summarize(["label_regime"]) if "label_regime" in working else {},
+        }
+        if "label_direction" in working and "label_regime" in working:
+            item["by_direction_regime"] = summarize(["label_direction", "label_regime"])
+        diagnostics[str(name)] = item
+    return _json_safe(diagnostics)
+
+
 def build_walk_forward_fold_diagnostics(
     fold,
     train_df,
@@ -668,6 +740,7 @@ def build_walk_forward_fold_diagnostics(
     decision_threshold=None,
     precomputed_probabilities=None,
     include_model_diagnostics=True,
+    direction_model_weights=None,
 ):
     from core import signal_engine
     from core.trend_filter import derive_trend_context
@@ -680,6 +753,7 @@ def build_walk_forward_fold_diagnostics(
     X_validation = validation_df[feature_cols].astype(float)
     y_true = validation_df["target"].astype(int)
     model_predictions = {}
+    model_probability_frames = {}
     proba_sum = None
     used_weight_total = 0.0
     trend_biases = []
@@ -726,9 +800,11 @@ def build_walk_forward_fold_diagnostics(
                 {name: 1.0},
                 trend_bias=trend_biases[row_idx],
                 model_metadata=metadata,
+                direction_model_weights=direction_model_weights,
             )
             weighted_rows.append(directional)
         model_proba = pd.DataFrame(weighted_rows, columns=["short_prob", "long_prob"], index=X_validation.index)
+        model_probability_frames[name] = model_proba
         if proba_sum is None:
             proba_sum = model_proba * weight
         else:
@@ -864,6 +940,11 @@ def build_walk_forward_fold_diagnostics(
         },
         "by_regime": by_regime,
         "models": model_predictions,
+        "model_group_diagnostics": _model_group_diagnostics(
+            validation_df,
+            model_probability_frames,
+            decision_threshold,
+        ),
     }
     return _json_safe(diagnostics)
 
@@ -1347,7 +1428,7 @@ def write_walk_forward_threshold_sweep(log_file, fold_number, sweep_summary):
         )
 
 
-def add_walk_forward_probabilities(data, feature_cols, fold_models, model_weights, metadata):
+def add_walk_forward_probabilities(data, feature_cols, fold_models, model_weights, metadata, direction_model_weights=None):
     from core import signal_engine
     from core.trend_filter import derive_trend_context
 
@@ -1375,6 +1456,7 @@ def add_walk_forward_probabilities(data, feature_cols, fold_models, model_weight
         model_weights,
         trend_biases=trend_biases,
         model_metadata=metadata,
+        direction_model_weights=direction_model_weights,
     )
     probability_frame = pd.DataFrame(avg_pred, columns=["short_prob", "long_prob"], index=predicted.index)
     predicted[["long_prob", "short_prob"]] = probability_frame[["long_prob", "short_prob"]]
@@ -1571,6 +1653,7 @@ def run_walk_forward_validation(log_file, context_backtester, metadata, feature_
             fold_models,
             config.MODEL_WEIGHTS,
             metadata,
+            direction_model_weights=getattr(config, "MODEL_DIRECTION_MODEL_WEIGHTS", {}),
         )
         probabilities_elapsed_sec = time.monotonic() - stage_started_at
         write_walk_forward_stage_timing(
@@ -1593,6 +1676,7 @@ def run_walk_forward_validation(log_file, context_backtester, metadata, feature_
             include_model_diagnostics=bool(
                 getattr(config, "MODEL_WALK_FORWARD_MODEL_DIAGNOSTICS", False)
             ),
+            direction_model_weights=getattr(config, "MODEL_DIRECTION_MODEL_WEIGHTS", {}),
         )
         diagnostics_elapsed_sec = time.monotonic() - stage_started_at
         write_walk_forward_stage_timing(
@@ -1710,6 +1794,14 @@ def run_walk_forward_validation(log_file, context_backtester, metadata, feature_
 
         failure_reason = walk_forward_fold_failure_reason(fold_summary)
         if failure_reason and walk_forward_fail_fast_enabled():
+            partial_summary = aggregate_backtest_summaries(fold_summaries)
+            partial_summary["failed"] = True
+            partial_summary["failure_reason"] = failure_reason
+            partial_summary["failed_fold"] = fold["fold"]
+            update_candidate_training_metadata(
+                walk_forward_failure_summary=partial_summary,
+                candidate_status="walk_forward_failed",
+            )
             with open(log_file, "a", encoding="utf-8") as file:
                 file.write(
                     "walk_forward_fail_fast "
@@ -1979,6 +2071,7 @@ def retrain_once(*, validate_backtest=None):
         if backup_dir and manifest:
             candidate_metadata_path = preserve_candidate_training_metadata(backup_dir)
             restore_backup(backup_dir, manifest)
+            remove_candidate_training_metadata()
         finished_at = utc_now_iso()
         state_updates = {
             "last_finished_at": finished_at,

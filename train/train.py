@@ -5,7 +5,7 @@ import numpy as np
 import joblib
 import lightgbm as lgb
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score, classification_report
+from sklearn.metrics import accuracy_score, average_precision_score, classification_report, roc_auc_score
 from config import config
 import os
 import xgboost as xgb
@@ -23,6 +23,10 @@ xgb_path = os.path.join(BASE_DIR, config.MODEL_PATHS.get("xgb_v1"))
 rf_path  = os.path.join(BASE_DIR, config.MODEL_PATHS.get("rf_v1"))
 feature_path = os.path.join(BASE_DIR, config.FEATURE_LIST_PATH)
 training_metadata_path = os.path.join(BASE_DIR, config.TRAINING_METADATA_PATH)
+candidate_training_metadata_path = os.path.join(
+    os.path.dirname(training_metadata_path),
+    "candidate_training_metadata.json",
+)
 
 
 TARGET_NO_TRADE = 0
@@ -72,6 +76,13 @@ def _label_timeout_as_trade():
     return _env_bool("MODEL_LABEL_TIMEOUT_AS_TRADE", config.MODEL_LABEL_TIMEOUT_AS_TRADE)
 
 
+def _label_timeout_weak_positive_as_trade():
+    return _env_bool(
+        "MODEL_LABEL_TIMEOUT_WEAK_POSITIVE_AS_TRADE",
+        getattr(config, "MODEL_LABEL_TIMEOUT_WEAK_POSITIVE_AS_TRADE", False),
+    )
+
+
 def _label_timeout_min_net_return():
     return float(os.getenv(
         "MODEL_LABEL_TIMEOUT_MIN_NET_RETURN",
@@ -83,6 +94,34 @@ def _label_timeout_max_mae_ratio():
     return float(os.getenv(
         "MODEL_LABEL_TIMEOUT_MAX_MAE_RATIO",
         str(config.MODEL_LABEL_TIMEOUT_MAX_MAE_RATIO),
+    ))
+
+
+def _label_long_trend_weak_tp_as_trade():
+    return _env_bool(
+        "MODEL_LABEL_LONG_TREND_WEAK_TP_AS_TRADE",
+        getattr(config, "MODEL_LABEL_LONG_TREND_WEAK_TP_AS_TRADE", False),
+    )
+
+
+def _label_long_trend_strong_max_exit_bars():
+    return int(os.getenv(
+        "MODEL_LABEL_LONG_TREND_STRONG_MAX_EXIT_BARS",
+        str(getattr(config, "MODEL_LABEL_LONG_TREND_STRONG_MAX_EXIT_BARS", 16)),
+    ))
+
+
+def _label_long_trend_strong_max_mae_ratio():
+    return float(os.getenv(
+        "MODEL_LABEL_LONG_TREND_STRONG_MAX_MAE_RATIO",
+        str(getattr(config, "MODEL_LABEL_LONG_TREND_STRONG_MAX_MAE_RATIO", 0.50)),
+    ))
+
+
+def _label_long_trend_strong_min_mfe_mae_ratio():
+    return float(os.getenv(
+        "MODEL_LABEL_LONG_TREND_STRONG_MIN_MFE_MAE_RATIO",
+        str(getattr(config, "MODEL_LABEL_LONG_TREND_STRONG_MIN_MFE_MAE_RATIO", 0.0)),
     ))
 
 
@@ -345,12 +384,43 @@ def _label_outcome_bucket(quality, *, timeout_as_trade, timeout_min_net_return, 
     return "TIMEOUT_WEAK_NEGATIVE" if timeout_as_trade else "TIMEOUT"
 
 
+def _long_trend_tp_quality_reject_reason(quality):
+    max_exit_bars = max(1, int(_label_long_trend_strong_max_exit_bars()))
+    max_mae_ratio = float(_label_long_trend_strong_max_mae_ratio())
+    min_mfe_mae_ratio = float(_label_long_trend_strong_min_mfe_mae_ratio())
+    exit_bars = int(quality.get("exit_bars") or 0)
+    mae_ratio = float(quality.get("mae_ratio", 0.0))
+    mfe_mae_ratio = float(quality.get("mfe_mae_ratio", 0.0))
+
+    if exit_bars > max_exit_bars:
+        return "long_trend_weak_tp_slow"
+    if max_mae_ratio > 0 and mae_ratio > max_mae_ratio:
+        return "long_trend_weak_tp_mae"
+    if min_mfe_mae_ratio > 0 and mfe_mae_ratio < min_mfe_mae_ratio:
+        return "long_trend_weak_tp_mfe_mae"
+    return None
+
+
+def _apply_directional_tp_quality(label_outcome, reject_reason, quality, *, direction, regime):
+    if reject_reason is not None or label_outcome != "TP":
+        return label_outcome, reject_reason
+    if str(direction or "").lower() != "long" or str(regime or "").lower() != "trend_long":
+        return label_outcome, reject_reason
+    weak_reason = _long_trend_tp_quality_reject_reason(quality)
+    if weak_reason is None:
+        return "TP_STRONG_LONG_TREND", None
+    if _label_long_trend_weak_tp_as_trade():
+        return "TP_WEAK_LONG_TREND", None
+    return "TP_WEAK_LONG_TREND", weak_reason
+
+
 def _label_reject_reason(
     quality,
     *,
     min_net_return,
     max_mae_ratio,
     timeout_as_trade,
+    timeout_weak_positive_as_trade,
     timeout_min_net_return,
     timeout_max_mae_ratio,
 ):
@@ -363,7 +433,7 @@ def _label_reject_reason(
             min_net_return=timeout_min_net_return,
             max_mae_ratio=timeout_max_mae_ratio,
         ):
-            return None
+            return None if timeout_weak_positive_as_trade else "timeout_weak_positive_not_trade"
         if float(quality.get("net_return", 0.0)) < timeout_min_net_return:
             return "timeout_weak_negative_net_return"
         if timeout_max_mae_ratio > 0 and float(quality.get("mae_ratio", 0.0)) > timeout_max_mae_ratio:
@@ -444,6 +514,33 @@ def summarize_label_quality(df):
     return _json_safe(summary)
 
 
+def _ignored_label_mask(df):
+    if "label_reject_reason" not in df:
+        return pd.Series(False, index=df.index, dtype=bool)
+    reasons = df["label_reject_reason"].fillna("").astype(str)
+    return reasons.eq("timeout_weak_positive_not_trade")
+
+
+def _build_label_filter_summary(raw_df, kept_df, ignored_mask, label_quality_summary):
+    raw_targets = raw_df["target"].astype(int).map(_target_direction)
+    kept_targets = kept_df["target"].astype(int).map(_target_direction)
+    ignored_df = raw_df.loc[ignored_mask].copy()
+    summary = {
+        "enabled": bool(ignored_mask.any()),
+        "raw_rows": int(len(raw_df)),
+        "kept_rows": int(len(kept_df)),
+        "blocked_rows": 0,
+        "ignored_rows": int(len(ignored_df)),
+        "raw_direction_counts": {str(k): int(v) for k, v in raw_targets.value_counts().to_dict().items()},
+        "kept_direction_counts": {str(k): int(v) for k, v in kept_targets.value_counts().to_dict().items()},
+        "ignored_direction_counts": _value_counts(ignored_df.get("label_direction")),
+        "ignored_outcome_counts": _value_counts(ignored_df.get("label_outcome")),
+        "ignored_reason_counts": _value_counts(ignored_df.get("label_reject_reason")),
+        "quality_summary": label_quality_summary,
+    }
+    return _json_safe(summary)
+
+
 def _direction_quality_enabled():
     return _env_bool(
         "MODEL_TRAIN_DIRECTION_QUALITY_MODELS",
@@ -507,6 +604,36 @@ def _direction_quality_calibration_use_sample_weight():
     )
 
 
+def _direction_quality_allow_inverse_calibration():
+    return _env_bool(
+        "MODEL_DIRECTION_QUALITY_ALLOW_INVERSE_CALIBRATION",
+        getattr(config, "MODEL_DIRECTION_QUALITY_ALLOW_INVERSE_CALIBRATION", True),
+    )
+
+
+def _direction_quality_inverse_calibration_directions():
+    raw = os.getenv("MODEL_DIRECTION_QUALITY_INVERSE_CALIBRATION_DIRECTIONS")
+    if raw is None:
+        raw_items = getattr(config, "MODEL_DIRECTION_QUALITY_INVERSE_CALIBRATION_DIRECTIONS", ["short"])
+    else:
+        raw_items = raw.split(",")
+    if isinstance(raw_items, str):
+        raw_items = raw_items.split(",")
+    return {
+        str(item).strip().lower()
+        for item in raw_items
+        if str(item).strip()
+    }
+
+
+def _direction_quality_allow_inverse_for_direction(direction, allowed_directions=None):
+    if not _direction_quality_allow_inverse_calibration():
+        return False
+    allowed = _direction_quality_inverse_calibration_directions() if allowed_directions is None else allowed_directions
+    direction_key = str(direction or "").strip().lower()
+    return "*" in allowed or "all" in allowed or direction_key in allowed
+
+
 def _direction_quality_regime_calibration_enabled():
     return _env_bool(
         "MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION",
@@ -538,8 +665,67 @@ def _direction_quality_regime_calibration_min_negatives():
 def _hard_negative_sample_weight_multiplier():
     return max(0.0, float(os.getenv(
         "MODEL_HARD_NEGATIVE_SAMPLE_WEIGHT_MULTIPLIER",
-        str(getattr(config, "MODEL_HARD_NEGATIVE_SAMPLE_WEIGHT_MULTIPLIER", 2.0)),
+        str(getattr(config, "MODEL_HARD_NEGATIVE_SAMPLE_WEIGHT_MULTIPLIER", 3.0)),
     )))
+
+
+def _parse_weight_multiplier_map(raw_value):
+    multipliers = {}
+    if isinstance(raw_value, dict):
+        items = raw_value.items()
+    else:
+        items = []
+        for item in str(raw_value or "").split(","):
+            item = item.strip()
+            if not item:
+                continue
+            if "=" in item:
+                key, value = item.split("=", 1)
+            else:
+                key, value = item.rsplit(":", 1)
+            items.append((key, value))
+
+    for key, value in items:
+        key_parts = tuple(part.strip().lower() for part in str(key).split(":") if part.strip())
+        if not key_parts:
+            continue
+        try:
+            multiplier = float(value)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(multiplier):
+            multipliers[key_parts] = max(0.0, multiplier)
+    return multipliers
+
+
+def _direction_trade_sample_weight_multipliers():
+    raw_value = os.getenv(
+        "MODEL_DIRECTION_TRADE_SAMPLE_WEIGHT_MULTIPLIERS",
+        getattr(config, "MODEL_DIRECTION_TRADE_SAMPLE_WEIGHT_MULTIPLIERS", {}),
+    )
+    return _parse_weight_multiplier_map(raw_value)
+
+
+def _direction_hard_negative_sample_weight_multipliers():
+    raw_value = os.getenv(
+        "MODEL_DIRECTION_HARD_NEGATIVE_SAMPLE_WEIGHT_MULTIPLIERS",
+        getattr(config, "MODEL_DIRECTION_HARD_NEGATIVE_SAMPLE_WEIGHT_MULTIPLIERS", {}),
+    )
+    return _parse_weight_multiplier_map(raw_value)
+
+
+def _direction_group_multiplier(direction, regime, multipliers):
+    direction = str(direction or "unknown").lower()
+    regime = str(regime or "unknown").lower()
+    return float(
+        multipliers.get((direction, regime), multipliers.get((direction,), 1.0))
+    )
+
+
+def _format_multiplier_key(key):
+    if isinstance(key, tuple):
+        return ":".join(str(part) for part in key)
+    return str(key)
 
 
 def infer_hard_negative_mask(y, sample_context=None):
@@ -565,8 +751,8 @@ def infer_hard_negative_mask(y, sample_context=None):
         .str.lower()
     )
     no_trade_mask = y.astype(int) == TARGET_NO_TRADE
-    hard_negative_mask = outcomes.isin({"SL", "TIMEOUT_WEAK_NEGATIVE"}) | reject_reasons.str.startswith(
-        ("outcome_sl", "timeout_weak_negative")
+    hard_negative_mask = outcomes.isin({"SL", "TIMEOUT_WEAK_NEGATIVE", "TP_WEAK_LONG_TREND"}) | reject_reasons.str.startswith(
+        ("outcome_sl", "timeout_weak_negative", "long_trend_weak_tp")
     )
     return (no_trade_mask & hard_negative_mask).astype(bool)
 
@@ -594,6 +780,7 @@ def create_labels(df, future_window=5, threshold=0.002, tradable_only=None, incl
         min_net_return = _label_min_net_return()
         max_mae_ratio = _label_max_mae_ratio()
         timeout_as_trade = _label_timeout_as_trade()
+        timeout_weak_positive_as_trade = _label_timeout_weak_positive_as_trade()
         timeout_min_net_return = _label_timeout_min_net_return()
         timeout_max_mae_ratio = _label_timeout_max_mae_ratio()
         cost_ratio = _round_trip_cost_ratio()
@@ -604,6 +791,7 @@ def create_labels(df, future_window=5, threshold=0.002, tradable_only=None, incl
             f"cost={cost_ratio:.2%}, min_net={min_net_return:.2%}, max_mae_ratio={max_mae_ratio:.2f}, "
             f"timeout_as_trade={timeout_as_trade}, timeout_min_net={timeout_min_net_return:.2%}, "
             f"timeout_max_mae_ratio={timeout_max_mae_ratio:.2f}, "
+            f"timeout_weak_positive_as_trade={timeout_weak_positive_as_trade}, "
             f"require_regime_allowed={_label_require_regime_allowed()}"
         )
 
@@ -684,6 +872,7 @@ def create_labels(df, future_window=5, threshold=0.002, tradable_only=None, incl
                 min_net_return=min_net_return,
                 max_mae_ratio=max_mae_ratio,
                 timeout_as_trade=timeout_as_trade,
+                timeout_weak_positive_as_trade=timeout_weak_positive_as_trade,
                 timeout_min_net_return=timeout_min_net_return,
                 timeout_max_mae_ratio=timeout_max_mae_ratio,
             )
@@ -692,6 +881,13 @@ def create_labels(df, future_window=5, threshold=0.002, tradable_only=None, incl
                 timeout_as_trade=timeout_as_trade,
                 timeout_min_net_return=timeout_min_net_return,
                 timeout_max_mae_ratio=timeout_max_mae_ratio,
+            )
+            label_outcome, reject_reason = _apply_directional_tp_quality(
+                label_outcome,
+                reject_reason,
+                quality,
+                direction=direction,
+                regime=base_record.get("label_regime"),
             )
             base_record.update({
                 "target": TARGET_TRADE if reject_reason is None else TARGET_NO_TRADE,
@@ -752,23 +948,24 @@ def create_labels(df, future_window=5, threshold=0.002, tradable_only=None, incl
     if tradable_only:
         log_info("⚠️ 二分类模式下 tradable_only filter 已集成到标签生成,跳过额外过滤")
 
+    raw_labeled_df = df.copy()
+    ignored_mask = _ignored_label_mask(raw_labeled_df)
+    if ignored_mask.any():
+        df = raw_labeled_df.loc[~ignored_mask].copy()
+        log_info(
+            "忽略灰区标签样本: "
+            f"rows={int(ignored_mask.sum())} "
+            f"reasons={_value_counts(raw_labeled_df.loc[ignored_mask].get('label_reject_reason'))}"
+        )
+
     label_quality_summary = summarize_label_quality(df)
     df.attrs["label_quality_summary"] = label_quality_summary
-    df.attrs["label_filter_summary"] = {
-        "enabled": False,
-        "raw_rows": int(len(df)),
-        "kept_rows": int(len(df)),
-        "blocked_rows": 0,
-        "raw_direction_counts": {
-            str(k): int(v)
-            for k, v in df["target"].astype(int).map(_target_direction).value_counts().to_dict().items()
-        },
-        "kept_direction_counts": {
-            str(k): int(v)
-            for k, v in df["target"].astype(int).map(_target_direction).value_counts().to_dict().items()
-        },
-        "quality_summary": label_quality_summary,
-    }
+    df.attrs["label_filter_summary"] = _build_label_filter_summary(
+        raw_labeled_df,
+        df,
+        ignored_mask,
+        label_quality_summary,
+    )
     return df
 
 def infer_sample_regimes(X, sample_context=None):
@@ -828,6 +1025,14 @@ def build_sample_weights(X, y, *, sample_context=None, recent_boost=None, min_we
             "method": "binary_target_regime_direction_hard_negative_with_recency",
             "rows": 0,
             "hard_negative_multiplier": float(_hard_negative_sample_weight_multiplier()),
+            "direction_trade_multipliers": {
+                _format_multiplier_key(k): float(v)
+                for k, v in _direction_trade_sample_weight_multipliers().items()
+            },
+            "direction_hard_negative_multipliers": {
+                _format_multiplier_key(k): float(v)
+                for k, v in _direction_hard_negative_sample_weight_multipliers().items()
+            },
             "hard_negative_rows": 0,
         }
 
@@ -844,6 +1049,8 @@ def build_sample_weights(X, y, *, sample_context=None, recent_boost=None, min_we
     trade_multiplier = max(0.0, float(config.MODEL_TRADE_SAMPLE_WEIGHT_MULTIPLIER))
     no_trade_multiplier = max(0.0, float(config.MODEL_NO_TRADE_SAMPLE_WEIGHT_MULTIPLIER))
     hard_negative_multiplier = _hard_negative_sample_weight_multiplier()
+    direction_trade_multipliers = _direction_trade_sample_weight_multipliers()
+    direction_hard_negative_multipliers = _direction_hard_negative_sample_weight_multipliers()
 
     target_kinds = y.map(_target_direction)
     regimes = infer_sample_regimes(X, sample_context=sample_context)
@@ -877,8 +1084,38 @@ def build_sample_weights(X, y, *, sample_context=None, recent_boost=None, min_we
         recency_weights = np.linspace(1.0, 1.0 + recent_boost, len(base_weights))
     weights = pd.Series(base_weights.to_numpy() * recency_weights, index=y.index, name="sample_weight")
     hard_negative_mask = infer_hard_negative_mask(y, sample_context=sample_context)
+    trade_mask = y.astype(int) == TARGET_TRADE
+    direction_trade_factors = pd.Series(
+        [
+            _direction_group_multiplier(row.direction, row.regime, direction_trade_multipliers)
+            for row in group_df.itertuples()
+        ],
+        index=y.index,
+        dtype=float,
+    )
+    direction_hard_negative_factors = pd.Series(
+        [
+            _direction_group_multiplier(row.direction, row.regime, direction_hard_negative_multipliers)
+            for row in group_df.itertuples()
+        ],
+        index=y.index,
+        dtype=float,
+    )
+    if direction_trade_multipliers:
+        trade_factor_mask = trade_mask & (direction_trade_factors != 1.0)
+        if trade_factor_mask.any():
+            weights.loc[trade_factor_mask] = (
+                weights.loc[trade_factor_mask] * direction_trade_factors.loc[trade_factor_mask]
+            )
     if hard_negative_multiplier != 1.0 and hard_negative_mask.any():
         weights.loc[hard_negative_mask] = weights.loc[hard_negative_mask] * hard_negative_multiplier
+    if direction_hard_negative_multipliers:
+        hard_negative_factor_mask = hard_negative_mask & (direction_hard_negative_factors != 1.0)
+        if hard_negative_factor_mask.any():
+            weights.loc[hard_negative_factor_mask] = (
+                weights.loc[hard_negative_factor_mask]
+                * direction_hard_negative_factors.loc[hard_negative_factor_mask]
+            )
 
     if min_weight > 0 or max_weight is not None:
         weights = weights.clip(lower=min_weight, upper=max_weight)
@@ -894,6 +1131,28 @@ def build_sample_weights(X, y, *, sample_context=None, recent_boost=None, min_we
     group_weight_total = weighted_groups.groupby("group")["sample_weight"].sum()
     regime_direction_counts = group_df.groupby(["target", "regime", "direction"]).size()
 
+    def multiplier_effect_summary(row_mask, factors):
+        affected_mask = row_mask & (factors != 1.0)
+        if not affected_mask.any():
+            return {}
+        affected = group_df.loc[affected_mask].assign(
+            multiplier=factors.loc[affected_mask],
+            sample_weight=weights.loc[affected_mask],
+        )
+        summary_by_group = {}
+        for (direction, regime, multiplier), frame in affected.groupby(
+            ["direction", "regime", "multiplier"],
+            sort=True,
+        ):
+            key = f"{direction}:{regime}"
+            summary_by_group[key] = {
+                "multiplier": float(multiplier),
+                "rows": int(len(frame)),
+                "weight_mean": float(frame["sample_weight"].mean()),
+                "weight_total": float(frame["sample_weight"].sum()),
+            }
+        return summary_by_group
+
     summary = {
         "enabled": True,
         "method": "binary_target_regime_direction_hard_negative_with_recency",
@@ -902,6 +1161,19 @@ def build_sample_weights(X, y, *, sample_context=None, recent_boost=None, min_we
         "trade_multiplier": float(trade_multiplier),
         "no_trade_multiplier": float(no_trade_multiplier),
         "hard_negative_multiplier": float(hard_negative_multiplier),
+        "direction_trade_multipliers": {
+            _format_multiplier_key(k): float(v)
+            for k, v in direction_trade_multipliers.items()
+        },
+        "direction_hard_negative_multipliers": {
+            _format_multiplier_key(k): float(v)
+            for k, v in direction_hard_negative_multipliers.items()
+        },
+        "direction_trade_multiplier_effects": multiplier_effect_summary(trade_mask, direction_trade_factors),
+        "direction_hard_negative_multiplier_effects": multiplier_effect_summary(
+            hard_negative_mask,
+            direction_hard_negative_factors,
+        ),
         "hard_negative_rows": int(hard_negative_mask.sum()),
         "hard_negative_weight_mean": float(hard_negative_weights.mean()) if len(hard_negative_weights) else 0.0,
         "hard_negative_weight_total": float(hard_negative_weights.sum()) if len(hard_negative_weights) else 0.0,
@@ -966,6 +1238,13 @@ def _validation_gate_min_trade_recall():
     )))
 
 
+def _validation_gate_min_trade_precision():
+    return max(0.0, float(os.getenv(
+        "MODEL_RETRAIN_MIN_VALIDATION_TRADE_PRECISION",
+        str(getattr(config, "MODEL_RETRAIN_MIN_VALIDATION_TRADE_PRECISION", 0.25)),
+    )))
+
+
 def _validation_gate_min_predicted_trades():
     return max(0, int(os.getenv(
         "MODEL_RETRAIN_MIN_VALIDATION_PREDICTED_TRADES",
@@ -974,13 +1253,62 @@ def _validation_gate_min_predicted_trades():
 
 
 def _validation_gate_threshold():
-    try:
-        threshold = float(getattr(config, "MODEL_WALK_FORWARD_DIAGNOSTIC_THRESHOLD", 0.35))
-    except (TypeError, ValueError):
-        threshold = 0.35
+    raw_value = os.getenv(
+        "MODEL_RETRAIN_VALIDATION_GATE_THRESHOLD",
+        str(getattr(config, "MODEL_RETRAIN_VALIDATION_GATE_THRESHOLD", "auto")),
+    )
+    if str(raw_value).strip().lower() in {"", "auto"}:
+        try:
+            diagnostic_threshold = float(getattr(config, "MODEL_WALK_FORWARD_DIAGNOSTIC_THRESHOLD", 0.35))
+        except (TypeError, ValueError):
+            diagnostic_threshold = 0.35
+        try:
+            entry_threshold = min(float(config.THRESHOLD_LONG), float(config.THRESHOLD_SHORT))
+        except (TypeError, ValueError):
+            entry_threshold = diagnostic_threshold
+        threshold = max(diagnostic_threshold, entry_threshold)
+    else:
+        try:
+            threshold = float(raw_value)
+        except (TypeError, ValueError):
+            threshold = 0.35
     if not np.isfinite(threshold):
         threshold = 0.35
     return max(0.0, min(1.0, threshold))
+
+
+def _validation_gate_threshold_sweep_values(current_threshold):
+    raw_value = os.getenv(
+        "MODEL_RETRAIN_VALIDATION_GATE_THRESHOLD_SWEEP",
+        str(getattr(config, "MODEL_RETRAIN_VALIDATION_GATE_THRESHOLD_SWEEP", "")),
+    )
+    values = [float(current_threshold)]
+    for item in str(raw_value or "").replace("|", ",").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            value = float(item)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(value):
+            values.append(max(0.0, min(1.0, value)))
+    return sorted(set(round(float(value), 6) for value in values))
+
+
+def _validation_gate_target_precision():
+    default_precision = _validation_gate_min_trade_precision()
+    return max(0.0, float(os.getenv(
+        "MODEL_RETRAIN_VALIDATION_GATE_TARGET_PRECISION",
+        str(getattr(config, "MODEL_RETRAIN_VALIDATION_GATE_TARGET_PRECISION", default_precision)),
+    )))
+
+
+def _validation_model_metadata(label_quality_summary=None):
+    metadata = {"target_schema": "binary_trade_quality"}
+    if label_quality_summary:
+        metadata["label_quality_summary"] = label_quality_summary
+    return metadata
 
 
 def _trade_probability_from_model(model, X):
@@ -1012,42 +1340,569 @@ def _binary_metrics_for_gate(y_true, y_pred):
     }
 
 
-def build_validation_gate_summary(models, model_weights, X_validation, y_validation, *, threshold=None):
+def _threshold_sweep_direction_metrics(y_true, trade_probability, threshold, sample_context=None):
+    if sample_context is None or "label_direction" not in pd.DataFrame(sample_context):
+        return {}
+    y_true = pd.Series(y_true).astype(int)
+    probability = pd.Series(trade_probability, index=y_true.index, dtype=float)
+    y_pred = pd.Series((probability >= float(threshold)).astype(int), index=y_true.index)
+    context = pd.DataFrame(sample_context).reindex(y_true.index)
+    direction_series = (
+        context["label_direction"]
+        .fillna("unknown")
+        .astype(str)
+        .str.lower()
+    )
+    metrics = {}
+    for direction in sorted(direction_series.unique()):
+        mask = direction_series == direction
+        if not bool(mask.any()):
+            continue
+        item = _binary_metrics_for_gate(y_true.loc[mask], y_pred.loc[mask])
+        item.update({
+            "rows": int(mask.sum()),
+            "trade_rows": int((y_true.loc[mask] == TARGET_TRADE).sum()),
+            "predicted_trade_rows": int((y_pred.loc[mask] == TARGET_TRADE).sum()),
+        })
+        metrics[str(direction)] = item
+    return _json_safe(metrics)
+
+
+def _validation_gate_threshold_sweep(y_true, trade_probability, threshold, sample_context=None):
+    y_true = pd.Series(y_true).astype(int)
+    probability = pd.Series(trade_probability, index=y_true.index, dtype=float)
+    target_precision = _validation_gate_target_precision()
+    candidates = []
+    for candidate_threshold in _validation_gate_threshold_sweep_values(threshold):
+        y_pred = pd.Series((probability >= candidate_threshold).astype(int), index=y_true.index)
+        metrics = _binary_metrics_for_gate(y_true, y_pred)
+        predicted_trade_rows = int((y_pred == TARGET_TRADE).sum())
+        item = {
+            "threshold": float(candidate_threshold),
+            "predicted_trade_rows": predicted_trade_rows,
+            "direction_metrics": _threshold_sweep_direction_metrics(
+                y_true,
+                probability,
+                candidate_threshold,
+                sample_context=sample_context,
+            ),
+            **metrics,
+        }
+        candidates.append(item)
+
+    viable = [
+        item for item in candidates
+        if (
+            item.get("predicted_trade_rows", 0) >= _validation_gate_min_predicted_trades()
+            and item.get("trade_precision", 0.0) >= target_precision
+        )
+    ]
+    recommended = None
+    if viable:
+        recommended = sorted(
+            viable,
+            key=lambda item: (
+                -float(item.get("trade_recall", 0.0)),
+                float(item.get("threshold", 1.0)),
+            ),
+        )[0]
+
+    return _json_safe({
+        "target_precision": float(target_precision),
+        "candidates": candidates,
+        "recommended": recommended,
+    })
+
+
+def _validation_gate_model_threshold_sweeps(y_true, model_probabilities, threshold, sample_context=None):
+    if not model_probabilities:
+        return {}
+    return _json_safe({
+        str(name): _validation_gate_threshold_sweep(
+            y_true,
+            probabilities,
+            threshold,
+            sample_context=sample_context,
+        )
+        for name, probabilities in model_probabilities.items()
+    })
+
+
+def _top_probability_bucket_precision(y_true, trade_probability):
+    y_true = pd.Series(y_true).astype(int)
+    probability = pd.Series(trade_probability, index=y_true.index, dtype=float)
+    ranked = (
+        pd.DataFrame({"target": y_true, "probability": probability}, index=y_true.index)
+        .sort_values("probability", ascending=False, kind="mergesort")
+    )
+    rows = int(len(ranked))
+    trade_rows = int((ranked["target"] == TARGET_TRADE).sum())
+    base_rate = float(trade_rows / rows) if rows else 0.0
+    buckets = {}
+    for fraction in (0.01, 0.05, 0.10):
+        bucket_rows = min(rows, max(1, int(np.ceil(rows * fraction)))) if rows else 0
+        bucket = ranked.head(bucket_rows)
+        bucket_trade_rows = int((bucket["target"] == TARGET_TRADE).sum())
+        precision = float(bucket_trade_rows / bucket_rows) if bucket_rows else 0.0
+        buckets[f"top_{int(round(fraction * 100))}pct"] = {
+            "fraction": float(fraction),
+            "rows": int(bucket_rows),
+            "trade_rows": bucket_trade_rows,
+            "precision": precision,
+            "recall": float(bucket_trade_rows / trade_rows) if trade_rows else 0.0,
+            "lift_vs_base_rate": float(precision / base_rate) if base_rate > 0 else None,
+            "min_probability": float(bucket["probability"].min()) if bucket_rows else None,
+            "max_probability": float(bucket["probability"].max()) if bucket_rows else None,
+        }
+    return buckets
+
+
+def _probability_separability_frame_summary(frame):
+    if frame is None or len(frame) == 0:
+        return {
+            "rows": 0,
+            "trade_rows": 0,
+            "no_trade_rows": 0,
+            "trade_rate": 0.0,
+            "roc_auc": None,
+            "average_precision": None,
+            "ranking_signal": "unavailable",
+            "trade_probability_quantiles": {},
+            "no_trade_probability_quantiles": {},
+            "top_bucket_precision": {},
+        }
+
+    y_true = frame["target"].astype(int)
+    probability = pd.to_numeric(frame["probability"], errors="coerce")
+    rows = int(len(frame))
+    trade_mask = y_true == TARGET_TRADE
+    trade_rows = int(trade_mask.sum())
+    no_trade_rows = int(rows - trade_rows)
+    trade_probability = probability.loc[trade_mask]
+    no_trade_probability = probability.loc[~trade_mask]
+    trade_mean = float(trade_probability.mean()) if trade_rows else None
+    no_trade_mean = float(no_trade_probability.mean()) if no_trade_rows else None
+    trade_median = float(trade_probability.median()) if trade_rows else None
+    no_trade_median = float(no_trade_probability.median()) if no_trade_rows else None
+
+    roc_auc = None
+    average_precision = None
+    ranking_signal = "unavailable"
+    if trade_rows > 0 and no_trade_rows > 0:
+        roc_auc = float(roc_auc_score(y_true, probability))
+        average_precision = float(average_precision_score(y_true, probability))
+        if roc_auc > 0.5:
+            ranking_signal = "positive"
+        elif roc_auc < 0.5:
+            ranking_signal = "inverted"
+        else:
+            ranking_signal = "flat"
+
+    return {
+        "rows": rows,
+        "trade_rows": trade_rows,
+        "no_trade_rows": no_trade_rows,
+        "trade_rate": float(trade_rows / rows) if rows else 0.0,
+        "trade_probability_mean": trade_mean,
+        "no_trade_probability_mean": no_trade_mean,
+        "mean_gap": (
+            float(trade_mean - no_trade_mean)
+            if trade_mean is not None and no_trade_mean is not None
+            else None
+        ),
+        "trade_probability_median": trade_median,
+        "no_trade_probability_median": no_trade_median,
+        "median_gap": (
+            float(trade_median - no_trade_median)
+            if trade_median is not None and no_trade_median is not None
+            else None
+        ),
+        "roc_auc": roc_auc,
+        "average_precision": average_precision,
+        "ranking_signal": ranking_signal,
+        "trade_probability_quantiles": _series_quantiles(trade_probability),
+        "no_trade_probability_quantiles": _series_quantiles(no_trade_probability),
+        "top_bucket_precision": _top_probability_bucket_precision(y_true, probability),
+    }
+
+
+def _probability_separability_diagnostics(y_true, trade_probability, sample_context=None):
+    y_true = pd.Series(y_true).astype(int)
+    probability = pd.Series(trade_probability, index=y_true.index, dtype=float)
+    finite_mask = probability.replace([np.inf, -np.inf], np.nan).notna()
+    y_true = y_true.loc[finite_mask]
+    probability = probability.loc[finite_mask]
+    diagnostic_df = pd.DataFrame({
+        "target": y_true,
+        "probability": probability,
+    }, index=y_true.index)
+
+    summary = _probability_separability_frame_summary(diagnostic_df)
+    summary["dropped_non_finite_rows"] = int((~finite_mask).sum())
+    summary["probability_scale"] = "execution_probability"
+    summary["by_direction"] = {}
+    summary["by_direction_regime"] = {}
+
+    if sample_context is None or len(diagnostic_df) == 0:
+        return _json_safe(summary)
+
+    context = pd.DataFrame(sample_context).reindex(diagnostic_df.index)
+
+    def context_series(name, default="unknown"):
+        if name not in context:
+            return pd.Series(default, index=diagnostic_df.index, dtype="object")
+        return context[name].reindex(diagnostic_df.index).fillna(default).astype(str).str.lower()
+
+    diagnostic_df["label_direction"] = context_series("label_direction", "unknown")
+    diagnostic_df["label_regime"] = context_series("label_regime", "unknown")
+
+    def summarize_group(group_cols):
+        items = {}
+        for key, group in diagnostic_df.groupby(group_cols, dropna=False, sort=True):
+            if not isinstance(key, tuple):
+                key = (key,)
+            label = ":".join(str(part) for part in key)
+            items[label] = _probability_separability_frame_summary(group)
+        return items
+
+    summary["by_direction"] = summarize_group(["label_direction"])
+    summary["by_direction_regime"] = summarize_group(["label_direction", "label_regime"])
+    return _json_safe(summary)
+
+
+def _model_probability_separability_diagnostics(y_true, model_probabilities, sample_context=None):
+    if not model_probabilities:
+        return {}
+    return _json_safe({
+        str(name): _probability_separability_diagnostics(
+            y_true,
+            probabilities,
+            sample_context=sample_context,
+        )
+        for name, probabilities in model_probabilities.items()
+    })
+
+
+def _top_bucket_item(separability_item, bucket_name="top_10pct"):
+    if not isinstance(separability_item, dict):
+        return {}
+    buckets = separability_item.get("top_bucket_precision") or {}
+    item = buckets.get(bucket_name) or {}
+    return item if isinstance(item, dict) else {}
+
+
+def _separability_metric_snapshot(item):
+    item = item or {}
+    top10 = _top_bucket_item(item, "top_10pct")
+    return {
+        "rows": int(item.get("rows", 0) or 0),
+        "trade_rows": int(item.get("trade_rows", 0) or 0),
+        "trade_rate": float(item.get("trade_rate", 0.0) or 0.0),
+        "roc_auc": item.get("roc_auc"),
+        "average_precision": item.get("average_precision"),
+        "ranking_signal": item.get("ranking_signal", "unknown"),
+        "mean_gap": item.get("mean_gap"),
+        "top_10pct_precision": top10.get("precision"),
+        "top_10pct_lift_vs_base_rate": top10.get("lift_vs_base_rate"),
+        "top_10pct_rows": int(top10.get("rows", 0) or 0),
+        "top_10pct_trade_rows": int(top10.get("trade_rows", 0) or 0),
+    }
+
+
+def _model_direction_separability_candidates(direction, model_separability):
+    candidates = []
+    for model_name, model_item in (model_separability or {}).items():
+        direction_item = (model_item.get("by_direction") or {}).get(direction, {})
+        if not direction_item:
+            continue
+        snapshot = _separability_metric_snapshot(direction_item)
+        snapshot["model"] = str(model_name)
+        candidates.append(snapshot)
+
+    def sort_key(item):
+        return (
+            float(item.get("top_10pct_precision") or 0.0),
+            float(item.get("average_precision") or 0.0),
+            float(item.get("roc_auc") or 0.0),
+        )
+
+    return sorted(candidates, key=sort_key, reverse=True)
+
+
+def _direction_separability_recommendation(direction, ensemble_item, model_candidates, target_precision):
+    ensemble_snapshot = _separability_metric_snapshot(ensemble_item)
+    trade_rows = int(ensemble_snapshot.get("trade_rows", 0))
+    trade_rate = float(ensemble_snapshot.get("trade_rate", 0.0) or 0.0)
+    auc = ensemble_snapshot.get("roc_auc")
+    top10_precision = ensemble_snapshot.get("top_10pct_precision")
+    top10_lift = ensemble_snapshot.get("top_10pct_lift_vs_base_rate")
+    reason_codes = []
+
+    if trade_rows <= 0:
+        reason_codes.append("no_validation_trade_rows")
+    if auc is not None and float(auc) < 0.5:
+        reason_codes.append("inverted_probability_ranking")
+    if top10_precision is not None and float(top10_precision) < float(target_precision):
+        reason_codes.append("top_bucket_precision_below_target")
+    if top10_lift is not None and float(top10_lift) <= 1.05:
+        reason_codes.append("top_bucket_not_better_than_base_rate")
+
+    best_model = model_candidates[0] if model_candidates else None
+    recommended_model_weights = None
+    action = "keep_current_direction_ensemble"
+    status = "usable"
+
+    if trade_rows <= 0:
+        status = "unavailable"
+        action = "ignore_direction_until_validation_has_positive_samples"
+    elif "inverted_probability_ranking" in reason_codes:
+        status = "unusable"
+        action = "rework_direction_label_or_block_direction"
+    elif (
+        top10_precision is not None
+        and float(top10_precision) < float(target_precision)
+    ):
+        status = "weak"
+        action = "keep_direction_blocked_until_quality_improves"
+
+    if best_model is not None:
+        best_top10 = float(best_model.get("top_10pct_precision") or 0.0)
+        ensemble_top10 = float(top10_precision or 0.0)
+        best_lift = float(best_model.get("top_10pct_lift_vs_base_rate") or 0.0)
+        best_auc = best_model.get("roc_auc")
+        if (
+            best_top10 > ensemble_top10
+            and best_lift > max(1.05, float(top10_lift or 0.0))
+            and (best_auc is None or float(best_auc) >= 0.5)
+        ):
+            recommended_model_weights = {str(best_model["model"]): 1.0}
+            if best_top10 >= float(target_precision):
+                status = "model_specific_candidate"
+                action = "try_direction_specific_model_weight"
+            elif status != "unusable":
+                status = "weak_model_specific_candidate"
+                action = "try_direction_specific_model_weight_as_diagnostic_only"
+            reason_codes.append("single_model_beats_ensemble_top_bucket")
+
+    return _json_safe({
+        "direction": str(direction),
+        "status": status,
+        "action": action,
+        "reason_codes": sorted(set(reason_codes)),
+        "ensemble": ensemble_snapshot,
+        "best_model": best_model,
+        "model_candidates": model_candidates,
+        "recommended_model_weights": recommended_model_weights,
+    })
+
+
+def _validation_gate_diagnostic_recommendations(separability, model_separability, threshold_sweep):
+    target_precision = _validation_gate_target_precision()
+    recommendations = {
+        "target_precision": float(target_precision),
+        "do_not_relax_threshold": False,
+        "reason_codes": [],
+        "directions": {},
+        "recommended_direction_model_weights": {},
+        "recommended_env_overrides": {},
+    }
+    if not isinstance(separability, dict):
+        return recommendations
+
+    top10 = _top_bucket_item(separability, "top_10pct")
+    top10_precision = top10.get("precision")
+    if (
+        threshold_sweep
+        and not (threshold_sweep.get("recommended") if isinstance(threshold_sweep, dict) else None)
+        and top10_precision is not None
+        and float(top10_precision) < float(target_precision)
+    ):
+        recommendations["do_not_relax_threshold"] = True
+        recommendations["reason_codes"].append("no_threshold_reaches_target_precision")
+
+    by_direction = separability.get("by_direction") or {}
+    for direction in ("long", "short"):
+        direction_item = by_direction.get(direction)
+        if not direction_item:
+            continue
+        model_candidates = _model_direction_separability_candidates(direction, model_separability)
+        direction_recommendation = _direction_separability_recommendation(
+            direction,
+            direction_item,
+            model_candidates,
+            target_precision,
+        )
+        recommendations["directions"][direction] = direction_recommendation
+        model_weights = direction_recommendation.get("recommended_model_weights")
+        if model_weights:
+            recommendations["recommended_direction_model_weights"][direction] = model_weights
+
+    if recommendations["recommended_direction_model_weights"]:
+        env_parts = []
+        for direction, weights in sorted(recommendations["recommended_direction_model_weights"].items()):
+            weight_expr = "|".join(
+                f"{model_name}:{weight}"
+                for model_name, weight in sorted(weights.items())
+            )
+            env_parts.append(f"{direction}={weight_expr}")
+        recommendations["recommended_env_overrides"]["MODEL_DIRECTION_MODEL_WEIGHTS"] = ",".join(env_parts)
+
+    recommendations["reason_codes"] = sorted(set(recommendations["reason_codes"]))
+    return _json_safe(recommendations)
+
+
+def _prediction_group_diagnostics(y_true, y_pred, trade_probability, sample_context=None):
+    if sample_context is None or len(y_true) == 0:
+        return {}
+
+    y_true = pd.Series(y_true).astype(int)
+    y_pred = pd.Series(y_pred).astype(int).reindex(y_true.index)
+    trade_probability = pd.Series(trade_probability, index=y_true.index, dtype=float)
+    context = pd.DataFrame(sample_context).reindex(y_true.index)
+
+    def context_series(name, default="unknown"):
+        if name not in context:
+            return pd.Series(default, index=y_true.index, dtype="object")
+        return context[name].reindex(y_true.index).fillna(default).astype(str)
+
+    diagnostic_df = pd.DataFrame({
+        "actual": y_true.map(_target_direction),
+        "predicted": y_pred.map(_target_direction),
+        "probability": trade_probability,
+        "label_direction": context_series("label_direction", "unknown"),
+        "label_regime": context_series("label_regime", "unknown"),
+        "label_outcome": context_series("label_outcome", "unknown"),
+        "label_reject_reason": context_series("label_reject_reason", "unknown"),
+    }, index=y_true.index)
+    diagnostic_df["error_type"] = "tn"
+    diagnostic_df.loc[(y_true == TARGET_TRADE) & (y_pred == TARGET_TRADE), "error_type"] = "tp"
+    diagnostic_df.loc[(y_true == TARGET_NO_TRADE) & (y_pred == TARGET_TRADE), "error_type"] = "fp"
+    diagnostic_df.loc[(y_true == TARGET_TRADE) & (y_pred == TARGET_NO_TRADE), "error_type"] = "fn"
+
+    def summarize_group(group_cols):
+        items = {}
+        for key, group in diagnostic_df.groupby(group_cols, dropna=False, sort=True):
+            if not isinstance(key, tuple):
+                key = (key,)
+            label = ":".join(str(part) for part in key)
+            counts = _value_counts(group["error_type"])
+            items[label] = {
+                "rows": int(len(group)),
+                "actual_trade_rows": int((group["actual"] == "trade").sum()),
+                "predicted_trade_rows": int((group["predicted"] == "trade").sum()),
+                "tp": int(counts.get("tp", 0)),
+                "fp": int(counts.get("fp", 0)),
+                "fn": int(counts.get("fn", 0)),
+                "tn": int(counts.get("tn", 0)),
+                "probability_quantiles": _series_quantiles(group["probability"]),
+            }
+        return items
+
+    fp_df = diagnostic_df[diagnostic_df["error_type"] == "fp"]
+    fn_df = diagnostic_df[diagnostic_df["error_type"] == "fn"]
+    return _json_safe({
+        "by_direction": summarize_group(["label_direction"]),
+        "by_regime": summarize_group(["label_regime"]),
+        "by_direction_regime": summarize_group(["label_direction", "label_regime"]),
+        "false_positive_outcome_counts": _value_counts(fp_df["label_outcome"]),
+        "false_positive_reject_reason_counts": _value_counts(fp_df["label_reject_reason"]),
+        "false_positive_probability_quantiles": _series_quantiles(fp_df["probability"]),
+        "false_negative_direction_counts": _value_counts(fn_df["label_direction"]),
+        "false_negative_regime_counts": _value_counts(fn_df["label_regime"]),
+        "false_negative_probability_quantiles": _series_quantiles(fn_df["probability"]),
+    })
+
+
+def _model_probability_group_diagnostics(y_true, model_probabilities, threshold, sample_context=None):
+    if sample_context is None or not model_probabilities:
+        return {}
+
+    y_true = pd.Series(y_true).astype(int)
+    diagnostics = {}
+    for name, probabilities in model_probabilities.items():
+        probs = pd.Series(probabilities, index=y_true.index, dtype=float)
+        preds = (probs >= float(threshold)).astype(int)
+        diagnostics[str(name)] = _prediction_group_diagnostics(
+            y_true,
+            preds,
+            probs,
+            sample_context=sample_context,
+        )
+    return _json_safe(diagnostics)
+
+
+def _trend_biases_from_features(X, sample_context=None):
+    X = pd.DataFrame(X)
+    if sample_context is not None and "label_direction" in sample_context:
+        return (
+            pd.Series(sample_context["label_direction"])
+            .reindex(X.index)
+            .fillna("neutral")
+            .astype(str)
+            .str.lower()
+            .replace({"none": "neutral", "unknown": "neutral"})
+            .tolist()
+        )
+    if "trend_bias_num" in X:
+        trend_bias = pd.to_numeric(X["trend_bias_num"], errors="coerce").fillna(0.0).astype(float)
+        return np.where(trend_bias > 0.0, "long", np.where(trend_bias < 0.0, "short", "neutral")).tolist()
+    return ["neutral"] * len(X)
+
+
+def build_validation_gate_summary(
+    models,
+    model_weights,
+    X_validation,
+    y_validation,
+    *,
+    threshold=None,
+    sample_context=None,
+    direction_model_weights=None,
+    label_quality_summary=None,
+):
     threshold = _validation_gate_threshold() if threshold is None else max(0.0, min(1.0, float(threshold)))
     X_validation = pd.DataFrame(X_validation)
     y_validation = pd.Series(y_validation).astype(int)
-    weighted_probability = np.zeros(len(X_validation), dtype=float)
-    used_weight_total = 0.0
+    trend_biases = _trend_biases_from_features(X_validation, sample_context=sample_context)
     model_summaries = {}
+    model_trade_probabilities = {}
+    from core import signal_engine
+    model_metadata = _validation_model_metadata(label_quality_summary)
 
     for name, model in models.items():
-        try:
-            weight = float(model_weights.get(name, 1.0))
-        except (TypeError, ValueError):
-            weight = 1.0
-        if weight <= 0:
-            continue
-        trade_probability = _trade_probability_from_model(model, X_validation)
-        trade_probability = np.nan_to_num(trade_probability, nan=0.0, posinf=1.0, neginf=0.0)
-        trade_probability = np.clip(trade_probability, 0.0, 1.0)
-        weighted_probability += trade_probability * weight
-        used_weight_total += weight
+        directional_probability = signal_engine.weighted_predict_proba_batch(
+            {name: model},
+            X_validation,
+            {name: 1.0},
+            trend_biases=trend_biases,
+            model_metadata=model_metadata,
+        )
+        trade_probability = np.max(directional_probability, axis=1)
+        model_trade_probabilities[name] = pd.Series(trade_probability, index=y_validation.index)
         model_pred = pd.Series((trade_probability >= threshold).astype(int), index=y_validation.index)
         model_summaries[name] = {
-            "weight": float(weight),
+            "weight": float(model_weights.get(name, 1.0)),
             "predicted_trade_rows": int((model_pred == TARGET_TRADE).sum()),
             "trade_probability_mean": float(trade_probability.mean()) if len(trade_probability) else 0.0,
             **_binary_metrics_for_gate(y_validation, model_pred),
         }
 
-    if used_weight_total > 0:
-        weighted_probability = weighted_probability / used_weight_total
+    directional_probability = signal_engine.weighted_predict_proba_batch(
+        models,
+        X_validation,
+        model_weights,
+        trend_biases=trend_biases,
+        model_metadata=model_metadata,
+        direction_model_weights=direction_model_weights,
+    )
+    weighted_probability = np.max(directional_probability, axis=1)
     y_pred = pd.Series((weighted_probability >= threshold).astype(int), index=y_validation.index)
     trade_rows = int((y_validation == TARGET_TRADE).sum())
     predicted_trade_rows = int((y_pred == TARGET_TRADE).sum())
     summary = {
         "enabled": bool(_validation_gate_enabled()),
         "decision_threshold": float(threshold),
+        "direction_model_weights": _json_safe(direction_model_weights or {}),
         "rows": int(len(y_validation)),
         "trade_rows": trade_rows,
         "no_trade_rows": int(len(y_validation) - trade_rows),
@@ -1061,6 +1916,45 @@ def build_validation_gate_summary(models, model_weights, X_validation, y_validat
         "model_summaries": model_summaries,
         **_binary_metrics_for_gate(y_validation, y_pred),
     }
+    summary["group_diagnostics"] = _prediction_group_diagnostics(
+        y_validation,
+        y_pred,
+        weighted_probability,
+        sample_context=sample_context,
+    )
+    summary["model_group_diagnostics"] = _model_probability_group_diagnostics(
+        y_validation,
+        model_trade_probabilities,
+        threshold,
+        sample_context=sample_context,
+    )
+    summary["threshold_sweep"] = _validation_gate_threshold_sweep(
+        y_validation,
+        weighted_probability,
+        threshold,
+        sample_context=sample_context,
+    )
+    summary["model_threshold_sweeps"] = _validation_gate_model_threshold_sweeps(
+        y_validation,
+        model_trade_probabilities,
+        threshold,
+        sample_context=sample_context,
+    )
+    summary["separability_diagnostics"] = _probability_separability_diagnostics(
+        y_validation,
+        weighted_probability,
+        sample_context=sample_context,
+    )
+    summary["model_separability_diagnostics"] = _model_probability_separability_diagnostics(
+        y_validation,
+        model_trade_probabilities,
+        sample_context=sample_context,
+    )
+    summary["diagnostic_recommendations"] = _validation_gate_diagnostic_recommendations(
+        summary["separability_diagnostics"],
+        summary["model_separability_diagnostics"],
+        summary["threshold_sweep"],
+    )
     return _json_safe(summary)
 
 
@@ -1083,6 +1977,13 @@ def validate_retrain_validation_gate(validation_gate_summary):
         raise ValueError(
             "验证集 trade recall 过低: "
             f"trade_recall={trade_recall:.4f} < {min_trade_recall:.4f}"
+        )
+    trade_precision = float(validation_gate_summary.get("trade_precision", 0.0))
+    min_trade_precision = _validation_gate_min_trade_precision()
+    if trade_precision < min_trade_precision:
+        raise ValueError(
+            "验证集 trade precision 过低: "
+            f"trade_precision={trade_precision:.4f} < {min_trade_precision:.4f}"
         )
 
 
@@ -1114,6 +2015,21 @@ def write_json_atomic(path, payload):
     os.replace(tmp_path, path)
 
 
+def remove_candidate_training_metadata():
+    try:
+        os.remove(candidate_training_metadata_path)
+    except FileNotFoundError:
+        pass
+
+
+def write_candidate_training_metadata(metadata):
+    payload = dict(metadata)
+    payload.setdefault("candidate_status", "validation_gate_pending")
+    payload.setdefault("candidate_artifacts_written", False)
+    write_json_atomic(candidate_training_metadata_path, payload)
+    log_info(f"候选训练诊断元数据已保存至: {candidate_training_metadata_path}")
+
+
 def build_training_metadata(*, X, y, feature_cols, train_end, validation_start, validation_end, oos_start, original_train_rows, balanced_train_rows, validation_metrics, artifact_paths, label_filter_summary=None, label_quality_summary=None, sample_weight_summary=None, evaluation_sample_weight_summary=None, direction_quality_summary=None, validation_gate_summary=None, final_train_end=None):
     final_train_end = train_end if final_train_end is None else int(final_train_end)
     artifact_hashes = {
@@ -1135,6 +2051,7 @@ def build_training_metadata(*, X, y, feature_cols, train_end, validation_start, 
         "intervals": list(config.INTERVALS),
         "model_paths": dict(config.MODEL_PATHS),
         "model_weights": dict(config.MODEL_WEIGHTS),
+        "direction_model_weights": dict(getattr(config, "MODEL_DIRECTION_MODEL_WEIGHTS", {})),
         "feature_list_path": config.FEATURE_LIST_PATH,
         "training_metadata_path": config.TRAINING_METADATA_PATH,
         "artifact_hashes": artifact_hashes,
@@ -1152,8 +2069,13 @@ def build_training_metadata(*, X, y, feature_cols, train_end, validation_start, 
         "label_min_net_return": float(_label_min_net_return()),
         "label_max_mae_ratio": float(_label_max_mae_ratio()),
         "label_timeout_as_trade": bool(_label_timeout_as_trade()),
+        "label_timeout_weak_positive_as_trade": bool(_label_timeout_weak_positive_as_trade()),
         "label_timeout_min_net_return": float(_label_timeout_min_net_return()),
         "label_timeout_max_mae_ratio": float(_label_timeout_max_mae_ratio()),
+        "label_long_trend_weak_tp_as_trade": bool(_label_long_trend_weak_tp_as_trade()),
+        "label_long_trend_strong_max_exit_bars": int(_label_long_trend_strong_max_exit_bars()),
+        "label_long_trend_strong_max_mae_ratio": float(_label_long_trend_strong_max_mae_ratio()),
+        "label_long_trend_strong_min_mfe_mae_ratio": float(_label_long_trend_strong_min_mfe_mae_ratio()),
         "label_require_regime_allowed": bool(_label_require_regime_allowed()),
         "target_schema": "binary_trade_quality",
         "target_labels": {
@@ -1388,6 +2310,8 @@ def train_direction_quality_bundle(X_train, y_train, sample_context=None, estima
     calibration_min_rows = max(1, _direction_quality_calibration_min_rows())
     calibration_min_positives = max(1, _direction_quality_calibration_min_positives())
     calibration_min_negatives = max(1, _direction_quality_calibration_min_negatives())
+    allow_inverse_calibration = bool(_direction_quality_allow_inverse_calibration())
+    inverse_calibration_directions = _direction_quality_inverse_calibration_directions()
     regime_calibration_enabled = bool(_direction_quality_regime_calibration_enabled())
     regime_calibration_min_rows = max(1, _direction_quality_regime_calibration_min_rows())
     regime_calibration_min_positives = max(1, _direction_quality_regime_calibration_min_positives())
@@ -1471,6 +2395,10 @@ def train_direction_quality_bundle(X_train, y_train, sample_context=None, estima
         regime_calibration_summary_by_model = {}
         for name, model in dir_models.items():
             direction_models_by_name[name][direction] = model
+            allow_direction_inverse_calibration = _direction_quality_allow_inverse_for_direction(
+                direction,
+                inverse_calibration_directions,
+            )
             if X_calibration_dir.empty or calibration_method == "none":
                 calibrator = BinaryProbabilityCalibrator(
                     method=calibration_method,
@@ -1514,6 +2442,7 @@ def train_direction_quality_bundle(X_train, y_train, sample_context=None, estima
                     min_rows=calibration_min_rows,
                     min_positive_rows=calibration_min_positives,
                     min_negative_rows=calibration_min_negatives,
+                    allow_negative_slope=allow_direction_inverse_calibration,
                 )
                 if calibrator.active:
                     direction_calibrators_by_name[name][direction] = calibrator
@@ -1545,6 +2474,7 @@ def train_direction_quality_bundle(X_train, y_train, sample_context=None, estima
                             min_rows=regime_calibration_min_rows,
                             min_positive_rows=regime_calibration_min_positives,
                             min_negative_rows=regime_calibration_min_negatives,
+                            allow_negative_slope=allow_direction_inverse_calibration,
                         )
                         model_regime_summaries[regime] = regime_calibrator.summary()
                         if regime_calibrator.active:
@@ -1556,6 +2486,10 @@ def train_direction_quality_bundle(X_train, y_train, sample_context=None, estima
         direction_summary[direction].update({
             "enabled": True,
             "fallback_reason": None,
+            "allow_inverse_calibration": bool(_direction_quality_allow_inverse_for_direction(
+                direction,
+                inverse_calibration_directions,
+            )),
             "model_train_rows": int(len(y_model_dir)),
             "model_train_trade_rows": int((y_model_dir.astype(int) == TARGET_TRADE).sum()),
             "calibration_rows": int(len(y_calibration_dir)),
@@ -1603,6 +2537,8 @@ def train_direction_quality_bundle(X_train, y_train, sample_context=None, estima
         "calibration_min_rows": int(calibration_min_rows),
         "calibration_min_positive_rows": int(calibration_min_positives),
         "calibration_min_negative_rows": int(calibration_min_negatives),
+        "allow_inverse_calibration": bool(allow_inverse_calibration),
+        "inverse_calibration_directions": sorted(str(item) for item in inverse_calibration_directions),
         "regime_calibration_enabled": bool(regime_calibration_enabled),
         "regime_calibration_min_rows": int(regime_calibration_min_rows),
         "regime_calibration_min_positive_rows": int(regime_calibration_min_positives),
@@ -1635,6 +2571,7 @@ def build_time_splits(length):
 
 
 def train():
+    remove_candidate_training_metadata()
     client = OKXClient()
     data_dict = client.fetch_data()
     merged_df = merge_multi_period_features(data_dict)
@@ -1704,6 +2641,9 @@ def train():
         config.MODEL_WEIGHTS,
         X_test,
         y_test,
+        sample_context=merged_df.iloc[validation_start:validation_end],
+        direction_model_weights=getattr(config, "MODEL_DIRECTION_MODEL_WEIGHTS", {}),
+        label_quality_summary=label_quality_summary,
     )
     validation_metrics["ensemble_threshold"] = validation_gate_summary
     log_info(
@@ -1715,7 +2655,60 @@ def train():
         f"trade_recall={validation_gate_summary.get('trade_recall', 0.0):.4f} "
         f"prob_q={validation_gate_summary.get('trade_probability_quantiles', {})}"
     )
-    validate_retrain_validation_gate(validation_gate_summary)
+    gate_separability = validation_gate_summary.get("separability_diagnostics") or {}
+    if gate_separability:
+        top_bucket_precision = gate_separability.get("top_bucket_precision") or {}
+        log_info(
+            "验证集概率可分性诊断: "
+            f"ranking={gate_separability.get('ranking_signal', 'unknown')} "
+            f"auc={gate_separability.get('roc_auc')} "
+            f"ap={gate_separability.get('average_precision')} "
+            f"mean_gap={gate_separability.get('mean_gap')} "
+            f"top10={top_bucket_precision.get('top_10pct', {})}"
+        )
+    gate_group_diagnostics = validation_gate_summary.get("group_diagnostics") or {}
+    if gate_group_diagnostics:
+        log_info(
+            "验证集门禁误报/漏报诊断: "
+            f"fp_outcomes={gate_group_diagnostics.get('false_positive_outcome_counts', {})} "
+            f"fp_reasons={gate_group_diagnostics.get('false_positive_reject_reason_counts', {})} "
+            f"fn_directions={gate_group_diagnostics.get('false_negative_direction_counts', {})} "
+            f"fn_regimes={gate_group_diagnostics.get('false_negative_regime_counts', {})}"
+        )
+    candidate_metadata = build_training_metadata(
+        X=X,
+        y=y,
+        feature_cols=feature_cols,
+        train_end=train_end,
+        validation_start=validation_start,
+        validation_end=validation_end,
+        oos_start=oos_start,
+        original_train_rows=original_train_rows,
+        balanced_train_rows=len(X_eval_train),
+        validation_metrics=validation_metrics,
+        artifact_paths=[],
+        label_filter_summary=label_filter_summary,
+        label_quality_summary=label_quality_summary,
+        sample_weight_summary={},
+        evaluation_sample_weight_summary={
+            **(evaluation_sample_weight_summary or {}),
+            "estimator_config": eval_estimator_config or {},
+            "direction_quality_models": evaluation_direction_quality_summary,
+        },
+        direction_quality_summary={},
+        validation_gate_summary=validation_gate_summary,
+        final_train_end=train_end,
+    )
+    write_candidate_training_metadata(candidate_metadata)
+    try:
+        validate_retrain_validation_gate(validation_gate_summary)
+    except ValueError as exc:
+        write_candidate_training_metadata({
+            **candidate_metadata,
+            "candidate_status": "validation_gate_failed",
+            "validation_gate_failure_reason": str(exc),
+        })
+        raise
 
     final_train_end = validation_end if bool(config.MODEL_FINAL_TRAIN_ON_VALIDATION) else train_end
     X_final_train = X.iloc[:final_train_end].copy()
@@ -1767,6 +2760,7 @@ def train():
         final_train_end=final_train_end,
     )
     write_json_atomic(training_metadata_path, metadata)
+    remove_candidate_training_metadata()
     log_info(f"✅ 训练元数据已保存至: {training_metadata_path}")
     log_info(
         "样本切分: "

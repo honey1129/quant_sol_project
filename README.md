@@ -313,6 +313,7 @@ MODEL_PATHS=lgb_v1:models/lgb_model.pkl,xgb_v1:models/xgb_model.pkl,rf_v1:models
 
 # 模型权重
 MODEL_WEIGHTS=lgb_v1:0.5,xgb_v1:0.3,rf_v1:0.2
+MODEL_DIRECTION_MODEL_WEIGHTS=
 
 # 训练/验证/OOS 样本切分
 TRAINING_METADATA_PATH=models/training_metadata.json
@@ -325,23 +326,42 @@ MODEL_LABEL_STOP_LOSS=0.014
 MODEL_LABEL_MIN_NET_RETURN=0.0
 MODEL_LABEL_MAX_MAE_RATIO=1.0
 MODEL_LABEL_TIMEOUT_AS_TRADE=1
+MODEL_LABEL_TIMEOUT_WEAK_POSITIVE_AS_TRADE=0
 MODEL_LABEL_TIMEOUT_MIN_NET_RETURN=0.0015
 MODEL_LABEL_TIMEOUT_MAX_MAE_RATIO=0.40
+MODEL_LABEL_LONG_TREND_WEAK_TP_AS_TRADE=0
+MODEL_LABEL_LONG_TREND_STRONG_MAX_EXIT_BARS=16
+MODEL_LABEL_LONG_TREND_STRONG_MAX_MAE_RATIO=0.50
+MODEL_LABEL_LONG_TREND_STRONG_MIN_MFE_MAE_RATIO=0.0
 MODEL_LABEL_REQUIRE_REGIME_ALLOWED=1
 MODEL_TRAIN_TRADABLE_LABELS=1
 MODEL_TRAIN_NO_TRADE_LABELS=1
 MODEL_USE_RUBIK_FEATURES=0
 MODEL_RUBIK_PERIOD=1H
 MODEL_RECENT_SAMPLE_WEIGHT_BOOST=0.5
-MODEL_TRADE_SAMPLE_WEIGHT_MULTIPLIER=2.0
+MODEL_TRADE_SAMPLE_WEIGHT_MULTIPLIER=1.0
 MODEL_NO_TRADE_SAMPLE_WEIGHT_MULTIPLIER=1.0
-MODEL_HARD_NEGATIVE_SAMPLE_WEIGHT_MULTIPLIER=2.0
+MODEL_HARD_NEGATIVE_SAMPLE_WEIGHT_MULTIPLIER=3.0
+MODEL_DIRECTION_TRADE_SAMPLE_WEIGHT_MULTIPLIERS=
+MODEL_DIRECTION_HARD_NEGATIVE_SAMPLE_WEIGHT_MULTIPLIERS=long:trend_long=2.0,short:trend_short=2.0
 MODEL_SAMPLE_WEIGHT_MIN=0.25
 MODEL_SAMPLE_WEIGHT_MAX=20.0
 MODEL_TRAIN_RATIO=0.70
 MODEL_VALIDATION_RATIO=0.15
 MODEL_PURGE_BARS=24
 MODEL_FINAL_TRAIN_ON_VALIDATION=1
+MODEL_TRAIN_DIRECTION_QUALITY_MODELS=1
+MODEL_DIRECTION_QUALITY_CALIBRATION=sigmoid
+MODEL_DIRECTION_QUALITY_CALIBRATION_USE_SAMPLE_WEIGHT=0
+MODEL_DIRECTION_QUALITY_ALLOW_INVERSE_CALIBRATION=1
+MODEL_DIRECTION_QUALITY_INVERSE_CALIBRATION_DIRECTIONS=short
+MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION=1
+MODEL_QUALITY_PROBABILITY_EXECUTION_SCALE_ENABLED=1
+MODEL_QUALITY_PROBABILITY_EXECUTION_ANCHOR=0.50
+MODEL_QUALITY_PROBABILITY_EXECUTION_TEMPERATURE=1.0
+MODEL_QUALITY_PROBABILITY_BASE_RATE=0.0
+MODEL_QUALITY_PROBABILITY_MIN_BASE_RATE=0.01
+MODEL_QUALITY_PROBABILITY_MAX_BASE_RATE=0.50
 MODEL_TRAIN_LGB_ESTIMATORS=160
 MODEL_TRAIN_XGB_ESTIMATORS=160
 MODEL_TRAIN_RF_ESTIMATORS=100
@@ -354,6 +374,9 @@ MODEL_WALK_FORWARD_FOLDS=3
 MODEL_WALK_FORWARD_MIN_FOLDS=2
 MODEL_WALK_FORWARD_MIN_VALIDATION_ROWS=100
 MODEL_WALK_FORWARD_DIAGNOSTIC_THRESHOLD=0.35
+MODEL_RETRAIN_VALIDATION_GATE_THRESHOLD=auto
+MODEL_RETRAIN_VALIDATION_GATE_THRESHOLD_SWEEP=0.50,0.56,0.60,0.64,0.68,0.72,0.76,0.80
+MODEL_RETRAIN_VALIDATION_GATE_TARGET_PRECISION=0.25
 MODEL_WALK_FORWARD_FAIL_FAST=1
 MODEL_WALK_FORWARD_LIGHTWEIGHT_TRAINING=1
 MODEL_WALK_FORWARD_LGB_ESTIMATORS=40
@@ -446,7 +469,11 @@ MODEL_RETRAIN_MIN_AVG_WIN_LOSS_RATIO=0.8
 MODEL_RETRAIN_MIN_NET_PNL_AFTER_COSTS=0.0
 MODEL_RETRAIN_MIN_OOS_ROWS=100
 MODEL_RETRAIN_VALIDATION_GATE_ENABLED=1
+MODEL_RETRAIN_VALIDATION_GATE_THRESHOLD=auto
+MODEL_RETRAIN_VALIDATION_GATE_THRESHOLD_SWEEP=0.50,0.56,0.60,0.64,0.68,0.72,0.76,0.80
+MODEL_RETRAIN_VALIDATION_GATE_TARGET_PRECISION=0.25
 MODEL_RETRAIN_MIN_VALIDATION_TRADE_RECALL=0.01
+MODEL_RETRAIN_MIN_VALIDATION_TRADE_PRECISION=0.25
 MODEL_RETRAIN_MIN_VALIDATION_PREDICTED_TRADES=1
 MODEL_RETRAIN_REGIME_GATE_ENABLED=1
 MODEL_RETRAIN_REGIME_GATE_MIN_ROWS=30
@@ -500,16 +527,25 @@ POLL_SEC=10
 - `MODEL_LABEL_FUTURE_WINDOW=8` / `MODEL_LABEL_THRESHOLD=0.004`：threshold 标签备用口径，目标是避开 5m 细碎噪声。
 - `MODEL_LABEL_LOOKAHEAD_BARS=24` / `MODEL_LABEL_TAKE_PROFIT=0.016` / `MODEL_LABEL_STOP_LOSS=0.014`：realistic 二分类质量标签的当前校准口径，目标是让模型学习“当前规则方向是否值得交易”。
 - `MODEL_LABEL_MIN_NET_RETURN=0.0` / `MODEL_LABEL_MAX_MAE_RATIO=1.0`：TP trade 标签必须扣除估算手续费/滑点后仍不亏，且触发 TP 前的最大不利波动不超过止损距离。
-- `MODEL_LABEL_TIMEOUT_AS_TRADE=1` / `MODEL_LABEL_TIMEOUT_MIN_NET_RETURN=0.0015` / `MODEL_LABEL_TIMEOUT_MAX_MAE_RATIO=0.40`：TIMEOUT 不再只按 TP/SL 二元结果处理；只有扣费后净收益至少 0.15%、最大不利波动不超过 40% 止损距离的样本才标为 `TIMEOUT_WEAK_POSITIVE`，其余标为 `TIMEOUT_WEAK_NEGATIVE`。
+- `MODEL_LABEL_TIMEOUT_AS_TRADE=1` / `MODEL_LABEL_TIMEOUT_MIN_NET_RETURN=0.0015` / `MODEL_LABEL_TIMEOUT_MAX_MAE_RATIO=0.40`：TIMEOUT 不再只按 TP/SL 二元结果处理；扣费后净收益至少 0.15%、最大不利波动不超过 40% 止损距离的样本标为 `TIMEOUT_WEAK_POSITIVE`，其余标为 `TIMEOUT_WEAK_NEGATIVE`。
+- `MODEL_LABEL_TIMEOUT_WEAK_POSITIVE_AS_TRADE=0`：弱正 TIMEOUT 默认只用于诊断并从监督训练中忽略；需要主动放宽训练目标时再显式改为 `1`。
+- `MODEL_LABEL_LONG_TREND_WEAK_TP_AS_TRADE=0` / `MODEL_LABEL_LONG_TREND_STRONG_MAX_EXIT_BARS=16` / `MODEL_LABEL_LONG_TREND_STRONG_MAX_MAE_RATIO=0.50`：`long:trend_long` 不再把所有最终 TP 都当同等正样本；只有较快触发、回撤较小的 TP 标为 `TP_STRONG_LONG_TREND`，慢 TP 或高回撤 TP 标为 `TP_WEAK_LONG_TREND` 并默认作为 no-trade/hard-negative 参与训练。
 - `MODEL_LABEL_REQUIRE_REGIME_ALLOWED=1` / `MODEL_TRAIN_TRADABLE_LABELS=1` / `MODEL_TRAIN_NO_TRADE_LABELS=1`：标签与线上可交易规则保持一致；被 trend/regime 规则拒绝的样本标为 no_trade。
-- `MODEL_HARD_NEGATIVE_SAMPLE_WEIGHT_MULTIPLIER=2.0`：训练权重在 trade/no-trade、regime、direction 平衡之外，对 `SL` 和 `TIMEOUT_WEAK_NEGATIVE` 这类容易误报的 no-trade 样本额外加权，让模型学习“可交易方向内哪些时刻不要入场”。
+- `MODEL_HARD_NEGATIVE_SAMPLE_WEIGHT_MULTIPLIER=3.0`：训练权重在 trade/no-trade、regime、direction 平衡之外，对 `SL`、`TIMEOUT_WEAK_NEGATIVE` 和 `TP_WEAK_LONG_TREND` 这类容易误报的 no-trade 样本强加权，让模型优先学习“可交易方向内哪些时刻不要入场”。
+- `MODEL_DIRECTION_TRADE_SAMPLE_WEIGHT_MULTIPLIERS=` / `MODEL_DIRECTION_HARD_NEGATIVE_SAMPLE_WEIGHT_MULTIPLIERS=long:trend_long=2.0,short:trend_short=2.0`：方向级训练权重默认不再额外托高正样本，优先压住趋势区间内的硬负样本，减少 `trend_long/trend_short` 整段高置信误报；格式是 `direction:regime=倍数`，多项用逗号分隔。
+- `MODEL_DIRECTION_MODEL_WEIGHTS=`：方向级 ensemble 权重覆盖项；空值沿用 `MODEL_WEIGHTS`，需要时可写成 `long=rf_v1:1.0,short=xgb_v1:0.6|rf_v1:0.4`，让 long/short 分别使用验证表现更好的子模型组合。
 - `MODEL_TRAIN_DIRECTION_QUALITY_MODELS=1` / `MODEL_DIRECTION_QUALITY_MIN_ROWS=200` / `MODEL_DIRECTION_QUALITY_MIN_TRADE_ROWS=20`：在全局质量模型外额外训练 long/short 子模型；方向样本或 trade 样本不足时自动回退到全局模型。
 - `MODEL_DIRECTION_QUALITY_CALIBRATION=sigmoid` / `MODEL_DIRECTION_QUALITY_CALIBRATION_RATIO=0.20`：每个方向子模型用尾部方向样本单独做概率校准，降低 `trend_short` 高置信误报和 `trend_long` 概率压低这类方向内倒挂；最终子模型仍用全量方向样本训练。
 - `MODEL_DIRECTION_QUALITY_CALIBRATION_USE_SAMPLE_WEIGHT=0`：概率校准默认按真实样本分布拟合，不继承训练阶段为了召回而放大的 trade 权重。
+- `MODEL_DIRECTION_QUALITY_ALLOW_INVERSE_CALIBRATION=1` / `MODEL_DIRECTION_QUALITY_INVERSE_CALIBRATION_DIRECTIONS=short`：如果方向校准集显示原始概率与真实 TP 反向相关，只允许指定方向做负斜率 sigmoid 修正；默认限制在 short，避免 long:trend_long 被反向校准整体压到阈值以下。metadata 会标记 `inverted=true` 和允许方向列表。
 - `MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION=1` / `MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION_MIN_ROWS=50`：在方向校准之上按 `label_regime` 继续校准，优先修正 `short:trend_short` 这类局部高置信误报；样本不足时自动回退到方向校准。
+- `MODEL_QUALITY_PROBABILITY_EXECUTION_SCALE_ENABLED=1` / `MODEL_QUALITY_PROBABILITY_EXECUTION_ANCHOR=0.50`：二分类质量模型输出的是“强正样本稀有概率”，不是单笔胜率；执行层会按方向标签基准 trade rate 做 odds-lift 映射，让基准概率对应 0.50，高于基准才逐步提高执行概率。`MODEL_QUALITY_PROBABILITY_BASE_RATE=0.0` 表示自动从训练 metadata/方向子模型诊断读取基准率。
 - `MODEL_WALK_FORWARD_DIAGNOSTIC_THRESHOLD=0.35`：walk-forward 诊断里的 trade/no-trade precision/recall 使用校准后概率尺度，不再固定按 0.5 判断。
+- `MODEL_RETRAIN_VALIDATION_GATE_THRESHOLD=auto`：训练阶段的候选准入默认使用 `max(MODEL_WALK_FORWARD_DIAGNOSTIC_THRESHOLD, min(THRESHOLD_LONG, THRESHOLD_SHORT))`，避免低诊断阈值把刚达到基准质量的样本全算成交易；如需复现实验可显式写固定概率。
+- `MODEL_RETRAIN_VALIDATION_GATE_THRESHOLD_SWEEP=...` / `MODEL_RETRAIN_VALIDATION_GATE_TARGET_PRECISION=0.25`：validation gate 会额外扫描多个概率阈值，写入 `validation_gate_summary.threshold_sweep` 和 `validation_gate_summary.model_threshold_sweeps`，用于判断达到目标 precision 需要多高概率、long/short 各自还剩多少召回，以及单模型是否存在可用方向；它只做诊断和推荐，不会自动改线上阈值。
 - `MODEL_WALK_FORWARD_FAIL_FAST=1`：每折真实回测写完诊断和 threshold sweep 后，如果当前折已经违反硬性准入，立即停止后续折，避免一次失败重训继续空跑几十分钟。
 - walk-forward/回测 summary 会额外输出 `required_trade_prob`、`prob_edge_margin`、`round_trip_cost`、`cost_floor` 和 `decision_edge_gate_summary`，用来判断模型概率是否真的覆盖 TP/SL、手续费与滑点成本，而不是只看阈值有没有通过。
+- `validation_gate_summary.model_group_diagnostics` / `validation_gate_summary.threshold_sweep` / `validation_gate_summary.model_threshold_sweeps` / `fold_diagnostics_json.model_group_diagnostics`：按单模型和阈值段拆出 `direction:regime` 的 precision、recall、混淆矩阵和概率分位，用来判断下一步该调方向级 ensemble 权重，还是继续改某个方向的训练标签/样本权重。
 - `MODEL_TRAIN_*_ESTIMATORS`：正式候选模型的树数量也可配置，默认先用较轻的 `160/160/100` 加快失败反馈；确认标签/门槛有效后再逐步加大。
 - `MODEL_WALK_FORWARD_LIGHTWEIGHT_TRAINING=1` / `MODEL_WALK_FORWARD_*_ESTIMATORS`：降低 walk-forward 每折临时模型的树数量，加快验证诊断；默认 `40/40/30`。`MODEL_WALK_FORWARD_MODEL_DIAGNOSTICS=0` 默认跳过折内单模型报告，只保留 ensemble 交易质量诊断。日志会输出 `walk_forward_stage_timing` 和拆分后的 `walk_forward_fold_timing`，方便定位慢在训练、概率预计算、真实回测还是 sweep。
 - `MODEL_WALK_FORWARD_THRESHOLD_SWEEP_*`：重训验证时额外扫描一组低概率门槛、概率差、最小目标仓位和 sizing center，输出每折推荐候选；默认最多评估 48 个确定性抽样候选，并在找到稳定正收益候选后早停。它只用于诊断和推荐，不会自动改线上 `.env` 或绕过当前准入门槛。
@@ -518,7 +554,7 @@ POLL_SEC=10
 - `POSITION_PROBABILITY_CENTER=0.45`：仓位 sizing 的概率起点；二分类质量模型的概率更稀疏，需和阈值、`MIN_SIGNAL_TARGET_RATIO` 一起校准。
 - `REGIME_HIGH_VOL_ALLOW_TRADES=false` / `REGIME_TREND_AGAINST_BLOCK=true`：高波动趋势区间不放行逆势交易，尤其防止 `trend_short` 中强行开多。
 - `REGIME_DIRECTION_CALIBRATION_THRESHOLDS` / `REGIME_DIRECTION_CALIBRATION_GAPS`：只用于离线校准报告；会额外扫描低概率段，定位 `trend_long` 被整体压低或 `trend_short` 误报过高这类分组问题，不会直接改变实盘门槛。
-- `MODEL_RECENT_SAMPLE_WEIGHT_BOOST=0.5` / `MODEL_TRADE_SAMPLE_WEIGHT_MULTIPLIER=2.0`：训练不随机下采样；样本权重先平衡 trade/no_trade，再在类别内部按 regime+direction 平衡，并更重视近期样本，目标是改善后段 walk-forward 的 trade recall。
+- `MODEL_RECENT_SAMPLE_WEIGHT_BOOST=0.5` / `MODEL_TRADE_SAMPLE_WEIGHT_MULTIPLIER=1.0`：训练不随机下采样；样本权重先平衡 trade/no_trade，再在类别内部按 regime+direction 平衡，并更重视近期样本。方向级 multiplier 会写入 `sample_weight_summary.direction_*_multiplier_effects`，用于核对哪些方向/状态被实际加权。
 - `MIN_ADJUST_AMOUNT=150` / `BACKTEST_MIN_ADJUST_AMOUNT=40`：实盘最小调仓和回测最小调仓分开配置，避免小额回测收益被线上最小交易额吞掉。
 - `BACKTEST_FORCE_CLOSE_ON_END=1`：回测/重训验证窗口结束时强制按最后收盘价结算未平仓，避免 walk-forward 折内最后一笔交易漏计平仓数和 PF。
 - `MAX_POSITION_RATIO=0.45` / `LEVERAGE=3`：示例仍是测试盘参数，真实资金前要重新按账户权益调小。
@@ -527,7 +563,7 @@ POLL_SEC=10
 - `MODEL_FINAL_TRAIN_ON_VALIDATION=1`：验证指标仍来自严格时间切分；最终保存的模型用 OOS 之前的 train+validation 历史段重训，减少线上模型滞后。
 - `MODEL_VALIDATION_LIGHTWEIGHT_TRAINING=1` / `MODEL_VALIDATION_*_ESTIMATORS`：validation metrics 和 validation gate 只用于候选筛查，默认用轻量树数量快速发现概率坍缩。
 - `MODEL_WALK_FORWARD_ENABLED=1`：重训准入前会在验证区内做滚动 walk-forward 验证。
-- `MODEL_RETRAIN_VALIDATION_GATE_ENABLED=1` / `MODEL_RETRAIN_MIN_VALIDATION_TRADE_RECALL=0.01`：候选模型先用验证集 ensemble 概率做一次快速门禁；如果几乎不预测 trade，会在最终训练和 walk-forward 前直接失败回滚，避免一次坏候选空跑几十分钟。
+- `MODEL_RETRAIN_VALIDATION_GATE_ENABLED=1` / `MODEL_RETRAIN_VALIDATION_GATE_THRESHOLD=auto` / `MODEL_RETRAIN_MIN_VALIDATION_TRADE_PRECISION=0.25`：候选模型先用验证集 ensemble 概率做一次快速门禁；如果几乎不预测 trade 或按线上入场尺度误报过高，会在最终训练和 walk-forward 前直接失败回滚，避免一次坏候选空跑几十分钟。
 - `MODEL_RETRAIN_MIN_*` / `MODEL_RETRAIN_REGIME_GATE_*`：候选模型必须满足 OOS 交易数、胜率、PF、平均盈亏比、手续费后收益和 regime 偏置门槛；不达标会保留旧模型并回滚。
 - `TELEGRAM_ENABLED=1`：只播报重要事件，包括开平仓/调仓成交、重训成功或失败回滚、连续实盘异常、手动生成的每日复盘汇总；普通心跳和一般日志只写本地文件。
 

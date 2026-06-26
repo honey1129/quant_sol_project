@@ -43,6 +43,48 @@ class FeatureProbabilityEstimator:
 
 
 class TrainingMetadataTests(unittest.TestCase):
+    def test_probability_calibrator_rejects_negative_sigmoid_slope(self):
+        calibrator = train_module.fit_binary_probability_calibrator(
+            [0.10, 0.20, 0.80, 0.90],
+            [1, 1, 0, 0],
+            method="sigmoid",
+            min_rows=4,
+            min_positive_rows=1,
+            min_negative_rows=1,
+        )
+
+        self.assertFalse(calibrator.active)
+        self.assertEqual(calibrator.summary()["fallback_reason"], "calibration_negative_slope")
+
+    def test_probability_calibrator_allows_inverse_sigmoid_when_enabled(self):
+        calibrator = train_module.fit_binary_probability_calibrator(
+            [0.10, 0.20, 0.80, 0.90],
+            [1, 1, 0, 0],
+            method="sigmoid",
+            min_rows=4,
+            min_positive_rows=1,
+            min_negative_rows=1,
+            allow_negative_slope=True,
+        )
+
+        summary = calibrator.summary()
+        self.assertTrue(calibrator.active)
+        self.assertTrue(summary["inverted"])
+        self.assertLess(summary["coef"], 0.0)
+
+    def test_probability_calibrator_keeps_positive_sigmoid_slope(self):
+        calibrator = train_module.fit_binary_probability_calibrator(
+            [0.10, 0.20, 0.80, 0.90],
+            [0, 0, 1, 1],
+            method="sigmoid",
+            min_rows=4,
+            min_positive_rows=1,
+            min_negative_rows=1,
+        )
+
+        self.assertTrue(calibrator.active)
+        self.assertGreater(calibrator.summary()["coef"], 0.0)
+
     def test_model_estimators_accept_lightweight_estimator_config(self):
         default_models = train_module.build_model_estimators()
         lightweight_models = train_module.build_model_estimators({
@@ -128,6 +170,10 @@ class TrainingMetadataTests(unittest.TestCase):
         self.assertEqual(metadata["label_min_net_return"], train_module._label_min_net_return())
         self.assertEqual(metadata["label_max_mae_ratio"], train_module._label_max_mae_ratio())
         self.assertEqual(metadata["label_timeout_as_trade"], train_module._label_timeout_as_trade())
+        self.assertEqual(
+            metadata["label_timeout_weak_positive_as_trade"],
+            train_module._label_timeout_weak_positive_as_trade(),
+        )
         self.assertEqual(metadata["label_timeout_min_net_return"], train_module._label_timeout_min_net_return())
         self.assertEqual(metadata["label_timeout_max_mae_ratio"], train_module._label_timeout_max_mae_ratio())
         self.assertEqual(metadata["label_require_regime_allowed"], train_module._label_require_regime_allowed())
@@ -138,10 +184,48 @@ class TrainingMetadataTests(unittest.TestCase):
         self.assertEqual(metadata["oos_rows"], 2)
         self.assertTrue(metadata["artifact_hashes"])
 
+    def test_write_candidate_training_metadata_marks_diagnostic_candidate(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            candidate_path = os.path.join(tmpdir, "candidate_training_metadata.json")
+            metadata = {
+                "schema_version": 2,
+                "artifact_hashes": {"models/lgb_model.pkl": "old"},
+                "validation_gate_summary": {"trade_recall": 0.0},
+            }
+            with patch("train.train.candidate_training_metadata_path", candidate_path):
+                train_module.write_candidate_training_metadata(metadata)
+
+            with open(candidate_path, "r", encoding="utf-8") as file:
+                saved = json.load(file)
+
+        self.assertEqual(saved["candidate_status"], "validation_gate_pending")
+        self.assertFalse(saved["candidate_artifacts_written"])
+        self.assertEqual(saved["validation_gate_summary"]["trade_recall"], 0.0)
+
+    def test_write_candidate_training_metadata_preserves_explicit_failure_status(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            candidate_path = os.path.join(tmpdir, "candidate_training_metadata.json")
+            with patch("train.train.candidate_training_metadata_path", candidate_path):
+                train_module.write_candidate_training_metadata({
+                    "candidate_status": "validation_gate_failed",
+                    "validation_gate_failure_reason": "precision too low",
+                })
+
+            with open(candidate_path, "r", encoding="utf-8") as file:
+                saved = json.load(file)
+
+        self.assertEqual(saved["candidate_status"], "validation_gate_failed")
+        self.assertEqual(saved["validation_gate_failure_reason"], "precision too low")
+        self.assertFalse(saved["candidate_artifacts_written"])
+
     def test_validation_gate_summary_uses_probability_threshold(self):
         index = pd.date_range("2026-01-01", periods=4, freq="5min", tz="UTC")
         X = pd.DataFrame({"score": [0.10, 0.80, 0.90, 0.20]}, index=index)
         y = pd.Series([0, 1, 1, 0], index=index)
+        context = pd.DataFrame({
+            "label_direction": ["long"] * 4,
+            "label_regime": ["trend_long"] * 4,
+        }, index=index)
 
         summary = train_module.build_validation_gate_summary(
             {"lgb_v1": FeatureProbabilityEstimator()},
@@ -149,12 +233,274 @@ class TrainingMetadataTests(unittest.TestCase):
             X,
             y,
             threshold=0.5,
+            sample_context=context,
         )
 
         self.assertEqual(summary["trade_rows"], 2)
         self.assertEqual(summary["predicted_trade_rows"], 2)
         self.assertAlmostEqual(summary["trade_precision"], 1.0)
         self.assertAlmostEqual(summary["trade_recall"], 1.0)
+
+    def test_validation_gate_auto_threshold_uses_live_entry_threshold(self):
+        index = pd.date_range("2026-01-01", periods=4, freq="5min", tz="UTC")
+        X = pd.DataFrame({"score": [0.40, 0.54, 0.57, 0.80]}, index=index)
+        y = pd.Series([0, 0, 1, 1], index=index)
+        context = pd.DataFrame({
+            "label_direction": ["long"] * 4,
+            "label_regime": ["trend_long"] * 4,
+        }, index=index)
+
+        with patch.dict(os.environ, {
+            "MODEL_RETRAIN_VALIDATION_GATE_THRESHOLD": "auto",
+        }):
+            with patch("train.train.config.MODEL_WALK_FORWARD_DIAGNOSTIC_THRESHOLD", 0.35):
+                with patch("train.train.config.THRESHOLD_LONG", 0.56):
+                    with patch("train.train.config.THRESHOLD_SHORT", 0.60):
+                        summary = train_module.build_validation_gate_summary(
+                            {"lgb_v1": FeatureProbabilityEstimator()},
+                            {"lgb_v1": 1.0},
+                            X,
+                            y,
+                            sample_context=context,
+                        )
+
+        self.assertAlmostEqual(summary["decision_threshold"], 0.56)
+        self.assertEqual(summary["predicted_trade_rows"], 2)
+        self.assertAlmostEqual(summary["trade_precision"], 1.0)
+
+    def test_validation_gate_threshold_sweep_recommends_precision_target(self):
+        index = pd.date_range("2026-01-01", periods=4, freq="5min", tz="UTC")
+        X = pd.DataFrame({"score": [0.40, 0.55, 0.62, 0.80]}, index=index)
+        y = pd.Series([0, 0, 1, 1], index=index)
+        context = pd.DataFrame({
+            "label_direction": ["long", "long", "short", "short"],
+            "label_regime": ["trend_long", "trend_long", "trend_short", "trend_short"],
+        }, index=index)
+
+        with patch.dict(os.environ, {
+            "MODEL_RETRAIN_VALIDATION_GATE_THRESHOLD_SWEEP": "0.50,0.60,0.70",
+            "MODEL_RETRAIN_VALIDATION_GATE_TARGET_PRECISION": "1.0",
+        }):
+            summary = train_module.build_validation_gate_summary(
+                {"lgb_v1": FeatureProbabilityEstimator()},
+                {"lgb_v1": 1.0},
+                X,
+                y,
+                threshold=0.5,
+                sample_context=context,
+            )
+
+        sweep = summary["threshold_sweep"]
+        self.assertEqual([item["threshold"] for item in sweep["candidates"]], [0.5, 0.6, 0.7])
+        self.assertEqual(sweep["recommended"]["threshold"], 0.6)
+        self.assertAlmostEqual(sweep["recommended"]["trade_precision"], 1.0)
+        self.assertEqual(
+            sweep["recommended"]["direction_metrics"]["short"]["predicted_trade_rows"],
+            2,
+        )
+        self.assertIn("lgb_v1", summary["model_threshold_sweeps"])
+        self.assertEqual(summary["model_threshold_sweeps"]["lgb_v1"]["recommended"]["threshold"], 0.6)
+
+    def test_validation_gate_summary_includes_probability_separability_diagnostics(self):
+        index = pd.date_range("2026-01-01", periods=6, freq="5min", tz="UTC")
+        X = pd.DataFrame({"score": [0.05, 0.10, 0.20, 0.75, 0.85, 0.95]}, index=index)
+        y = pd.Series([0, 0, 0, 1, 1, 1], index=index)
+        context = pd.DataFrame({
+            "label_direction": ["long", "long", "short", "long", "short", "short"],
+            "label_regime": ["trend_long", "trend_long", "trend_short"] * 2,
+        }, index=index)
+
+        summary = train_module.build_validation_gate_summary(
+            {"lgb_v1": FeatureProbabilityEstimator()},
+            {"lgb_v1": 1.0},
+            X,
+            y,
+            threshold=0.5,
+            sample_context=context,
+        )
+
+        diagnostics = summary["separability_diagnostics"]
+        self.assertAlmostEqual(diagnostics["roc_auc"], 1.0)
+        self.assertAlmostEqual(diagnostics["average_precision"], 1.0)
+        self.assertEqual(diagnostics["ranking_signal"], "positive")
+        self.assertGreater(diagnostics["mean_gap"], 0.0)
+        self.assertEqual(diagnostics["top_bucket_precision"]["top_10pct"]["precision"], 1.0)
+        self.assertIn("long", diagnostics["by_direction"])
+        self.assertIn("short:trend_short", diagnostics["by_direction_regime"])
+        self.assertAlmostEqual(
+            summary["model_separability_diagnostics"]["lgb_v1"]["roc_auc"],
+            1.0,
+        )
+
+    def test_validation_gate_recommendations_flag_inverted_direction_and_best_model(self):
+        separability = {
+            "top_bucket_precision": {"top_10pct": {"precision": 0.08}},
+            "by_direction": {
+                "long": {
+                    "rows": 100,
+                    "trade_rows": 10,
+                    "trade_rate": 0.10,
+                    "roc_auc": 0.30,
+                    "average_precision": 0.06,
+                    "ranking_signal": "inverted",
+                    "mean_gap": -0.02,
+                    "top_bucket_precision": {
+                        "top_10pct": {
+                            "rows": 10,
+                            "trade_rows": 0,
+                            "precision": 0.0,
+                            "lift_vs_base_rate": 0.0,
+                        },
+                    },
+                },
+                "short": {
+                    "rows": 100,
+                    "trade_rows": 10,
+                    "trade_rate": 0.10,
+                    "roc_auc": 0.60,
+                    "average_precision": 0.12,
+                    "ranking_signal": "positive",
+                    "mean_gap": 0.02,
+                    "top_bucket_precision": {
+                        "top_10pct": {
+                            "rows": 10,
+                            "trade_rows": 1,
+                            "precision": 0.10,
+                            "lift_vs_base_rate": 1.0,
+                        },
+                    },
+                },
+            },
+        }
+        model_separability = {
+            "xgb_v1": {
+                "by_direction": {
+                    "short": {
+                        "rows": 100,
+                        "trade_rows": 10,
+                        "trade_rate": 0.10,
+                        "roc_auc": 0.72,
+                        "average_precision": 0.24,
+                        "ranking_signal": "positive",
+                        "mean_gap": 0.04,
+                        "top_bucket_precision": {
+                            "top_10pct": {
+                                "rows": 10,
+                                "trade_rows": 3,
+                                "precision": 0.30,
+                                "lift_vs_base_rate": 3.0,
+                            },
+                        },
+                    },
+                },
+            },
+            "rf_v1": {
+                "by_direction": {
+                    "short": {
+                        "rows": 100,
+                        "trade_rows": 10,
+                        "trade_rate": 0.10,
+                        "roc_auc": 0.45,
+                        "average_precision": 0.08,
+                        "ranking_signal": "inverted",
+                        "mean_gap": -0.01,
+                        "top_bucket_precision": {
+                            "top_10pct": {
+                                "rows": 10,
+                                "trade_rows": 0,
+                                "precision": 0.0,
+                                "lift_vs_base_rate": 0.0,
+                            },
+                        },
+                    },
+                },
+            },
+        }
+
+        with patch.dict(os.environ, {
+            "MODEL_RETRAIN_VALIDATION_GATE_TARGET_PRECISION": "0.25",
+        }):
+            recommendations = train_module._validation_gate_diagnostic_recommendations(
+                separability,
+                model_separability,
+                {"recommended": None},
+            )
+
+        self.assertTrue(recommendations["do_not_relax_threshold"])
+        self.assertEqual(recommendations["directions"]["long"]["status"], "unusable")
+        self.assertIn(
+            "inverted_probability_ranking",
+            recommendations["directions"]["long"]["reason_codes"],
+        )
+        self.assertEqual(
+            recommendations["directions"]["short"]["recommended_model_weights"],
+            {"xgb_v1": 1.0},
+        )
+        self.assertEqual(
+            recommendations["recommended_env_overrides"]["MODEL_DIRECTION_MODEL_WEIGHTS"],
+            "short=xgb_v1:1.0",
+        )
+
+    def test_validation_gate_summary_includes_group_error_diagnostics(self):
+        index = pd.date_range("2026-01-01", periods=4, freq="5min", tz="UTC")
+        X = pd.DataFrame({"score": [0.80, 0.20, 0.90, 0.10]}, index=index)
+        y = pd.Series([0, 1, 0, 1], index=index)
+        context = pd.DataFrame({
+            "label_direction": ["short", "long", "short", "long"],
+            "label_regime": ["trend_short", "trend_long", "trend_short", "trend_long"],
+            "label_outcome": ["SL", "TP", "TIMEOUT_WEAK_NEGATIVE", "TP"],
+            "label_reject_reason": [
+                "outcome_sl",
+                "accepted",
+                "timeout_weak_negative_net_return",
+                "accepted",
+            ],
+        }, index=index)
+
+        summary = train_module.build_validation_gate_summary(
+            {"lgb_v1": FeatureProbabilityEstimator()},
+            {"lgb_v1": 1.0},
+            X,
+            y,
+            threshold=0.5,
+            sample_context=context,
+        )
+
+        diagnostics = summary["group_diagnostics"]
+        self.assertEqual(diagnostics["false_positive_outcome_counts"], {
+            "SL": 1,
+            "TIMEOUT_WEAK_NEGATIVE": 1,
+        })
+        self.assertEqual(diagnostics["false_negative_direction_counts"], {"long": 2})
+        self.assertEqual(diagnostics["by_direction"]["short"]["fp"], 2)
+        self.assertEqual(diagnostics["by_direction_regime"]["long:trend_long"]["fn"], 2)
+        model_diagnostics = summary["model_group_diagnostics"]["lgb_v1"]
+        self.assertEqual(model_diagnostics["by_direction"]["short"]["fp"], 2)
+        self.assertEqual(model_diagnostics["by_direction_regime"]["long:trend_long"]["fn"], 2)
+
+    def test_validation_gate_summary_maps_binary_probability_to_tradable_direction(self):
+        index = pd.date_range("2026-01-01", periods=3, freq="5min", tz="UTC")
+        X = pd.DataFrame({"score": [0.90, 0.90, 0.90]}, index=index)
+        y = pd.Series([0, 1, 0], index=index)
+        context = pd.DataFrame({
+            "label_direction": ["none", "long", "none"],
+            "label_regime": ["range", "trend_long", "range_high_vol"],
+            "label_outcome": ["NO_DIRECTION", "TP", "NO_DIRECTION"],
+            "label_reject_reason": ["neutral_trend", "accepted", "neutral_trend"],
+        }, index=index)
+
+        summary = train_module.build_validation_gate_summary(
+            {"lgb_v1": FeatureProbabilityEstimator()},
+            {"lgb_v1": 1.0},
+            X,
+            y,
+            threshold=0.5,
+            sample_context=context,
+        )
+
+        self.assertEqual(summary["predicted_trade_rows"], 1)
+        self.assertAlmostEqual(summary["trade_precision"], 1.0)
+        self.assertEqual(summary["group_diagnostics"]["by_direction"]["none"]["fp"], 0)
 
     def test_validation_gate_rejects_collapsed_trade_predictions(self):
         summary = {
@@ -172,6 +518,25 @@ class TrainingMetadataTests(unittest.TestCase):
                 train_module.validate_retrain_validation_gate(summary)
 
         self.assertIn("验证集候选交易数不足", str(context.exception))
+
+    def test_validation_gate_rejects_low_trade_precision(self):
+        summary = {
+            "trade_rows": 20,
+            "predicted_trade_rows": 10,
+            "trade_recall": 0.10,
+            "trade_precision": 0.20,
+        }
+
+        with patch.dict(os.environ, {
+            "MODEL_RETRAIN_VALIDATION_GATE_ENABLED": "1",
+            "MODEL_RETRAIN_MIN_VALIDATION_TRADE_RECALL": "0.01",
+            "MODEL_RETRAIN_MIN_VALIDATION_TRADE_PRECISION": "0.25",
+            "MODEL_RETRAIN_MIN_VALIDATION_PREDICTED_TRADES": "1",
+        }):
+            with self.assertRaises(ValueError) as context:
+                train_module.validate_retrain_validation_gate(summary)
+
+        self.assertIn("验证集 trade precision 过低", str(context.exception))
 
     def test_realistic_quality_labels_mark_only_tp_before_sl_as_trade(self):
         index = pd.date_range("2026-01-01", periods=4, freq="5min", tz="UTC")
@@ -202,7 +567,67 @@ class TrainingMetadataTests(unittest.TestCase):
         self.assertIn("label_quality_summary", labeled.attrs)
         self.assertGreater(labeled.attrs["label_quality_summary"]["trade_rows"], 0)
 
-    def test_realistic_quality_labels_split_timeout_weak_positive(self):
+    def test_long_trend_weak_tp_is_no_trade_by_default(self):
+        index = pd.date_range("2026-01-01", periods=4, freq="5min", tz="UTC")
+        close = pd.Series([100.0, 100.2, 100.8, 101.7], index=index)
+        df = pd.DataFrame({
+            "5m_close": close,
+            "5m_high": [100.0, 100.3, 100.9, 101.7],
+            "5m_low": [100.0, 99.0, 100.0, 100.8],
+            "5m_atr": 0.1,
+            "volatility_15": 0.0,
+            "money_flow_ratio": 1.0,
+            "15m_ema_20": close * 0.99,
+            "15m_ema_60": close * 0.98,
+        }, index=index)
+
+        with patch.dict(os.environ, {
+            "MODEL_LABEL_USE_REALISTIC": "1",
+            "MODEL_LABEL_LOOKAHEAD_BARS": "3",
+            "MODEL_LABEL_TAKE_PROFIT": "0.016",
+            "MODEL_LABEL_STOP_LOSS": "0.014",
+            "MODEL_LABEL_LONG_TREND_WEAK_TP_AS_TRADE": "0",
+            "MODEL_LABEL_LONG_TREND_STRONG_MAX_EXIT_BARS": "2",
+            "MODEL_LABEL_LONG_TREND_STRONG_MAX_MAE_RATIO": "0.50",
+        }):
+            labeled = train_module.create_labels(df, future_window=1, threshold=0.01)
+
+        first = labeled.iloc[0]
+        self.assertEqual(int(first["target"]), 0)
+        self.assertEqual(first["label_outcome"], "TP_WEAK_LONG_TREND")
+        self.assertEqual(first["label_reject_reason"], "long_trend_weak_tp_slow")
+
+    def test_long_trend_strong_tp_remains_trade(self):
+        index = pd.date_range("2026-01-01", periods=3, freq="5min", tz="UTC")
+        close = pd.Series([100.0, 101.7, 101.7], index=index)
+        df = pd.DataFrame({
+            "5m_close": close,
+            "5m_high": [100.0, 101.7, 101.7],
+            "5m_low": [100.0, 100.0, 101.0],
+            "5m_atr": 0.1,
+            "volatility_15": 0.0,
+            "money_flow_ratio": 1.0,
+            "15m_ema_20": close * 0.99,
+            "15m_ema_60": close * 0.98,
+        }, index=index)
+
+        with patch.dict(os.environ, {
+            "MODEL_LABEL_USE_REALISTIC": "1",
+            "MODEL_LABEL_LOOKAHEAD_BARS": "2",
+            "MODEL_LABEL_TAKE_PROFIT": "0.016",
+            "MODEL_LABEL_STOP_LOSS": "0.014",
+            "MODEL_LABEL_LONG_TREND_WEAK_TP_AS_TRADE": "0",
+            "MODEL_LABEL_LONG_TREND_STRONG_MAX_EXIT_BARS": "2",
+            "MODEL_LABEL_LONG_TREND_STRONG_MAX_MAE_RATIO": "0.50",
+        }):
+            labeled = train_module.create_labels(df, future_window=1, threshold=0.01)
+
+        first = labeled.iloc[0]
+        self.assertEqual(int(first["target"]), 1)
+        self.assertEqual(first["label_outcome"], "TP_STRONG_LONG_TREND")
+        self.assertEqual(first["label_reject_reason"], "accepted")
+
+    def test_realistic_quality_labels_keep_timeout_weak_positive_as_no_trade_by_default(self):
         index = pd.date_range("2026-01-01", periods=3, freq="5min", tz="UTC")
         close = pd.Series([100.0, 100.5, 100.5], index=index)
         df = pd.DataFrame({
@@ -222,6 +647,40 @@ class TrainingMetadataTests(unittest.TestCase):
             "MODEL_LABEL_TAKE_PROFIT": "0.01",
             "MODEL_LABEL_STOP_LOSS": "0.01",
             "MODEL_LABEL_TIMEOUT_AS_TRADE": "1",
+            "MODEL_LABEL_TIMEOUT_MIN_NET_RETURN": "0.0",
+            "MODEL_LABEL_TIMEOUT_MAX_MAE_RATIO": "0.6",
+        }):
+            labeled = train_module.create_labels(df, future_window=1, threshold=0.01)
+
+        self.assertEqual(len(labeled), 1)
+        filter_summary = labeled.attrs["label_filter_summary"]
+        self.assertTrue(filter_summary["enabled"])
+        self.assertEqual(filter_summary["ignored_rows"], 1)
+        self.assertEqual(filter_summary["ignored_outcome_counts"], {"TIMEOUT_WEAK_POSITIVE": 1})
+        self.assertEqual(filter_summary["ignored_reason_counts"], {"timeout_weak_positive_not_trade": 1})
+        self.assertEqual(set(labeled["label_outcome"]), {"TIMEOUT_WEAK_NEGATIVE"})
+
+    def test_realistic_quality_labels_allow_timeout_weak_positive_as_trade_when_enabled(self):
+        index = pd.date_range("2026-01-01", periods=3, freq="5min", tz="UTC")
+        close = pd.Series([100.0, 100.5, 100.5], index=index)
+        df = pd.DataFrame({
+            "5m_close": close,
+            "5m_high": [100.0, 100.6, 100.6],
+            "5m_low": [100.0, 99.8, 100.0],
+            "5m_atr": 0.1,
+            "volatility_15": 0.0,
+            "money_flow_ratio": 1.0,
+            "15m_ema_20": close * 0.99,
+            "15m_ema_60": close * 0.98,
+        }, index=index)
+
+        with patch.dict(os.environ, {
+            "MODEL_LABEL_USE_REALISTIC": "1",
+            "MODEL_LABEL_LOOKAHEAD_BARS": "1",
+            "MODEL_LABEL_TAKE_PROFIT": "0.01",
+            "MODEL_LABEL_STOP_LOSS": "0.01",
+            "MODEL_LABEL_TIMEOUT_AS_TRADE": "1",
+            "MODEL_LABEL_TIMEOUT_WEAK_POSITIVE_AS_TRADE": "1",
             "MODEL_LABEL_TIMEOUT_MIN_NET_RETURN": "0.0",
             "MODEL_LABEL_TIMEOUT_MAX_MAE_RATIO": "0.6",
         }):
@@ -416,16 +875,20 @@ class TrainingMetadataTests(unittest.TestCase):
             "label_direction": ["long", "long", "long", "long", "long", "long", "short", "none"],
         }, index=index)
 
-        with patch("train.train.config.MODEL_TRADE_SAMPLE_WEIGHT_MULTIPLIER", 1.0):
-            with patch("train.train.config.MODEL_NO_TRADE_SAMPLE_WEIGHT_MULTIPLIER", 1.0):
-                sample_weight, _ = train_module.build_sample_weights(
-                    X,
-                    y,
-                    sample_context=sample_context,
-                    recent_boost=0.0,
-                    min_weight=0.0,
-                    max_weight=1000.0,
-                )
+        with patch.dict(os.environ, {
+            "MODEL_DIRECTION_TRADE_SAMPLE_WEIGHT_MULTIPLIERS": "",
+            "MODEL_DIRECTION_HARD_NEGATIVE_SAMPLE_WEIGHT_MULTIPLIERS": "",
+        }):
+            with patch("train.train.config.MODEL_TRADE_SAMPLE_WEIGHT_MULTIPLIER", 1.0):
+                with patch("train.train.config.MODEL_NO_TRADE_SAMPLE_WEIGHT_MULTIPLIER", 1.0):
+                    sample_weight, _ = train_module.build_sample_weights(
+                        X,
+                        y,
+                        sample_context=sample_context,
+                        recent_boost=0.0,
+                        min_weight=0.0,
+                        max_weight=1000.0,
+                    )
 
         targets = y.astype(int).map(train_module._target_direction)
         groups = targets + ":" + sample_context["label_regime"] + ":" + sample_context["label_direction"]
@@ -437,29 +900,37 @@ class TrainingMetadataTests(unittest.TestCase):
         self.assertAlmostEqual(group_totals["no_trade:trend_short:short"], group_totals["no_trade:range_high_vol:none"])
 
     def test_sample_weights_boost_sl_and_timeout_weak_negative_rows(self):
-        index = pd.date_range("2026-01-01", periods=6, freq="5min", tz="UTC")
+        index = pd.date_range("2026-01-01", periods=7, freq="5min", tz="UTC")
         X = pd.DataFrame({
-            "trend_bias_num": [1.0] * 6,
-            "regime_trend_long": [1.0] * 6,
-            "regime_trend_short": [0.0] * 6,
-            "regime_range_high_vol": [0.0] * 6,
+            "trend_bias_num": [1.0] * 7,
+            "regime_trend_long": [1.0] * 7,
+            "regime_trend_short": [0.0] * 7,
+            "regime_range_high_vol": [0.0] * 7,
         }, index=index)
-        y = pd.Series([1, 1, 0, 0, 0, 0], index=index)
+        y = pd.Series([1, 1, 0, 0, 0, 0, 0], index=index)
         sample_context = pd.DataFrame({
-            "label_regime": ["trend_long"] * 6,
-            "label_direction": ["long"] * 6,
-            "label_outcome": ["TP", "TIMEOUT_WEAK_POSITIVE", "SL", "TIMEOUT_WEAK_NEGATIVE", "NO_DIRECTION", "RULE_BLOCK"],
+            "label_regime": ["trend_long"] * 7,
+            "label_direction": ["long"] * 7,
+            "label_outcome": [
+                "TP", "TIMEOUT_WEAK_POSITIVE", "SL", "TIMEOUT_WEAK_NEGATIVE",
+                "TP_WEAK_LONG_TREND", "NO_DIRECTION", "RULE_BLOCK",
+            ],
             "label_reject_reason": [
                 "accepted",
                 "accepted",
                 "outcome_sl",
                 "timeout_weak_negative_net_return",
+                "long_trend_weak_tp_slow",
                 "neutral_trend",
                 "regime_block:range_high_vol",
             ],
         }, index=index)
 
-        with patch.dict(os.environ, {"MODEL_HARD_NEGATIVE_SAMPLE_WEIGHT_MULTIPLIER": "3.0"}):
+        with patch.dict(os.environ, {
+            "MODEL_HARD_NEGATIVE_SAMPLE_WEIGHT_MULTIPLIER": "3.0",
+            "MODEL_DIRECTION_TRADE_SAMPLE_WEIGHT_MULTIPLIERS": "",
+            "MODEL_DIRECTION_HARD_NEGATIVE_SAMPLE_WEIGHT_MULTIPLIERS": "",
+        }):
             with patch("train.train.config.MODEL_TRADE_SAMPLE_WEIGHT_MULTIPLIER", 1.0):
                 with patch("train.train.config.MODEL_NO_TRADE_SAMPLE_WEIGHT_MULTIPLIER", 1.0):
                     sample_weight, summary = train_module.build_sample_weights(
@@ -475,9 +946,89 @@ class TrainingMetadataTests(unittest.TestCase):
         ordinary_no_trade_mask = (y == 0) & ~hard_negative_mask
 
         self.assertEqual(summary["hard_negative_multiplier"], 3.0)
-        self.assertEqual(summary["hard_negative_rows"], 2)
+        self.assertEqual(summary["hard_negative_rows"], 3)
         self.assertGreater(sample_weight.loc[hard_negative_mask].mean(), sample_weight.loc[ordinary_no_trade_mask].mean())
+        self.assertGreater(sample_weight.loc[hard_negative_mask].mean(), sample_weight.loc[y == 1].mean())
         self.assertGreater(summary["hard_negative_weight_mean"], 0.0)
+
+    def test_sample_weights_apply_direction_specific_trade_and_hard_negative_boosts(self):
+        index = pd.date_range("2026-01-01", periods=8, freq="5min", tz="UTC")
+        X = pd.DataFrame({
+            "trend_bias_num": [1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, -1.0],
+            "regime_trend_long": [1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0],
+            "regime_trend_short": [0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0],
+            "regime_range_high_vol": [0.0] * 8,
+        }, index=index)
+        y = pd.Series([1, 1, 1, 1, 0, 0, 0, 0], index=index)
+        sample_context = pd.DataFrame({
+            "label_regime": [
+                "trend_long", "trend_long", "trend_short", "trend_short",
+                "trend_long", "trend_long", "trend_short", "trend_short",
+            ],
+            "label_direction": ["long", "long", "short", "short", "long", "long", "short", "short"],
+            "label_outcome": ["TP", "TP", "TP", "TP", "SL", "SL", "SL", "SL"],
+            "label_reject_reason": [
+                "accepted", "accepted", "accepted", "accepted",
+                "outcome_sl", "outcome_sl", "outcome_sl", "outcome_sl",
+            ],
+        }, index=index)
+
+        with patch.dict(os.environ, {
+            "MODEL_HARD_NEGATIVE_SAMPLE_WEIGHT_MULTIPLIER": "1.0",
+            "MODEL_DIRECTION_TRADE_SAMPLE_WEIGHT_MULTIPLIERS": "long:trend_long=2.0",
+            "MODEL_DIRECTION_HARD_NEGATIVE_SAMPLE_WEIGHT_MULTIPLIERS": "short:trend_short=3.0",
+        }):
+            with patch("train.train.config.MODEL_TRADE_SAMPLE_WEIGHT_MULTIPLIER", 1.0):
+                with patch("train.train.config.MODEL_NO_TRADE_SAMPLE_WEIGHT_MULTIPLIER", 1.0):
+                    sample_weight, summary = train_module.build_sample_weights(
+                        X,
+                        y,
+                        sample_context=sample_context,
+                        recent_boost=0.0,
+                        min_weight=0.0,
+                        max_weight=1000.0,
+                    )
+
+        long_trade_mask = (y == 1) & (sample_context["label_direction"] == "long")
+        short_trade_mask = (y == 1) & (sample_context["label_direction"] == "short")
+        long_hard_negative_mask = (
+            (y == 0)
+            & (sample_context["label_direction"] == "long")
+            & (sample_context["label_outcome"] == "SL")
+        )
+        short_hard_negative_mask = (
+            (y == 0)
+            & (sample_context["label_direction"] == "short")
+            & (sample_context["label_outcome"] == "SL")
+        )
+
+        self.assertGreater(sample_weight.loc[long_trade_mask].mean(), sample_weight.loc[short_trade_mask].mean())
+        self.assertGreater(
+            sample_weight.loc[short_hard_negative_mask].mean(),
+            sample_weight.loc[long_hard_negative_mask].mean(),
+        )
+        self.assertEqual(summary["direction_trade_multipliers"], {"long:trend_long": 2.0})
+        self.assertEqual(summary["direction_hard_negative_multipliers"], {"short:trend_short": 3.0})
+        self.assertEqual(summary["direction_trade_multiplier_effects"]["long:trend_long"]["rows"], 2)
+        self.assertEqual(summary["direction_hard_negative_multiplier_effects"]["short:trend_short"]["rows"], 2)
+
+    def test_direction_weight_defaults_do_not_boost_trade_samples(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(train_module._direction_trade_sample_weight_multipliers(), {})
+            self.assertEqual(
+                train_module._direction_hard_negative_sample_weight_multipliers(),
+                {("long", "trend_long"): 2.0, ("short", "trend_short"): 2.0},
+            )
+
+        with patch.dict(os.environ, {
+            "MODEL_DIRECTION_TRADE_SAMPLE_WEIGHT_MULTIPLIERS": "",
+            "MODEL_DIRECTION_HARD_NEGATIVE_SAMPLE_WEIGHT_MULTIPLIERS": "",
+        }, clear=False):
+            trade_multipliers = train_module._direction_trade_sample_weight_multipliers()
+            hard_negative_multipliers = train_module._direction_hard_negative_sample_weight_multipliers()
+
+        self.assertEqual(trade_multipliers, {})
+        self.assertEqual(hard_negative_multipliers, {})
 
     def test_direction_quality_bundle_trains_long_and_short_submodels(self):
         index = pd.date_range("2026-01-01", periods=12, freq="5min", tz="UTC")
@@ -610,6 +1161,71 @@ class TrainingMetadataTests(unittest.TestCase):
         self.assertTrue(
             summary["directions"]["short"]["regime_calibration"]["lgb_v1"]["trend_short"]["active"]
         )
+
+    def test_direction_quality_inverse_calibration_is_direction_limited(self):
+        index = pd.date_range("2026-01-01", periods=40, freq="5min", tz="UTC")
+        model_scores = [
+            0.20, 0.80, 0.25, 0.75, 0.30,
+            0.70, 0.35, 0.65, 0.40, 0.60,
+            0.45, 0.55, 0.50, 0.58, 0.42,
+        ]
+        inverse_calibration_scores = [0.10, 0.20, 0.80, 0.90, 0.95]
+        direction_scores = model_scores + inverse_calibration_scores
+        model_targets = [0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0]
+        inverse_calibration_targets = [1, 1, 0, 0, 0]
+        direction_targets = model_targets + inverse_calibration_targets
+        X = pd.DataFrame({
+            "score": direction_scores + direction_scores,
+            "trend_bias_num": [1.0] * 20 + [-1.0] * 20,
+            "regime_trend_long": [1.0] * 20 + [0.0] * 20,
+            "regime_trend_short": [0.0] * 20 + [1.0] * 20,
+            "regime_range_high_vol": [0.0] * 40,
+        }, index=index)
+        y = pd.Series(direction_targets + direction_targets, index=index)
+        context = pd.DataFrame({
+            "label_direction": ["long"] * 20 + ["short"] * 20,
+            "label_regime": ["trend_long"] * 20 + ["trend_short"] * 20,
+            "label_outcome": ["TP" if value else "SL" for value in y],
+            "label_reject_reason": ["accepted" if value else "outcome_sl" for value in y],
+        }, index=index)
+
+        with patch.dict(os.environ, {
+            "MODEL_DIRECTION_QUALITY_ALLOW_INVERSE_CALIBRATION": "1",
+            "MODEL_DIRECTION_QUALITY_INVERSE_CALIBRATION_DIRECTIONS": "short",
+        }):
+            with patch("train.train.build_model_estimators", return_value={
+                "lgb_v1": FeatureProbabilityEstimator(),
+                "xgb_v1": FeatureProbabilityEstimator(),
+                "rf_v1": FeatureProbabilityEstimator(),
+            }):
+                with patch("train.train.config.MODEL_DIRECTION_QUALITY_MIN_ROWS", 4):
+                    with patch("train.train.config.MODEL_DIRECTION_QUALITY_MIN_TRADE_ROWS", 2):
+                        with patch("train.train.config.MODEL_DIRECTION_QUALITY_CALIBRATION", "sigmoid"):
+                            with patch("train.train.config.MODEL_DIRECTION_QUALITY_CALIBRATION_RATIO", 0.25):
+                                with patch("train.train.config.MODEL_DIRECTION_QUALITY_CALIBRATION_MIN_ROWS", 4):
+                                    with patch("train.train.config.MODEL_DIRECTION_QUALITY_CALIBRATION_MIN_POSITIVES", 1):
+                                        with patch("train.train.config.MODEL_DIRECTION_QUALITY_CALIBRATION_MIN_NEGATIVES", 1):
+                                            with patch("train.train.config.MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION", True):
+                                                with patch("train.train.config.MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION_MIN_ROWS", 4):
+                                                    with patch("train.train.config.MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION_MIN_POSITIVES", 1):
+                                                        with patch("train.train.config.MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION_MIN_NEGATIVES", 1):
+                                                            models, _, _, _, summary = train_module.train_direction_quality_bundle(
+                                                                X,
+                                                                y,
+                                                                sample_context=context,
+                                                            )
+
+        long_calibration = summary["directions"]["long"]["calibration"]["lgb_v1"]
+        short_calibration = summary["directions"]["short"]["calibration"]["lgb_v1"]
+        self.assertEqual(summary["inverse_calibration_directions"], ["short"])
+        self.assertFalse(summary["directions"]["long"]["allow_inverse_calibration"])
+        self.assertTrue(summary["directions"]["short"]["allow_inverse_calibration"])
+        self.assertFalse(long_calibration["active"])
+        self.assertEqual(long_calibration["fallback_reason"], "calibration_negative_slope")
+        self.assertTrue(short_calibration["active"])
+        self.assertTrue(short_calibration["inverted"])
+        self.assertEqual(models["lgb_v1"].calibrated_directions, ["short"])
+        self.assertEqual(models["lgb_v1"].calibrated_direction_regimes, ["short:trend_short"])
 
     def test_write_json_atomic_round_trips_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:

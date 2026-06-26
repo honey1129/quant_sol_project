@@ -21,6 +21,7 @@ class MultiPeriodSignalPredictor:
         self.model_paths = {name: os.path.join(BASE_DIR, path) for name, path in config.MODEL_PATHS.items()}
         self.models = {name: joblib.load(path) for name, path in self.model_paths.items()}
         self.model_weights = config.MODEL_WEIGHTS
+        self.direction_model_weights = getattr(config, "MODEL_DIRECTION_MODEL_WEIGHTS", {})
         metadata_path = os.path.join(BASE_DIR, config.TRAINING_METADATA_PATH)
         self.model_metadata = {}
         if os.path.exists(metadata_path):
@@ -127,6 +128,7 @@ class MultiPeriodSignalPredictor:
             self.model_weights,
             trend_bias=trend_context.get("trend_bias"),
             model_metadata=self.model_metadata,
+            direction_model_weights=self.direction_model_weights,
         )
         long_prob, short_prob = avg_prob[1], avg_prob[0]
 
