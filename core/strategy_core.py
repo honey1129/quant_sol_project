@@ -74,6 +74,12 @@ class StrategyCore:
         regime_range_min_signal_target_ratio: float = None,
         regime_high_vol_min_signal_target_ratio: float = None,
         block_losing_position_adds: bool = True,
+        loss_condition_guard_enabled: bool = False,
+        loss_guard_block_new_regimes=None,
+        loss_guard_block_directions=None,
+        loss_guard_exit_regimes=None,
+        loss_guard_exit_min_hold_bars: int = 0,
+        loss_guard_exit_only_when_unprofitable: bool = False,
         dynamic_risk_controller=None,
     ):
         self.pm = position_manager
@@ -150,6 +156,12 @@ class StrategyCore:
             else max(0.0, float(regime_high_vol_min_signal_target_ratio))
         )
         self.block_losing_position_adds = bool(block_losing_position_adds)
+        self.loss_condition_guard_enabled = bool(loss_condition_guard_enabled)
+        self.loss_guard_block_new_regimes = self._normalize_string_set(loss_guard_block_new_regimes)
+        self.loss_guard_block_directions = self._normalize_string_set(loss_guard_block_directions)
+        self.loss_guard_exit_regimes = self._normalize_string_set(loss_guard_exit_regimes)
+        self.loss_guard_exit_min_hold_bars = max(0, int(loss_guard_exit_min_hold_bars))
+        self.loss_guard_exit_only_when_unprofitable = bool(loss_guard_exit_only_when_unprofitable)
         self.dynamic_risk_controller = dynamic_risk_controller
 
         self.position = 0.0
@@ -222,6 +234,49 @@ class StrategyCore:
         if not math.isfinite(value) or value <= 0:
             return None
         return value
+
+    def _normalize_string_set(self, values):
+        if values is None:
+            return set()
+        if isinstance(values, str):
+            values = values.replace("|", ",").split(",")
+        normalized = set()
+        for value in values:
+            item = str(value or "").strip().lower()
+            if item:
+                normalized.add(item)
+        return normalized
+
+    def _loss_guard_new_entry_reason(self, direction, market_regime):
+        if not self.loss_condition_guard_enabled:
+            return None
+        direction = str(direction or "").lower()
+        if not direction:
+            return None
+        regime = str(market_regime or "").lower()
+        if direction in self.loss_guard_block_directions:
+            return f"LossGuardDirection({direction})"
+        if regime and regime in self.loss_guard_block_new_regimes:
+            return f"LossGuardRegime({regime})"
+        return None
+
+    def _loss_guard_exit_reason(self, pos, price, market_regime):
+        if not self.loss_condition_guard_enabled or pos == 0:
+            return None
+        regime = str(market_regime or "").lower()
+        if not regime or regime not in self.loss_guard_exit_regimes:
+            return None
+        if int(self.hold_bars) < self.loss_guard_exit_min_hold_bars:
+            return None
+        if self.loss_guard_exit_only_when_unprofitable and self.entry_price > 0:
+            pnl_pct = (
+                (float(price) - self.entry_price) / self.entry_price
+                if pos > 0 else
+                (self.entry_price - float(price)) / self.entry_price
+            )
+            if pnl_pct >= 0:
+                return None
+        return f"LossGuardExit({regime})"
 
     def resolve_risk_thresholds(self, *, volatility: float = None, atr_ratio: float = None, market_regime: str = None):
         if not self.adaptive_tp_sl_enabled:
@@ -573,6 +628,9 @@ class StrategyCore:
                 return self._build_close_action(pos=pos, reason="TakeProfit", risk_decision=risk_decision)
             if pnl_pct <= -stop_loss:
                 return self._build_close_action(pos=pos, reason="StopLoss", risk_decision=risk_decision)
+            loss_guard_exit_reason = self._loss_guard_exit_reason(pos, price, market_regime)
+            if loss_guard_exit_reason is not None:
+                return self._build_close_action(pos=pos, reason=loss_guard_exit_reason, risk_decision=risk_decision)
 
         if pos == 0 and cooldown_remaining > 0:
             return self._with_risk({
@@ -630,6 +688,19 @@ class StrategyCore:
             target_direction = "long"
         elif target_ratio < 0:
             target_direction = "short"
+        raw_signal_direction, raw_signal_prob_gap, raw_dominant_prob = self._dominant_signal_direction(
+            long_prob,
+            short_prob,
+            min_prob_diff=self.reverse_exit_min_prob_diff,
+            regime=market_regime,
+        )
+        target_direction_for_entry_guard = target_direction
+        if (
+            target_direction_for_entry_guard is None
+            and str(block_reason or "").startswith("RegimeFilter")
+            and abs(raw_target_ratio) > 0
+        ):
+            target_direction_for_entry_guard = "long" if raw_target_ratio > 0 else "short"
         risk_decision = None
         if self.dynamic_risk_controller is not None and target_direction is not None:
             risk_decision = self.dynamic_risk_controller.evaluate(
@@ -644,13 +715,8 @@ class StrategyCore:
             target_position = target_ratio * equity / price
         trend_block_reason = self._trend_block_reason(target_direction, trend_bias)
         regime_block_reason = self._regime_block_reason(target_direction, market_regime)
-        entry_block_reason = regime_block_reason or trend_block_reason
-        raw_signal_direction, raw_signal_prob_gap, raw_dominant_prob = self._dominant_signal_direction(
-            long_prob,
-            short_prob,
-            min_prob_diff=self.reverse_exit_min_prob_diff,
-            regime=market_regime,
-        )
+        loss_guard_entry_reason = self._loss_guard_new_entry_reason(target_direction_for_entry_guard, market_regime)
+        entry_block_reason = loss_guard_entry_reason or regime_block_reason or trend_block_reason
         same_direction = (pos > 0 and target_position > 0) or (pos < 0 and target_position < 0)
         raw_reverse_signal = (
             (pos > 0 and raw_signal_direction == "short") or
@@ -675,10 +741,13 @@ class StrategyCore:
         # 3) 空仓 -> 只允许开仓
         # ======================
         if pos == 0:
+            entry_candidate_notional = max(
+                abs(target_position * price),
+                abs(raw_target_ratio * equity),
+            )
             if (
                 entry_block_reason is not None
-                and target_position != 0
-                and abs(target_position * price) >= self.min_adjust_amount
+                and entry_candidate_notional >= self.min_adjust_amount
             ):
                 return self._with_risk(attach_signal_diagnostics({
                     "action": "HOLD",

@@ -307,6 +307,14 @@ REGIME_TREND_AGAINST_BLOCK = parse_env_bool(os.getenv("REGIME_TREND_AGAINST_BLOC
 REGIME_RANGE_TARGET_MULTIPLIER = float(os.getenv("REGIME_RANGE_TARGET_MULTIPLIER", 0.60))
 REGIME_HIGH_VOL_TARGET_MULTIPLIER = float(os.getenv("REGIME_HIGH_VOL_TARGET_MULTIPLIER", 0.35))
 
+# ✅ 反向过滤风控：由 live_fills 亏损状态诊断驱动，先阻断系统性亏损的市场状态。
+LOSS_CONDITION_GUARD_ENABLED = parse_env_bool(os.getenv("LOSS_CONDITION_GUARD_ENABLED"), True)
+LOSS_GUARD_BLOCK_NEW_REGIMES = parse_env_list(os.getenv("LOSS_GUARD_BLOCK_NEW_REGIMES", "range_high_vol"))
+LOSS_GUARD_BLOCK_DIRECTIONS = parse_env_list(os.getenv("LOSS_GUARD_BLOCK_DIRECTIONS", "short"))
+LOSS_GUARD_EXIT_REGIMES = parse_env_list(os.getenv("LOSS_GUARD_EXIT_REGIMES", "range_high_vol"))
+LOSS_GUARD_EXIT_MIN_HOLD_BARS = int(os.getenv("LOSS_GUARD_EXIT_MIN_HOLD_BARS", 0))
+LOSS_GUARD_EXIT_ONLY_WHEN_UNPROFITABLE = parse_env_bool(os.getenv("LOSS_GUARD_EXIT_ONLY_WHEN_UNPROFITABLE"), False)
+
 # ✅ Kelly 盈亏比
 KELLY_REWARD_RISK = float(os.getenv("KELLY_REWARD_RISK", 2.8))
 

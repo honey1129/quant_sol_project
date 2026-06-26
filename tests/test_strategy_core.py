@@ -676,10 +676,6 @@ class StrategyCoreRebalanceTests(unittest.TestCase):
         self.assertEqual(out["action"], "OPEN")
         self.assertGreater(out["delta_qty"], 0)
 
-
-if __name__ == "__main__":
-    unittest.main()
-
 class StrategyCoreRegimeTests(unittest.TestCase):
     def build_core(self, target_ratio=0.2, **kwargs):
         defaults = dict(
@@ -804,3 +800,107 @@ class StrategyCoreRegimeTests(unittest.TestCase):
         )
         self.assertEqual(out["action"], "HOLD")
         self.assertEqual(out["reason"], "RegimeFilter(range_high_vol)")
+
+    def test_loss_guard_blocks_short_open(self):
+        core = self.build_core(
+            target_ratio=0.3,
+            loss_condition_guard_enabled=True,
+            loss_guard_block_directions=["short"],
+        )
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.10,
+            short_prob=0.90,
+            money_flow_ratio=1.0,
+            volatility=0.001,
+            market_regime="trend_short",
+        )
+        self.assertEqual(out["action"], "HOLD")
+        self.assertEqual(out["reason"], "LossGuardDirection(short)")
+
+    def test_loss_guard_blocks_range_high_vol_open_before_regime_filter(self):
+        core = self.build_core(
+            target_ratio=0.4,
+            loss_condition_guard_enabled=True,
+            loss_guard_block_new_regimes=["range_high_vol"],
+        )
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.90,
+            short_prob=0.10,
+            money_flow_ratio=1.0,
+            volatility=0.003,
+            market_regime="range_high_vol",
+        )
+        self.assertEqual(out["action"], "HOLD")
+        self.assertEqual(out["reason"], "LossGuardRegime(range_high_vol)")
+
+    def test_loss_guard_exits_position_on_range_high_vol_before_min_hold(self):
+        core = self.build_core(
+            target_ratio=0.2,
+            min_hold_bars=10,
+            loss_condition_guard_enabled=True,
+            loss_guard_exit_regimes=["range_high_vol"],
+            loss_guard_exit_min_hold_bars=0,
+        )
+        core.set_state(position=5.0, entry_price=100.0, hold_bars=0)
+        out = core.on_bar(
+            price=99.8,
+            equity=1000.0,
+            long_prob=0.80,
+            short_prob=0.20,
+            money_flow_ratio=1.0,
+            volatility=0.001,
+            market_regime="range_high_vol",
+        )
+        self.assertEqual(out["action"], "CLOSE")
+        self.assertEqual(out["reason"], "LossGuardExit(range_high_vol)")
+
+    def test_loss_guard_exit_only_when_unprofitable_keeps_profitable_position(self):
+        core = self.build_core(
+            target_ratio=0.2,
+            min_hold_bars=5,
+            loss_condition_guard_enabled=True,
+            loss_guard_exit_regimes=["range_high_vol"],
+            loss_guard_exit_only_when_unprofitable=True,
+        )
+        core.set_state(position=5.0, entry_price=100.0, hold_bars=0)
+        out = core.on_bar(
+            price=100.2,
+            equity=1000.0,
+            long_prob=0.80,
+            short_prob=0.20,
+            money_flow_ratio=1.0,
+            volatility=0.001,
+            market_regime="range_high_vol",
+        )
+        self.assertEqual(out["action"], "HOLD")
+        self.assertEqual(out["reason"], "MinHold(1/5)")
+
+    def test_loss_guard_does_not_block_position_reduction(self):
+        core = self.build_core(
+            target_ratio=0.2,
+            add_threshold=0.0,
+            loss_condition_guard_enabled=True,
+            loss_guard_block_new_regimes=["range_high_vol"],
+            loss_guard_block_directions=["long"],
+            loss_guard_exit_regimes=[],
+        )
+        core.set_state(position=5.0, entry_price=100.0, hold_bars=5)
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.90,
+            short_prob=0.10,
+            money_flow_ratio=1.0,
+            volatility=0.003,
+            market_regime="trend_long",
+        )
+        self.assertEqual(out["action"], "REBALANCE")
+        self.assertLess(out["delta_qty"], 0.0)
+
+
+if __name__ == "__main__":
+    unittest.main()
