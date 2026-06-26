@@ -18,8 +18,11 @@ def make_args(**overrides):
         "entry_filters": "none",
         "pullback_pct_values": "0.003,0.006",
         "breakout_lookbacks": "12,24",
+        "failed_breakout_reclaim_pct_values": "0,0.001",
         "flow_min_values": "1.0,1.2",
         "low_vol_max_values": "0.003,0.005",
+        "volatility_min_values": "",
+        "trend_gap_min_values": "",
         "max_candidates": 0,
         "min_rows": 2,
         "min_profit_factor": 1.05,
@@ -125,6 +128,100 @@ class RuleEdgeSweepTests(unittest.TestCase):
         self.assertFalse(mask.iloc[2])
         self.assertTrue(mask.iloc[4])
         self.assertFalse(mask.iloc[5])
+
+    def test_entry_filter_supports_volatility_and_trend_gap_minimums(self):
+        index = pd.date_range("2026-01-01", periods=4, freq="5min", tz="UTC")
+        labeled = pd.DataFrame({
+            "label_direction": ["short", "short", "short", "none"],
+            "5m_close": [100.0, 99.0, 98.0, 97.0],
+            "5m_high": [101.0, 100.0, 99.0, 98.0],
+            "5m_low": [99.0, 98.0, 97.0, 96.0],
+            "money_flow_ratio": [1.3, 1.3, 1.3, 1.3],
+            "volume_ratio": [1.0, 1.0, 1.0, 1.0],
+            "volatility_15": [0.004, 0.001, 0.004, 0.001],
+            "trend_gap_abs": [0.004, 0.004, 0.001, 0.004],
+        }, index=index)
+
+        mask = sweep.entry_filter_mask(labeled, {
+            "name": "flow",
+            "params": {
+                "flow_min": 1.2,
+                "volatility_min": 0.003,
+                "trend_gap_min": 0.003,
+            },
+        })
+
+        self.assertTrue(mask.iloc[0])
+        self.assertFalse(mask.iloc[1])
+        self.assertFalse(mask.iloc[2])
+        self.assertTrue(mask.iloc[3])
+
+    def test_none_entry_filter_applies_state_gates(self):
+        index = pd.date_range("2026-01-01", periods=3, freq="5min", tz="UTC")
+        labeled = pd.DataFrame({
+            "label_direction": ["short", "short", "none"],
+            "5m_close": [100.0, 99.0, 98.0],
+            "volatility_15": [0.004, 0.001, 0.001],
+            "trend_gap_abs": [0.004, 0.004, 0.001],
+        }, index=index)
+
+        mask = sweep.entry_filter_mask(labeled, {
+            "name": "none",
+            "params": {
+                "volatility_min": 0.003,
+                "trend_gap_min": 0.003,
+            },
+        })
+
+        self.assertTrue(mask.iloc[0])
+        self.assertFalse(mask.iloc[1])
+        self.assertTrue(mask.iloc[2])
+
+    def test_apply_entry_filter_supports_failed_breakout_by_direction(self):
+        index = pd.date_range("2026-01-01", periods=6, freq="5min", tz="UTC")
+        labeled = pd.DataFrame({
+            "label_direction": ["none", "none", "short", "short", "long", "long"],
+            "5m_close": [100.0, 100.5, 100.4, 102.1, 100.0, 98.0],
+            "5m_high": [101.0, 101.2, 102.0, 102.2, 101.0, 100.5],
+            "5m_low": [99.0, 99.2, 99.8, 100.0, 98.7, 97.5],
+        }, index=index)
+
+        mask = sweep.entry_filter_mask(labeled, {
+            "name": "failed_breakout",
+            "params": {
+                "failed_breakout_lookback": 2,
+                "failed_breakout_reclaim_pct": 0.0,
+            },
+        })
+
+        self.assertTrue(mask.iloc[2])
+        self.assertFalse(mask.iloc[3])
+        self.assertTrue(mask.iloc[4])
+        self.assertFalse(mask.iloc[5])
+
+    def test_apply_entry_filter_supports_pullback_continuation(self):
+        index = pd.date_range("2026-01-01", periods=5, freq="5min", tz="UTC")
+        labeled = pd.DataFrame({
+            "label_direction": ["none", "long", "long", "short", "short"],
+            "5m_open": [100.0, 99.8, 100.5, 100.4, 99.5],
+            "5m_close": [99.8, 100.3, 100.0, 99.7, 100.2],
+            "5m_high": [100.1, 100.4, 100.7, 100.5, 100.4],
+            "5m_low": [99.6, 99.7, 99.8, 99.6, 99.4],
+            "5m_ema_20": [100.0] * 5,
+            "5m_ema_60": [100.0] * 5,
+        }, index=index)
+
+        mask = sweep.entry_filter_mask(labeled, {
+            "name": "pullback_continuation",
+            "params": {
+                "pullback_pct": 0.003,
+            },
+        })
+
+        self.assertTrue(mask.iloc[1])
+        self.assertFalse(mask.iloc[2])
+        self.assertTrue(mask.iloc[3])
+        self.assertFalse(mask.iloc[4])
 
     def test_summarize_candidate_result_marks_passing_direction(self):
         report = {

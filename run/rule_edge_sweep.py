@@ -27,10 +27,14 @@ ENTRY_FILTER_COMPONENTS = {
     "none": (),
     "pullback": ("pullback",),
     "breakout": ("breakout",),
+    "failed_breakout": ("failed_breakout",),
+    "pullback_continuation": ("pullback_continuation",),
     "flow": ("flow",),
     "low_vol": ("low_vol",),
     "pullback_flow": ("pullback", "flow"),
     "breakout_flow": ("breakout", "flow"),
+    "failed_breakout_flow": ("failed_breakout", "flow"),
+    "pullback_continuation_flow": ("pullback_continuation", "flow"),
     "low_vol_flow": ("low_vol", "flow"),
 }
 
@@ -153,10 +157,18 @@ def entry_filter_name(entry_filter):
         parts.append(f"pb{_compact_float(params['pullback_pct'])}")
     if "breakout_lookback" in params:
         parts.append(f"bo{int(params['breakout_lookback'])}")
+    if "failed_breakout_lookback" in params:
+        parts.append(f"fb{int(params['failed_breakout_lookback'])}")
+    if "failed_breakout_reclaim_pct" in params:
+        parts.append(f"rc{_compact_float(params['failed_breakout_reclaim_pct'])}")
     if "flow_min" in params:
         parts.append(f"fl{_compact_float(params['flow_min'], digits=2)}")
     if "low_vol_max" in params:
         parts.append(f"lv{_compact_float(params['low_vol_max'])}")
+    if "volatility_min" in params:
+        parts.append(f"vmin{_compact_float(params['volatility_min'])}")
+    if "trend_gap_min" in params:
+        parts.append(f"tgmin{_compact_float(params['trend_gap_min'])}")
     return "_".join(parts)
 
 
@@ -189,6 +201,13 @@ def build_entry_filter_candidates(args):
     breakout_values = parse_int_list(args.breakout_lookbacks)
     flow_values = parse_float_list(args.flow_min_values)
     low_vol_values = parse_float_list(args.low_vol_max_values)
+    failed_breakout_reclaim_values = parse_float_list(getattr(args, "failed_breakout_reclaim_pct_values", "0"))
+    if not failed_breakout_reclaim_values:
+        failed_breakout_reclaim_values = [0.0]
+    volatility_min_values = parse_float_list(getattr(args, "volatility_min_values", ""))
+    trend_gap_min_values = parse_float_list(getattr(args, "trend_gap_min_values", ""))
+    volatility_min_grid = volatility_min_values if volatility_min_values else [None]
+    trend_gap_min_grid = trend_gap_min_values if trend_gap_min_values else [None]
 
     filters = []
     for filter_name in filter_names:
@@ -196,29 +215,58 @@ def build_entry_filter_candidates(args):
             raise ValueError(f"未知 entry filter: {filter_name!r}")
         components = ENTRY_FILTER_COMPONENTS[filter_name]
         if not components:
-            filters.append({"name": "none", "params": {}})
+            for volatility_min, trend_gap_min in product(volatility_min_grid, trend_gap_min_grid):
+                params = {}
+                if volatility_min is not None:
+                    params["volatility_min"] = float(volatility_min)
+                if trend_gap_min is not None:
+                    params["trend_gap_min"] = float(trend_gap_min)
+                filters.append({"name": "none", "params": params})
             continue
 
-        pullback_grid = pullback_values if "pullback" in components else [None]
+        pullback_grid = pullback_values if ("pullback" in components or "pullback_continuation" in components) else [None]
         breakout_grid = breakout_values if "breakout" in components else [None]
+        failed_breakout_grid = breakout_values if "failed_breakout" in components else [None]
+        failed_reclaim_grid = failed_breakout_reclaim_values if "failed_breakout" in components else [None]
         flow_grid = flow_values if "flow" in components else [None]
         low_vol_grid = low_vol_values if "low_vol" in components else [None]
 
-        for pullback_pct, breakout_lookback, flow_min, low_vol_max in product(
+        for (
+            pullback_pct,
+            breakout_lookback,
+            failed_breakout_lookback,
+            failed_reclaim_pct,
+            flow_min,
+            low_vol_max,
+            volatility_min,
+            trend_gap_min,
+        ) in product(
             pullback_grid,
             breakout_grid,
+            failed_breakout_grid,
+            failed_reclaim_grid,
             flow_grid,
             low_vol_grid,
+            volatility_min_grid,
+            trend_gap_min_grid,
         ):
             params = {}
             if pullback_pct is not None:
                 params["pullback_pct"] = float(pullback_pct)
             if breakout_lookback is not None:
                 params["breakout_lookback"] = int(breakout_lookback)
+            if failed_breakout_lookback is not None:
+                params["failed_breakout_lookback"] = int(failed_breakout_lookback)
+            if failed_reclaim_pct is not None:
+                params["failed_breakout_reclaim_pct"] = float(failed_reclaim_pct)
             if flow_min is not None:
                 params["flow_min"] = float(flow_min)
             if low_vol_max is not None:
                 params["low_vol_max"] = float(low_vol_max)
+            if volatility_min is not None:
+                params["volatility_min"] = float(volatility_min)
+            if trend_gap_min is not None:
+                params["trend_gap_min"] = float(trend_gap_min)
             filters.append({"name": filter_name, "params": params})
     return filters
 
@@ -340,10 +388,9 @@ def entry_filter_mask(data, entry_filter):
     directions = _direction_values(data)
     candidate_mask = directions.isin(diag.TRADE_DIRECTIONS)
     pass_mask = pd.Series(True, index=data.index, dtype=bool)
-    if not components:
-        return pass_mask
 
     close = numeric_series(data, "5m_close")
+    open_price = numeric_series(data, "5m_open", default=np.nan).fillna(close)
     high = numeric_series(data, "5m_high", default=np.nan).fillna(close)
     low = numeric_series(data, "5m_low", default=np.nan).fillna(close)
     params = entry_filter["params"]
@@ -356,12 +403,45 @@ def entry_filter_mask(data, entry_filter):
         component_ok = ((directions == "long") & long_ok) | ((directions == "short") & short_ok)
         pass_mask &= (~candidate_mask) | component_ok.fillna(False)
 
+    if "pullback_continuation" in components:
+        pullback_pct = float(params.get("pullback_pct", 0.003))
+        ema20 = numeric_series(data, "5m_ema_20")
+        ema60 = numeric_series(data, "5m_ema_60").fillna(ema20)
+        prev_close = close.shift(1)
+        long_touch = (low <= ema20 * (1.0 + pullback_pct)) | (low <= ema60 * (1.0 + pullback_pct))
+        short_touch = (high >= ema20 * (1.0 - pullback_pct)) | (high >= ema60 * (1.0 - pullback_pct))
+        long_resume = (
+            (close >= open_price)
+            & (close >= prev_close)
+            & (close >= ema20 * (1.0 - pullback_pct))
+        )
+        short_resume = (
+            (close <= open_price)
+            & (close <= prev_close)
+            & (close <= ema20 * (1.0 + pullback_pct))
+        )
+        component_ok = (
+            ((directions == "long") & long_touch & long_resume)
+            | ((directions == "short") & short_touch & short_resume)
+        )
+        pass_mask &= (~candidate_mask) | component_ok.fillna(False)
+
     if "breakout" in components:
         lookback = max(1, int(params.get("breakout_lookback", 12)))
         prev_high = high.rolling(lookback, min_periods=lookback).max().shift(1)
         prev_low = low.rolling(lookback, min_periods=lookback).min().shift(1)
         long_ok = close >= prev_high
         short_ok = close <= prev_low
+        component_ok = ((directions == "long") & long_ok) | ((directions == "short") & short_ok)
+        pass_mask &= (~candidate_mask) | component_ok.fillna(False)
+
+    if "failed_breakout" in components:
+        lookback = max(1, int(params.get("failed_breakout_lookback", params.get("breakout_lookback", 12))))
+        reclaim_pct = max(0.0, float(params.get("failed_breakout_reclaim_pct", 0.0)))
+        prev_high = high.rolling(lookback, min_periods=lookback).max().shift(1)
+        prev_low = low.rolling(lookback, min_periods=lookback).min().shift(1)
+        long_ok = (low <= prev_low) & (close >= prev_low * (1.0 + reclaim_pct))
+        short_ok = (high >= prev_high) & (close <= prev_high * (1.0 - reclaim_pct))
         component_ok = ((directions == "long") & long_ok) | ((directions == "short") & short_ok)
         pass_mask &= (~candidate_mask) | component_ok.fillna(False)
 
@@ -376,6 +456,16 @@ def entry_filter_mask(data, entry_filter):
         low_vol_max = float(params.get("low_vol_max", 0.0))
         volatility = numeric_series(data, "volatility_15")
         component_ok = volatility <= low_vol_max
+        pass_mask &= (~candidate_mask) | component_ok.fillna(False)
+
+    if "volatility_min" in params:
+        volatility = numeric_series(data, "volatility_15")
+        component_ok = volatility >= float(params["volatility_min"])
+        pass_mask &= (~candidate_mask) | component_ok.fillna(False)
+
+    if "trend_gap_min" in params:
+        trend_gap_abs = numeric_series(data, "trend_gap_abs")
+        component_ok = trend_gap_abs >= float(params["trend_gap_min"])
         pass_mask &= (~candidate_mask) | component_ok.fillna(False)
 
     return pass_mask.astype(bool)
@@ -631,6 +721,11 @@ def run_sweep(args):
             "breakout_lookbacks": parse_int_list(args.breakout_lookbacks),
             "flow_min_values": parse_float_list(args.flow_min_values),
             "low_vol_max_values": parse_float_list(args.low_vol_max_values),
+            "failed_breakout_reclaim_pct_values": parse_float_list(
+                getattr(args, "failed_breakout_reclaim_pct_values", "")
+            ),
+            "volatility_min_values": parse_float_list(getattr(args, "volatility_min_values", "")),
+            "trend_gap_min_values": parse_float_list(getattr(args, "trend_gap_min_values", "")),
             "max_candidates": int(args.max_candidates or 0),
             "top_n": int(args.top_n),
         },
@@ -700,11 +795,14 @@ def parse_args(argv=None):
     parser.add_argument("--tp-sl-pairs", default=os.getenv("RULE_EDGE_SWEEP_TP_SL_PAIRS", "0.012:0.010,0.016:0.014,0.020:0.014"), help="TP:SL 候选，逗号分隔")
     parser.add_argument("--allow-high-vol-values", default=os.getenv("RULE_EDGE_SWEEP_ALLOW_HIGH_VOL", "0,1"), help="是否允许 range_high_vol 候选，0/1 逗号分隔")
     parser.add_argument("--allow-range-values", default=os.getenv("RULE_EDGE_SWEEP_ALLOW_RANGE", "1"), help="是否允许 range 候选，0/1 逗号分隔")
-    parser.add_argument("--entry-filters", default=os.getenv("RULE_EDGE_SWEEP_ENTRY_FILTERS", "none,pullback,breakout,flow,pullback_flow,breakout_flow"), help="入场过滤器候选，逗号分隔")
+    parser.add_argument("--entry-filters", default=os.getenv("RULE_EDGE_SWEEP_ENTRY_FILTERS", "none,pullback,breakout,flow,pullback_flow,breakout_flow,failed_breakout,pullback_continuation"), help="入场过滤器候选，逗号分隔")
     parser.add_argument("--pullback-pct-values", default=os.getenv("RULE_EDGE_SWEEP_PULLBACK_PCTS", "0.003,0.006"), help="pullback 最大偏离 5m_ema_20 候选")
     parser.add_argument("--breakout-lookbacks", default=os.getenv("RULE_EDGE_SWEEP_BREAKOUT_LOOKBACKS", "12,24"), help="breakout 前高/前低回看根数候选")
+    parser.add_argument("--failed-breakout-reclaim-pct-values", default=os.getenv("RULE_EDGE_SWEEP_FAILED_BREAKOUT_RECLAIM_PCTS", "0,0.001"), help="failed_breakout 收回前高/前低后的最小内收比例候选")
     parser.add_argument("--flow-min-values", default=os.getenv("RULE_EDGE_SWEEP_FLOW_MINS", "1.0,1.2"), help="money_flow_ratio 或 volume_ratio 最小值候选")
     parser.add_argument("--low-vol-max-values", default=os.getenv("RULE_EDGE_SWEEP_LOW_VOL_MAXES", "0.003,0.005"), help="volatility_15 最大值候选")
+    parser.add_argument("--volatility-min-values", default=os.getenv("RULE_EDGE_SWEEP_VOLATILITY_MINS", ""), help="可选 volatility_15 最小值状态门槛")
+    parser.add_argument("--trend-gap-min-values", default=os.getenv("RULE_EDGE_SWEEP_TREND_GAP_MINS", ""), help="可选 trend_gap_abs 最小值状态门槛")
     parser.add_argument("--max-candidates", type=int, default=int(os.getenv("RULE_EDGE_SWEEP_MAX_CANDIDATES", "120")), help=">0 时确定性抽样最多 N 个候选")
     parser.add_argument("--min-rows", type=int, default=int(os.getenv("RULE_EDGE_MIN_ROWS", "100")), help="方向最少候选交易样本数")
     parser.add_argument("--min-profit-factor", type=float, default=float(os.getenv("RULE_EDGE_MIN_PROFIT_FACTOR", "1.05")), help="正 edge 最低 PF")
