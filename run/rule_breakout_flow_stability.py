@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import time
+from contextlib import contextmanager
 from datetime import datetime
 
 import pandas as pd
@@ -28,6 +29,44 @@ STATUS_RANK = {
 }
 
 
+def parse_windows(raw_value):
+    windows = {}
+    for item in str(raw_value or "").replace("|", ",").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if ":" not in item:
+            raise ValueError(f"窗口格式应为 interval:rows，实际为 {item!r}")
+        interval, rows = item.split(":", 1)
+        windows[interval.strip()] = int(rows.strip())
+    return windows
+
+
+@contextmanager
+def temporary_windows(raw_windows):
+    from config import config
+
+    overrides = parse_windows(raw_windows)
+    if not overrides:
+        yield dict(config.WINDOWS)
+        return
+
+    original_windows = dict(config.WINDOWS)
+    original_env = os.environ.get("WINDOWS")
+    try:
+        merged = dict(config.WINDOWS)
+        merged.update(overrides)
+        config.WINDOWS = merged
+        os.environ["WINDOWS"] = ",".join(f"{key}:{value}" for key, value in merged.items())
+        yield dict(config.WINDOWS)
+    finally:
+        config.WINDOWS = original_windows
+        if original_env is None:
+            os.environ.pop("WINDOWS", None)
+        else:
+            os.environ["WINDOWS"] = original_env
+
+
 def build_sweep_args(args):
     return argparse.Namespace(
         rows=args.rows,
@@ -41,6 +80,8 @@ def build_sweep_args(args):
         breakout_lookbacks=args.breakout_lookbacks,
         flow_min_values=args.flow_min_values,
         low_vol_max_values="",
+        volatility_min_values=args.volatility_min_values,
+        trend_gap_min_values=args.trend_gap_min_values,
         max_candidates=args.max_candidates,
         min_rows=args.min_split_rows,
         min_profit_factor=args.min_profit_factor,
@@ -140,6 +181,152 @@ def summarize_period_buckets(data, direction, *, freq, min_rows, min_profit_fact
         "median_period_mean_net_return": float(pd.Series(means).median()) if means else 0.0,
         "periods": periods,
     })
+
+
+def numeric_quantile_bucket(series, labels=("low", "mid", "high")):
+    values = pd.to_numeric(series, errors="coerce").replace([float("inf"), float("-inf")], pd.NA)
+    non_null = values.dropna()
+    result = pd.Series("unknown", index=series.index, dtype=object)
+    if non_null.empty:
+        return result
+    unique_count = int(non_null.nunique(dropna=True))
+    if unique_count < len(labels):
+        median = float(non_null.median())
+        result.loc[values.notna()] = values.loc[values.notna()].map(
+            lambda item: "high" if float(item) >= median else "low"
+        )
+        return result
+    try:
+        bucketed = pd.qcut(non_null, q=len(labels), labels=labels, duplicates="drop")
+    except ValueError:
+        median = float(non_null.median())
+        result.loc[values.notna()] = values.loc[values.notna()].map(
+            lambda item: "high" if float(item) >= median else "low"
+        )
+        return result
+
+    bucketed = bucketed.astype(str)
+    result.loc[bucketed.index] = bucketed
+    return result
+
+
+def regime_bucket(data):
+    if "label_regime" in data:
+        return data["label_regime"].fillna("unknown").astype(str).str.lower()
+
+    regimes = pd.Series("range", index=data.index, dtype=object)
+    if "is_high_vol" in data:
+        regimes = regimes.mask(pd.to_numeric(data["is_high_vol"], errors="coerce").fillna(0.0) > 0.5, "range_high_vol")
+    if "regime_range_high_vol" in data:
+        regimes = regimes.mask(pd.to_numeric(data["regime_range_high_vol"], errors="coerce").fillna(0.0) > 0.5, "range_high_vol")
+    if "regime_trend_long" in data:
+        regimes = regimes.mask(pd.to_numeric(data["regime_trend_long"], errors="coerce").fillna(0.0) > 0.5, "trend_long")
+    if "regime_trend_short" in data:
+        regimes = regimes.mask(pd.to_numeric(data["regime_trend_short"], errors="coerce").fillna(0.0) > 0.5, "trend_short")
+    return regimes
+
+
+def summarize_grouped_candidates(data, direction, group_labels, *, min_rows, min_profit_factor, min_mean_net_return):
+    target = data.loc[direction_values(data) == str(direction).lower()].copy()
+    group_labels = group_labels.reindex(data.index).fillna("unknown").astype(str)
+    if target.empty:
+        return {
+            "group_count": 0,
+            "covered_group_count": 0,
+            "positive_group_count": 0,
+            "positive_group_ratio": 0.0,
+            "groups": [],
+        }
+
+    groups = []
+    for group_name, group in target.groupby(group_labels.reindex(target.index), sort=True):
+        summary = diag.summarize_group(
+            group,
+            strict_labeled=None,
+            min_rows=min_rows,
+            min_profit_factor=min_profit_factor,
+            min_mean_net_return=min_mean_net_return,
+        )
+        summary["group"] = str(group_name)
+        summary["start"] = group.index.min().isoformat()
+        summary["end"] = group.index.max().isoformat()
+        summary["diagnostic_split_counts"] = diag.value_counts(group.get("diagnostic_split"))
+        summary["metric_positive"] = metric_passes(
+            summary,
+            min_rows=min_rows,
+            min_profit_factor=min_profit_factor,
+            min_mean_net_return=min_mean_net_return,
+        )
+        groups.append(summary)
+
+    covered = [item for item in groups if int(item.get("candidate_rows", 0) or 0) >= int(min_rows)]
+    positive = [item for item in covered if item.get("metric_positive")]
+    return diag.json_safe({
+        "group_count": int(len(groups)),
+        "covered_group_count": int(len(covered)),
+        "positive_group_count": int(len(positive)),
+        "positive_group_ratio": float(len(positive) / len(covered)) if covered else 0.0,
+        "worst_group": min(covered, key=lambda item: float(item.get("mean_net_return", 0.0) or 0.0), default=None),
+        "best_group": max(covered, key=lambda item: float(item.get("mean_net_return", 0.0) or 0.0), default=None),
+        "groups": groups,
+    })
+
+
+def summarize_market_state_breakdown(data, direction, *, min_rows, min_profit_factor, min_mean_net_return):
+    data = data.copy()
+    breakdown = {
+        "by_regime": summarize_grouped_candidates(
+            data,
+            direction,
+            regime_bucket(data),
+            min_rows=min_rows,
+            min_profit_factor=min_profit_factor,
+            min_mean_net_return=min_mean_net_return,
+        ),
+        "by_volatility_15_bucket": summarize_grouped_candidates(
+            data,
+            direction,
+            numeric_quantile_bucket(data.get("volatility_15", pd.Series(index=data.index, dtype=float))),
+            min_rows=min_rows,
+            min_profit_factor=min_profit_factor,
+            min_mean_net_return=min_mean_net_return,
+        ),
+        "by_money_flow_bucket": summarize_grouped_candidates(
+            data,
+            direction,
+            numeric_quantile_bucket(data.get("money_flow_ratio", pd.Series(index=data.index, dtype=float))),
+            min_rows=min_rows,
+            min_profit_factor=min_profit_factor,
+            min_mean_net_return=min_mean_net_return,
+        ),
+        "by_volume_bucket": summarize_grouped_candidates(
+            data,
+            direction,
+            numeric_quantile_bucket(data.get("volume_ratio", pd.Series(index=data.index, dtype=float))),
+            min_rows=min_rows,
+            min_profit_factor=min_profit_factor,
+            min_mean_net_return=min_mean_net_return,
+        ),
+        "by_trend_gap_bucket": summarize_grouped_candidates(
+            data,
+            direction,
+            numeric_quantile_bucket(data.get("trend_gap_abs", pd.Series(index=data.index, dtype=float))),
+            min_rows=min_rows,
+            min_profit_factor=min_profit_factor,
+            min_mean_net_return=min_mean_net_return,
+        ),
+    }
+
+    month_regime = period_labels(data, "M").astype(str) + ":" + regime_bucket(data).astype(str)
+    breakdown["by_month_regime"] = summarize_grouped_candidates(
+        data,
+        direction,
+        month_regime,
+        min_rows=min_rows,
+        min_profit_factor=min_profit_factor,
+        min_mean_net_return=min_mean_net_return,
+    )
+    return diag.json_safe(breakdown)
 
 
 def split_direction_metrics(report, direction):
@@ -301,6 +488,13 @@ def build_candidate_stability(candidate, feature_data, args, sweep_args, label_c
     result["target_direction"] = args.direction
     result["target_direction_splits"] = split_metrics
     result["period_stability"] = period_stability
+    result["market_state_breakdown"] = summarize_market_state_breakdown(
+        selected,
+        args.direction,
+        min_rows=args.min_period_rows,
+        min_profit_factor=args.min_profit_factor,
+        min_mean_net_return=args.min_mean_net_return,
+    )
     result["stability_decision"] = classify_stability(split_metrics, period_stability, args)
     return diag.json_safe(result)
 
@@ -311,33 +505,41 @@ def run_stability(args):
     if not candidates:
         raise RuntimeError("没有生成任何 breakout_flow 稳定性候选")
 
-    feature_data = diag.load_feature_data()
-    label_cache = {}
-    results = []
-    for index, candidate in enumerate(candidates, start=1):
-        result = build_candidate_stability(candidate, feature_data, args, sweep_args, label_cache)
-        results.append(result)
-        if args.progress:
-            split = result["target_direction_splits"]
-            val = split["validation"]
-            oos = split["oos"]
-            log_info(
-                "breakout_flow稳定性 "
-                f"{index}/{len(candidates)} {candidate['name']} "
-                f"status={result['stability_decision']['status']} "
-                f"val={val['mean_net_return']:+.4%}/{val['profit_factor']} rows={val['candidate_rows']} "
-                f"oos={oos['mean_net_return']:+.4%}/{oos['profit_factor']} rows={oos['candidate_rows']}"
-            )
+    with temporary_windows(args.windows) as active_windows:
+        feature_data = diag.load_feature_data()
+        feature_range = {
+            "rows": int(len(feature_data)),
+            "start": feature_data.index.min().isoformat() if len(feature_data) else None,
+            "end": feature_data.index.max().isoformat() if len(feature_data) else None,
+        }
+        label_cache = {}
+        results = []
+        for index, candidate in enumerate(candidates, start=1):
+            result = build_candidate_stability(candidate, feature_data, args, sweep_args, label_cache)
+            results.append(result)
+            if args.progress:
+                split = result["target_direction_splits"]
+                val = split["validation"]
+                oos = split["oos"]
+                log_info(
+                    "breakout_flow稳定性 "
+                    f"{index}/{len(candidates)} {candidate['name']} "
+                    f"status={result['stability_decision']['status']} "
+                    f"val={val['mean_net_return']:+.4%}/{val['profit_factor']} rows={val['candidate_rows']} "
+                    f"oos={oos['mean_net_return']:+.4%}/{oos['profit_factor']} rows={oos['candidate_rows']}"
+                )
 
     ranked = sorted(results, key=result_sort_key, reverse=True)
     return diag.json_safe({
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "diagnostic": "breakout_flow_stability",
         "target_direction": args.direction,
+        "feature_range": feature_range,
         "candidate_count": int(len(results)),
         "status_counts": diag.value_counts(pd.Series([item["stability_decision"]["status"] for item in results])),
         "settings": {
             "rows": int(args.rows),
+            "windows": dict(active_windows),
             "trend_gaps": sweep.parse_float_list(args.trend_gaps),
             "regime_gap_multipliers": sweep.parse_float_list(args.regime_gap_multipliers),
             "tp_sl_pairs": sweep.parse_tp_sl_pairs(args.tp_sl_pairs),
@@ -345,6 +547,8 @@ def run_stability(args):
             "allow_range_values": sweep.parse_bool_list(args.allow_range_values),
             "breakout_lookbacks": sweep.parse_int_list(args.breakout_lookbacks),
             "flow_min_values": sweep.parse_float_list(args.flow_min_values),
+            "volatility_min_values": sweep.parse_float_list(args.volatility_min_values),
+            "trend_gap_min_values": sweep.parse_float_list(args.trend_gap_min_values),
             "max_candidates": int(args.max_candidates or 0),
             "min_split_rows": int(args.min_split_rows),
             "min_period_rows": int(args.min_period_rows),
@@ -376,12 +580,17 @@ def print_candidate_line(item):
     validation = split["validation"]
     oos = split["oos"]
     monthly = item["period_stability"]["monthly"]
+    regime = item.get("market_state_breakdown", {}).get("by_regime", {})
+    best_regime = regime.get("best_group") or {}
+    worst_regime = regime.get("worst_group") or {}
     decision = item["stability_decision"]
     print(
         f"{item['name']} status={decision['status']} "
         f"val={validation['mean_net_return']:+.4%}/pf{validation['profit_factor']}/rows{validation['candidate_rows']} "
         f"oos={oos['mean_net_return']:+.4%}/pf{oos['profit_factor']}/rows{oos['candidate_rows']} "
         f"months={monthly['positive_period_count']}/{monthly['covered_period_count']} "
+        f"best_regime={best_regime.get('group', '-')}:{float(best_regime.get('mean_net_return', 0.0) or 0.0):+.4%} "
+        f"worst_regime={worst_regime.get('group', '-')}:{float(worst_regime.get('mean_net_return', 0.0) or 0.0):+.4%} "
         f"active={monthly['active_period_coverage']:.2%} "
         f"filter_pass={item['entry_filter_summary'].get('candidate_rows_after')}/{item['entry_filter_summary'].get('candidate_rows_before')}"
     )
@@ -390,6 +599,8 @@ def print_candidate_line(item):
 def print_summary(report, path):
     log_info(
         "breakout_flow稳定性诊断完成: "
+        f"rows={report.get('feature_range', {}).get('rows')} "
+        f"range={report.get('feature_range', {}).get('start')}..{report.get('feature_range', {}).get('end')} "
         f"candidates={report['candidate_count']} status_counts={report['status_counts']} report={path}"
     )
     print("\n排名靠前的 breakout_flow 稳定性候选:")
@@ -401,6 +612,7 @@ def print_summary(report, path):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="聚焦 breakout_flow 入场过滤，按 validation/OOS 和月份/季度诊断 short edge 稳定性")
     parser.add_argument("--rows", type=int, default=int(os.getenv("BREAKOUT_FLOW_STABILITY_ROWS", "0")), help="仅使用最后 N 行；<=0 表示全量")
+    parser.add_argument("--windows", default=os.getenv("BREAKOUT_FLOW_STABILITY_WINDOWS", ""), help="临时覆盖拉取窗口，例如 5m:30000,15m:10000,1H:3000")
     parser.add_argument("--direction", default=os.getenv("BREAKOUT_FLOW_STABILITY_DIRECTION", "short"), choices=["long", "short"], help="诊断方向")
     parser.add_argument("--trend-gaps", default=os.getenv("BREAKOUT_FLOW_STABILITY_TREND_GAPS", "0.0025,0.003,0.0035"), help="TREND_FILTER_MIN_GAP 候选")
     parser.add_argument("--regime-gap-multipliers", default=os.getenv("BREAKOUT_FLOW_STABILITY_REGIME_MULTIPLIERS", "1.0,1.5"), help="REGIME_TREND_GAP_THRESHOLD = trend_gap * multiplier")
@@ -409,6 +621,8 @@ def parse_args(argv=None):
     parser.add_argument("--allow-range-values", default=os.getenv("BREAKOUT_FLOW_STABILITY_ALLOW_RANGE", "1"), help="是否允许 range 候选")
     parser.add_argument("--breakout-lookbacks", default=os.getenv("BREAKOUT_FLOW_STABILITY_LOOKBACKS", "12,18,24,36"), help="breakout 前高/前低回看根数")
     parser.add_argument("--flow-min-values", default=os.getenv("BREAKOUT_FLOW_STABILITY_FLOW_MINS", "1.0,1.1,1.2,1.3"), help="money_flow_ratio 或 volume_ratio 最小值")
+    parser.add_argument("--volatility-min-values", default=os.getenv("BREAKOUT_FLOW_STABILITY_VOLATILITY_MINS", ""), help="可选 volatility_15 最小值状态门槛")
+    parser.add_argument("--trend-gap-min-values", default=os.getenv("BREAKOUT_FLOW_STABILITY_TREND_GAP_MINS", ""), help="可选 trend_gap_abs 最小值状态门槛")
     parser.add_argument("--max-candidates", type=int, default=int(os.getenv("BREAKOUT_FLOW_STABILITY_MAX_CANDIDATES", "72")), help=">0 时确定性抽样最多 N 个候选")
     parser.add_argument("--min-split-rows", type=int, default=int(os.getenv("BREAKOUT_FLOW_STABILITY_MIN_SPLIT_ROWS", "10")), help="validation/OOS 方向最少候选样本数")
     parser.add_argument("--min-period-rows", type=int, default=int(os.getenv("BREAKOUT_FLOW_STABILITY_MIN_PERIOD_ROWS", "4")), help="单月/单季度最少候选样本数")
