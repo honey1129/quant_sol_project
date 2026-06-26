@@ -262,6 +262,12 @@ class LiveTrader:
             regime_range_min_signal_target_ratio=float(config.REGIME_RANGE_MIN_SIGNAL_TARGET_RATIO),
             regime_high_vol_min_signal_target_ratio=float(config.REGIME_HIGH_VOL_MIN_SIGNAL_TARGET_RATIO),
             block_losing_position_adds=bool(config.BLOCK_LOSING_POSITION_ADDS),
+            loss_condition_guard_enabled=bool(config.LOSS_CONDITION_GUARD_ENABLED),
+            loss_guard_block_new_regimes=config.LOSS_GUARD_BLOCK_NEW_REGIMES,
+            loss_guard_block_directions=config.LOSS_GUARD_BLOCK_DIRECTIONS,
+            loss_guard_exit_regimes=config.LOSS_GUARD_EXIT_REGIMES,
+            loss_guard_exit_min_hold_bars=int(config.LOSS_GUARD_EXIT_MIN_HOLD_BARS),
+            loss_guard_exit_only_when_unprofitable=bool(config.LOSS_GUARD_EXIT_ONLY_WHEN_UNPROFITABLE),
             dynamic_risk_controller=self.dynamic_risk_controller,
         )
 
