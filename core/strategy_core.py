@@ -80,6 +80,13 @@ class StrategyCore:
         loss_guard_exit_regimes=None,
         loss_guard_exit_min_hold_bars: int = 0,
         loss_guard_exit_only_when_unprofitable: bool = False,
+        loss_guard_exit_min_unrealized_loss: float = 0.0,
+        loss_guard_exit_confirm_bars: int = 1,
+        long_entry_guard_enabled: bool = False,
+        long_entry_min_trend_gap: float = 0.0,
+        long_entry_high_vol_gap_buffer: float = 0.0,
+        long_entry_block_high_vol: bool = True,
+        long_entry_high_vol_min_trend_gap: float = 0.0,
         dynamic_risk_controller=None,
     ):
         self.pm = position_manager
@@ -162,6 +169,13 @@ class StrategyCore:
         self.loss_guard_exit_regimes = self._normalize_string_set(loss_guard_exit_regimes)
         self.loss_guard_exit_min_hold_bars = max(0, int(loss_guard_exit_min_hold_bars))
         self.loss_guard_exit_only_when_unprofitable = bool(loss_guard_exit_only_when_unprofitable)
+        self.loss_guard_exit_min_unrealized_loss = max(0.0, float(loss_guard_exit_min_unrealized_loss))
+        self.loss_guard_exit_confirm_bars = max(1, int(loss_guard_exit_confirm_bars))
+        self.long_entry_guard_enabled = bool(long_entry_guard_enabled)
+        self.long_entry_min_trend_gap = max(0.0, float(long_entry_min_trend_gap))
+        self.long_entry_high_vol_gap_buffer = max(0.0, float(long_entry_high_vol_gap_buffer))
+        self.long_entry_block_high_vol = bool(long_entry_block_high_vol)
+        self.long_entry_high_vol_min_trend_gap = max(0.0, float(long_entry_high_vol_min_trend_gap))
         self.dynamic_risk_controller = dynamic_risk_controller
 
         self.position = 0.0
@@ -169,6 +183,7 @@ class StrategyCore:
         self.hold_bars = 0
         self.cooldown_bars_remaining = 0
         self.reverse_signal_bars = 0
+        self.loss_guard_exit_bars = 0
         self.current_take_profit = self.take_profit
         self.current_stop_loss = self.stop_loss
 
@@ -188,6 +203,9 @@ class StrategyCore:
 
     def get_reverse_signal_bars(self):
         return self.reverse_signal_bars
+
+    def get_loss_guard_exit_bars(self):
+        return self.loss_guard_exit_bars
 
     def estimated_round_trip_cost_ratio(self):
         slippage_ratio = self.slippage_bps / 10000.0
@@ -260,6 +278,15 @@ class StrategyCore:
             return f"LossGuardRegime({regime})"
         return None
 
+    def _position_pnl_pct(self, pos, price):
+        if pos == 0 or self.entry_price <= 0:
+            return 0.0
+        return (
+            (float(price) - self.entry_price) / self.entry_price
+            if pos > 0 else
+            (self.entry_price - float(price)) / self.entry_price
+        )
+
     def _loss_guard_exit_reason(self, pos, price, market_regime):
         if not self.loss_condition_guard_enabled or pos == 0:
             return None
@@ -268,15 +295,38 @@ class StrategyCore:
             return None
         if int(self.hold_bars) < self.loss_guard_exit_min_hold_bars:
             return None
-        if self.loss_guard_exit_only_when_unprofitable and self.entry_price > 0:
-            pnl_pct = (
-                (float(price) - self.entry_price) / self.entry_price
-                if pos > 0 else
-                (self.entry_price - float(price)) / self.entry_price
-            )
-            if pnl_pct >= 0:
-                return None
+        pnl_pct = self._position_pnl_pct(pos, price)
+        if self.loss_guard_exit_only_when_unprofitable and pnl_pct >= 0:
+            return None
+        if self.loss_guard_exit_min_unrealized_loss > 0 and pnl_pct > -self.loss_guard_exit_min_unrealized_loss:
+            return None
+        if self.loss_guard_exit_confirm_bars > 1 and self.loss_guard_exit_bars + 1 < self.loss_guard_exit_confirm_bars:
+            return None
         return f"LossGuardExit({regime})"
+
+    def _is_high_vol_regime(self, regime):
+        return str(regime or "").lower() in {"high_vol", "range_high_vol"}
+
+    def _long_entry_guard_reason(self, *, trend_bias=None, trend_gap=None, market_regime=None, is_high_vol=False):
+        if not self.long_entry_guard_enabled:
+            return None
+        trend_bias = str(trend_bias or "neutral").lower()
+        if trend_bias != "long":
+            return "LongEntryGuard(trend_not_long)"
+        try:
+            gap_abs = abs(float(trend_gap))
+        except (TypeError, ValueError):
+            return "LongEntryGuard(missing_trend_gap)"
+        if not math.isfinite(gap_abs):
+            return "LongEntryGuard(missing_trend_gap)"
+        required_gap = max(self.long_entry_min_trend_gap, self.long_entry_high_vol_gap_buffer)
+        if is_high_vol:
+            required_gap = max(required_gap, self.long_entry_high_vol_min_trend_gap)
+        if required_gap > 0 and gap_abs < required_gap:
+            return f"LongEntryGuard(weak_trend_gap={gap_abs:.4%})"
+        if self.long_entry_block_high_vol and self._is_high_vol_regime(market_regime):
+            return f"LongEntryGuard({str(market_regime or 'high_vol').lower()})"
+        return None
 
     def resolve_risk_thresholds(self, *, volatility: float = None, atr_ratio: float = None, market_regime: str = None):
         if not self.adaptive_tp_sl_enabled:
@@ -340,6 +390,7 @@ class StrategyCore:
         hold_bars: int = None,
         cooldown_bars_remaining: int = None,
         reverse_signal_bars: int = None,
+        loss_guard_exit_bars: int = None,
     ):
         self.position = float(position)
         self.entry_price = float(entry_price)
@@ -349,8 +400,11 @@ class StrategyCore:
             self.cooldown_bars_remaining = max(0, int(cooldown_bars_remaining))
         if reverse_signal_bars is not None:
             self.reverse_signal_bars = max(0, int(reverse_signal_bars))
+        if loss_guard_exit_bars is not None:
+            self.loss_guard_exit_bars = max(0, int(loss_guard_exit_bars))
         if self.position == 0 or self.entry_price <= 0:
             self.reverse_signal_bars = 0
+            self.loss_guard_exit_bars = 0
             self.reset_risk_thresholds()
 
     def get_state(self):
@@ -369,6 +423,7 @@ class StrategyCore:
             "next_hold_bars": 0,
             "next_cooldown_bars": self._next_trade_cooldown(reason),
             "next_reverse_signal_bars": 0,
+            "next_loss_guard_exit_bars": 0,
             "next_reset_risk": True,
             "raw_target_ratio": 0.0,
             "expected_net_edge": None,
@@ -397,6 +452,10 @@ class StrategyCore:
             self.reverse_signal_bars = 0
         if decision.get("next_reset_risk"):
             self.reset_risk_thresholds()
+        if "next_loss_guard_exit_bars" in decision:
+            self.loss_guard_exit_bars = max(0, int(decision["next_loss_guard_exit_bars"]))
+        elif self.position == 0:
+            self.loss_guard_exit_bars = 0
 
     def _trend_block_reason(self, direction, trend_bias):
         if (
@@ -602,6 +661,8 @@ class StrategyCore:
         volatility: float,
         atr_ratio: float = None,
         trend_bias: str = None,
+        trend_gap: float = None,
+        is_high_vol: bool = False,
         market_regime: str = None,
     ):
         """
@@ -644,6 +705,7 @@ class StrategyCore:
                 "next_hold_bars": 0,
                 "next_cooldown_bars": self._next_hold_cooldown(),
                 "next_reverse_signal_bars": 0,
+                "next_loss_guard_exit_bars": 0,
                 "next_reset_risk": True,
                 "raw_target_ratio": 0.0,
                 "expected_net_edge": None,
@@ -716,7 +778,15 @@ class StrategyCore:
         trend_block_reason = self._trend_block_reason(target_direction, trend_bias)
         regime_block_reason = self._regime_block_reason(target_direction, market_regime)
         loss_guard_entry_reason = self._loss_guard_new_entry_reason(target_direction_for_entry_guard, market_regime)
-        entry_block_reason = loss_guard_entry_reason or regime_block_reason or trend_block_reason
+        long_entry_guard_reason = None
+        if target_direction_for_entry_guard == "long":
+            long_entry_guard_reason = self._long_entry_guard_reason(
+                trend_bias=trend_bias,
+                trend_gap=trend_gap,
+                market_regime=market_regime,
+                is_high_vol=is_high_vol,
+            )
+        entry_block_reason = loss_guard_entry_reason or long_entry_guard_reason or regime_block_reason or trend_block_reason
         same_direction = (pos > 0 and target_position > 0) or (pos < 0 and target_position < 0)
         raw_reverse_signal = (
             (pos > 0 and raw_signal_direction == "short") or
@@ -736,6 +806,21 @@ class StrategyCore:
             raw_reverse_signal and
             next_reverse_signal_bars >= self.reverse_exit_consecutive_bars
         )
+        loss_guard_candidate = (
+            pos != 0 and
+            self.loss_condition_guard_enabled and
+            str(market_regime or "").lower() in self.loss_guard_exit_regimes and
+            int(self.hold_bars) >= self.loss_guard_exit_min_hold_bars and
+            (
+                not self.loss_guard_exit_only_when_unprofitable or
+                self._position_pnl_pct(pos, price) < 0
+            ) and
+            (
+                self.loss_guard_exit_min_unrealized_loss <= 0 or
+                self._position_pnl_pct(pos, price) <= -self.loss_guard_exit_min_unrealized_loss
+            )
+        )
+        next_loss_guard_exit_bars = self.loss_guard_exit_bars + 1 if loss_guard_candidate else 0
 
         # ======================
         # 3) 空仓 -> 只允许开仓
@@ -760,6 +845,7 @@ class StrategyCore:
                     "next_hold_bars": 0,
                     "next_cooldown_bars": self._next_hold_cooldown(),
                     "next_reverse_signal_bars": 0,
+                    "next_loss_guard_exit_bars": 0,
                     "next_reset_risk": True,
                 }), risk_decision)
             if abs(target_position * price) >= self.min_adjust_amount and target_position != 0:
@@ -774,6 +860,7 @@ class StrategyCore:
                     "next_hold_bars": 0,
                     "next_cooldown_bars": self._next_trade_cooldown(),
                     "next_reverse_signal_bars": 0,
+                    "next_loss_guard_exit_bars": 0,
                     "next_reset_risk": False,
                 }), risk_decision)
             flat_reason = "FlatNoSignal"
@@ -790,6 +877,7 @@ class StrategyCore:
                 "next_hold_bars": 0,
                 "next_cooldown_bars": self._next_hold_cooldown(),
                 "next_reverse_signal_bars": 0,
+                "next_loss_guard_exit_bars": 0,
                 "next_reset_risk": True,
             }), risk_decision)
 
@@ -830,6 +918,7 @@ class StrategyCore:
                 "next_hold_bars": next_hold_bars,
                 "next_cooldown_bars": self._next_hold_cooldown(),
                 "next_reverse_signal_bars": next_reverse_signal_bars,
+                "next_loss_guard_exit_bars": next_loss_guard_exit_bars,
                 "next_reset_risk": False,
             }), risk_decision)
 
@@ -849,6 +938,7 @@ class StrategyCore:
                     "next_hold_bars": next_hold_bars,
                     "next_cooldown_bars": self._next_hold_cooldown(),
                     "next_reverse_signal_bars": next_reverse_signal_bars,
+                    "next_loss_guard_exit_bars": next_loss_guard_exit_bars,
                     "next_reset_risk": False,
                 }), risk_decision)
 
@@ -869,6 +959,7 @@ class StrategyCore:
                     "next_hold_bars": next_hold_bars,
                     "next_cooldown_bars": self._next_hold_cooldown(),
                     "next_reverse_signal_bars": next_reverse_signal_bars,
+                    "next_loss_guard_exit_bars": next_loss_guard_exit_bars,
                     "next_reset_risk": False,
                 }), risk_decision)
             diff_ratio = raw_delta / max(abs(pos), 1e-9)
@@ -904,6 +995,7 @@ class StrategyCore:
                                 "next_hold_bars": next_hold_bars,
                                 "next_cooldown_bars": self._next_hold_cooldown(),
                                 "next_reverse_signal_bars": next_reverse_signal_bars,
+                                "next_loss_guard_exit_bars": next_loss_guard_exit_bars,
                                 "next_reset_risk": False,
                             }), risk_decision)
 
@@ -935,6 +1027,7 @@ class StrategyCore:
                         "next_hold_bars": next_hold_bars,
                         "next_cooldown_bars": self._next_trade_cooldown(),
                         "next_reverse_signal_bars": next_reverse_signal_bars,
+                        "next_loss_guard_exit_bars": next_loss_guard_exit_bars,
                         "next_reset_risk": False,
                     }), risk_decision)
 
@@ -949,6 +1042,7 @@ class StrategyCore:
                 "next_hold_bars": next_hold_bars,
                 "next_cooldown_bars": self._next_hold_cooldown(),
                 "next_reverse_signal_bars": next_reverse_signal_bars,
+                "next_loss_guard_exit_bars": next_loss_guard_exit_bars,
                 "next_reset_risk": False,
             }), risk_decision)
 
@@ -967,6 +1061,7 @@ class StrategyCore:
                 "next_hold_bars": next_hold_bars,
                 "next_cooldown_bars": self._next_hold_cooldown(),
                 "next_reverse_signal_bars": next_reverse_signal_bars,
+                "next_loss_guard_exit_bars": next_loss_guard_exit_bars,
                 "next_reset_risk": False,
             }), risk_decision)
 
@@ -987,6 +1082,7 @@ class StrategyCore:
                 "next_hold_bars": next_hold_bars,
                 "next_cooldown_bars": self._next_hold_cooldown(),
                 "next_reverse_signal_bars": next_reverse_signal_bars,
+                "next_loss_guard_exit_bars": next_loss_guard_exit_bars,
                 "next_reset_risk": False,
             }), risk_decision)
 
@@ -1001,5 +1097,6 @@ class StrategyCore:
             "next_hold_bars": next_hold_bars,
             "next_cooldown_bars": self._next_hold_cooldown(),
             "next_reverse_signal_bars": next_reverse_signal_bars,
+            "next_loss_guard_exit_bars": next_loss_guard_exit_bars,
             "next_reset_risk": False,
         }), risk_decision)
