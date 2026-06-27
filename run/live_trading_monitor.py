@@ -32,6 +32,9 @@ TELEGRAM_HOLD_ALERT_REASONS = (
     "CostGate",
     "RegimeFilter",
     "TrendFilter",
+    "LossGuardDirection",
+    "LossGuardRegime",
+    "LongEntryGuard",
 )
 
 
@@ -48,12 +51,24 @@ def load_last_bar_ts(state_path):
 
 def load_runtime_state(state_path):
     if not os.path.exists(state_path):
-        return {"last_bar_ts": None, "hold_bars": 0, "cooldown_bars_remaining": 0, "reverse_signal_bars": 0}
+        return {
+            "last_bar_ts": None,
+            "hold_bars": 0,
+            "cooldown_bars_remaining": 0,
+            "reverse_signal_bars": 0,
+            "loss_guard_exit_bars": 0,
+        }
     try:
         with open(state_path, "r", encoding="utf-8") as f:
             payload = json.load(f)
     except Exception:
-        return {"last_bar_ts": None, "hold_bars": 0, "cooldown_bars_remaining": 0, "reverse_signal_bars": 0}
+        return {
+            "last_bar_ts": None,
+            "hold_bars": 0,
+            "cooldown_bars_remaining": 0,
+            "reverse_signal_bars": 0,
+            "loss_guard_exit_bars": 0,
+        }
 
     last_bar_ts = None
     raw_value = payload.get("last_bar_ts")
@@ -84,11 +99,19 @@ def load_runtime_state(state_path):
     if reverse_signal_bars < 0:
         reverse_signal_bars = 0
 
+    try:
+        loss_guard_exit_bars = int(payload.get("loss_guard_exit_bars", 0) or 0)
+    except (TypeError, ValueError):
+        loss_guard_exit_bars = 0
+    if loss_guard_exit_bars < 0:
+        loss_guard_exit_bars = 0
+
     return {
         "last_bar_ts": last_bar_ts,
         "hold_bars": hold_bars,
         "cooldown_bars_remaining": cooldown_bars_remaining,
         "reverse_signal_bars": reverse_signal_bars,
+        "loss_guard_exit_bars": loss_guard_exit_bars,
     }
 
 
@@ -106,9 +129,18 @@ def persist_last_bar_ts(state_path, bar_ts):
         hold_bars=0,
         cooldown_bars_remaining=0,
         reverse_signal_bars=0,
+        loss_guard_exit_bars=0,
     )
 
-def persist_runtime_state(state_path, *, last_bar_ts, hold_bars, cooldown_bars_remaining=0, reverse_signal_bars=0):
+def persist_runtime_state(
+    state_path,
+    *,
+    last_bar_ts,
+    hold_bars,
+    cooldown_bars_remaining=0,
+    reverse_signal_bars=0,
+    loss_guard_exit_bars=0,
+):
     if last_bar_ts is None:
         return
     os.makedirs(os.path.dirname(state_path), exist_ok=True)
@@ -117,6 +149,7 @@ def persist_runtime_state(state_path, *, last_bar_ts, hold_bars, cooldown_bars_r
         "hold_bars": int(hold_bars),
         "cooldown_bars_remaining": max(0, int(cooldown_bars_remaining)),
         "reverse_signal_bars": max(0, int(reverse_signal_bars)),
+        "loss_guard_exit_bars": max(0, int(loss_guard_exit_bars)),
     }
     tmp_path = f"{state_path}.tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
@@ -170,11 +203,13 @@ class LiveTrader:
             self.hold_bars = persisted.get("hold_bars", 0)
             self.cooldown_bars_remaining = persisted.get("cooldown_bars_remaining", 0)
             self.reverse_signal_bars = persisted.get("reverse_signal_bars", 0)
+            self.loss_guard_exit_bars = persisted.get("loss_guard_exit_bars", 0)
         else:
             self.last_bar_ts = None
             self.hold_bars = 0
             self.cooldown_bars_remaining = 0
             self.reverse_signal_bars = 0
+            self.loss_guard_exit_bars = 0
         self.loop_count = 0
         self.same_bar_skip_count = 0
         self.last_heartbeat_logged_at = None
@@ -268,6 +303,13 @@ class LiveTrader:
             loss_guard_exit_regimes=config.LOSS_GUARD_EXIT_REGIMES,
             loss_guard_exit_min_hold_bars=int(config.LOSS_GUARD_EXIT_MIN_HOLD_BARS),
             loss_guard_exit_only_when_unprofitable=bool(config.LOSS_GUARD_EXIT_ONLY_WHEN_UNPROFITABLE),
+            loss_guard_exit_min_unrealized_loss=float(config.LOSS_GUARD_EXIT_MIN_UNREALIZED_LOSS),
+            loss_guard_exit_confirm_bars=int(config.LOSS_GUARD_EXIT_CONFIRM_BARS),
+            long_entry_guard_enabled=bool(config.LONG_ENTRY_GUARD_ENABLED),
+            long_entry_min_trend_gap=float(config.LONG_ENTRY_MIN_TREND_GAP),
+            long_entry_high_vol_gap_buffer=float(config.LONG_ENTRY_HIGH_VOL_GAP_BUFFER),
+            long_entry_high_vol_min_trend_gap=float(config.LONG_ENTRY_HIGH_VOL_MIN_TREND_GAP),
+            long_entry_block_high_vol=bool(config.LONG_ENTRY_BLOCK_HIGH_VOL),
             dynamic_risk_controller=self.dynamic_risk_controller,
         )
 
@@ -276,6 +318,24 @@ class LiveTrader:
             self.core._simple_rule_mode = True
             self.core._simple_rule_position_size = float(config.SIMPLE_RULE_POSITION_SIZE)
             log_info(f"✅ 简单规则模式已启用 - 仓位: {config.SIMPLE_RULE_POSITION_SIZE:.0%}, 绕过ML模型")
+        log_info(
+            "LossGuard配置: "
+            f"enabled={int(bool(config.LOSS_CONDITION_GUARD_ENABLED))} "
+            f"block_new_regimes={','.join(config.LOSS_GUARD_BLOCK_NEW_REGIMES) or '-'} "
+            f"block_directions={','.join(config.LOSS_GUARD_BLOCK_DIRECTIONS) or '-'} "
+            f"exit_regimes={','.join(config.LOSS_GUARD_EXIT_REGIMES) or '-'} "
+            f"exit_min_hold_bars={int(config.LOSS_GUARD_EXIT_MIN_HOLD_BARS)} "
+            f"exit_only_when_unprofitable={int(bool(config.LOSS_GUARD_EXIT_ONLY_WHEN_UNPROFITABLE))} "
+            f"exit_min_unrealized_loss={float(config.LOSS_GUARD_EXIT_MIN_UNREALIZED_LOSS):.4%} "
+            f"exit_confirm_bars={int(config.LOSS_GUARD_EXIT_CONFIRM_BARS)}"
+        )
+        log_info(
+            "LongEntryGuard配置: "
+            f"enabled={int(bool(config.LONG_ENTRY_GUARD_ENABLED))} "
+            f"min_trend_gap={float(config.LONG_ENTRY_MIN_TREND_GAP):.4%} "
+            f"high_vol_min_trend_gap={float(config.LONG_ENTRY_HIGH_VOL_MIN_TREND_GAP):.4%} "
+            f"block_high_vol_regime={int(bool(config.LONG_ENTRY_BLOCK_HIGH_VOL))}"
+        )
 
         if self.last_bar_ts is not None:
             log_info(f"已恢复最近处理 bar: {format_display_ts(self.last_bar_ts)}")
@@ -499,6 +559,7 @@ class LiveTrader:
                 "heartbeat_interval_sec": float(self.heartbeat_log_interval_sec),
                 "cooldown_bars_remaining": int(getattr(self, "cooldown_bars_remaining", 0)),
                 "reverse_signal_bars": int(getattr(self, "reverse_signal_bars", 0)),
+                "loss_guard_exit_bars": int(getattr(self, "loss_guard_exit_bars", 0)),
                 "last_error": error_message,
             },
             "market": {
@@ -542,9 +603,11 @@ class LiveTrader:
             self.hold_bars,
             cooldown_bars_remaining=self.cooldown_bars_remaining,
             reverse_signal_bars=self.reverse_signal_bars,
+            loss_guard_exit_bars=self.loss_guard_exit_bars,
         )
         _, _, self.hold_bars = self.core.get_state()
         self.reverse_signal_bars = self.core.get_reverse_signal_bars()
+        self.loss_guard_exit_bars = self.core.get_loss_guard_exit_bars()
 
     def _get_position_sides(self):
         return self.client.get_position()
@@ -655,6 +718,14 @@ class LiveTrader:
         qty = abs(float(delta_qty))
         if qty <= 0:
             return False
+        blocked_directions = set(str(item).lower() for item in config.LOSS_GUARD_BLOCK_DIRECTIONS)
+        if delta_qty < 0 and current_pos_qty >= 0 and "short" in blocked_directions:
+            log_error(
+                "LossGuard运行时保险: 已拒绝short新开仓 "
+                f"qty={qty:.6f}, current_pos={float(current_pos_qty):.6f}, "
+                f"reason={(decision or {}).get('reason') or '-'}"
+            )
+            return False
         leverage = self._resolve_order_leverage(decision)
 
         if current_pos_qty > 0:
@@ -680,6 +751,7 @@ class LiveTrader:
             hold_bars=int(self.hold_bars),
             cooldown_bars_remaining=int(self.cooldown_bars_remaining),
             reverse_signal_bars=int(self.reverse_signal_bars),
+            loss_guard_exit_bars=int(getattr(self, "loss_guard_exit_bars", 0)),
         )
 
     def _record_trade_execution(
@@ -883,6 +955,10 @@ class LiveTrader:
             "SameDirNoRebalance": "方向一致且仓位接近目标，继续持有",
             "Neutral": "多空信号持平，观望不动",
             "SameClosedBarSkip": "这根K线已处理过，等下一根",
+            "LossGuardDirection": "亏损诊断保护：已禁止该方向新开仓",
+            "LossGuardRegime": "亏损诊断保护：当前市场状态暂停新开仓",
+            "LossGuardExit": "亏损诊断保护：进入高风险亏损状态，提前退出",
+            "LongEntryGuard": "多头入场保护：趋势质量不够，暂不开多",
         }
         text = labels.get(key, raw)
         if key == "Cooldown" and "(" in raw and ")" in raw:
@@ -891,6 +967,28 @@ class LiveTrader:
         if key == "MinHold" and "(" in raw and ")" in raw:
             hold_info = raw.split("(", 1)[1].split(")", 1)[0]
             text = f"最短持仓期未到（已持{hold_info}根K线），继续持有"
+        if key == "LossGuardDirection" and "(" in raw and ")" in raw:
+            direction = raw.split("(", 1)[1].split(")", 1)[0]
+            direction_text = "做空" if direction == "short" else direction
+            text = f"亏损诊断保护：已禁止{direction_text}新开仓"
+        if key == "LossGuardRegime" and "(" in raw and ")" in raw:
+            regime = raw.split("(", 1)[1].split(")", 1)[0]
+            text = f"亏损诊断保护：{LiveTrader._humanize_regime(regime)}暂停新开仓"
+        if key == "LossGuardExit" and "(" in raw and ")" in raw:
+            regime = raw.split("(", 1)[1].split(")", 1)[0]
+            text = f"亏损诊断保护：进入{LiveTrader._humanize_regime(regime)}，提前退出"
+        if key == "LongEntryGuard" and "(" in raw and ")" in raw:
+            detail = raw.split("(", 1)[1].split(")", 1)[0]
+            if detail.startswith("weak_trend_gap="):
+                text = f"多头入场保护：趋势强度不足（{detail.split('=', 1)[1]}），暂不开多"
+            elif detail in {"range_high_vol", "high_vol"}:
+                text = f"多头入场保护：{LiveTrader._humanize_regime(detail)}里不开新多"
+            elif detail == "missing_trend_gap":
+                text = "多头入场保护：缺少趋势强度数据，暂不开多"
+            elif detail == "trend_not_long":
+                text = "多头入场保护：大趋势不是偏多，暂不开多"
+            else:
+                text = f"多头入场保护：{detail}，暂不开多"
         return text
 
     def _format_hold_reason_counts(self):
@@ -1036,6 +1134,7 @@ class LiveTrader:
             f"regime={decision.get('market_regime') or '-'} "
             f"cooldown_next={int(out.get('next_cooldown_bars', 0) or 0)} "
             f"reverse_bars_next={int(out.get('next_reverse_signal_bars', 0) or 0)} "
+            f"loss_guard_exit_bars_next={int(out.get('next_loss_guard_exit_bars', 0) or 0)} "
             f"{self._format_risk_fields(risk)}"
         )
 
@@ -1073,6 +1172,14 @@ class LiveTrader:
             return "RegimeFilter"
         if reason.startswith("TrendFilter"):
             return "TrendFilter"
+        if reason.startswith("LossGuardDirection"):
+            return "LossGuardDirection"
+        if reason.startswith("LossGuardRegime"):
+            return "LossGuardRegime"
+        if reason.startswith("LossGuardExit"):
+            return "LossGuardExit"
+        if reason.startswith("LongEntryGuard"):
+            return "LongEntryGuard"
         if reason.startswith("Cooldown"):
             return "Cooldown"
         return reason
@@ -1200,7 +1307,8 @@ class LiveTrader:
         self.last_hold_alert_key = alert_key
         notify_important(
             "[异常HOLD聚合]\n"
-            f"原因: {reason}\n"
+            f"原因: {self._humanize_reason(reason)}\n"
+            f"原始原因: {reason}\n"
             f"连续bar数: {self.consecutive_abnormal_hold_count}\n"
             f"最近bar: {format_display_ts(bar_ts)} price={fmt_optional(price, 4)} equity={fmt_optional(equity, 2)}\n"
             f"信号: long={fmt_optional(signal_snapshot.get('long_prob'), 3)} short={fmt_optional(signal_snapshot.get('short_prob'), 3)} "
@@ -1290,6 +1398,7 @@ class LiveTrader:
             self.hold_bars,
             cooldown_bars_remaining=self.cooldown_bars_remaining,
             reverse_signal_bars=self.reverse_signal_bars,
+            loss_guard_exit_bars=self.loss_guard_exit_bars,
         )
 
         out = self.core.on_bar(
@@ -1301,6 +1410,8 @@ class LiveTrader:
             volatility=volatility,
             atr_ratio=atr_ratio,
             trend_bias=trend_context.get("trend_bias"),
+            trend_gap=trend_context.get("trend_gap"),
+            is_high_vol=bool(regime_context.get("is_high_vol")),
             market_regime=regime_context.get("regime"),
         )
 
@@ -1324,10 +1435,12 @@ class LiveTrader:
             "dominant_prob": out.get("dominant_prob"),
             "next_cooldown_bars": int(out.get("next_cooldown_bars", self.cooldown_bars_remaining)),
             "next_reverse_signal_bars": int(out.get("next_reverse_signal_bars", self.reverse_signal_bars)),
+            "next_loss_guard_exit_bars": int(out.get("next_loss_guard_exit_bars", self.loss_guard_exit_bars)),
             "trend_bias": trend_context.get("trend_bias"),
             "trend_gap": trend_context.get("trend_gap"),
             "market_regime": regime_context.get("regime"),
             "regime_reason": regime_context.get("regime_reason"),
+            "is_high_vol": bool(regime_context.get("is_high_vol")),
         }
 
         if action == "CLOSE":
@@ -1340,6 +1453,7 @@ class LiveTrader:
             if success:
                 self.cooldown_bars_remaining = int(out.get("next_cooldown_bars", self.cooldown_bars_remaining))
                 self.reverse_signal_bars = int(out.get("next_reverse_signal_bars", 0))
+                self.loss_guard_exit_bars = int(out.get("next_loss_guard_exit_bars", 0))
             self._sync_after_trade()
             account_snapshot = self._get_account_snapshot()
             pos_qty, entry_price = self._get_net_position()
@@ -1390,6 +1504,7 @@ class LiveTrader:
             success = self._execute_delta(pos_qty, delta, decision)
             self.cooldown_bars_remaining = int(out.get("next_cooldown_bars", self.cooldown_bars_remaining))
             self.reverse_signal_bars = int(out.get("next_reverse_signal_bars", 0))
+            self.loss_guard_exit_bars = int(out.get("next_loss_guard_exit_bars", 0))
             self._sync_after_trade()
             account_snapshot = self._get_account_snapshot()
             pos_qty, entry_price = self._get_net_position()
@@ -1444,6 +1559,7 @@ class LiveTrader:
             success = self._execute_delta(pos_qty, delta, decision)
             self.cooldown_bars_remaining = int(out.get("next_cooldown_bars", self.cooldown_bars_remaining))
             self.reverse_signal_bars = int(out.get("next_reverse_signal_bars", self.reverse_signal_bars))
+            self.loss_guard_exit_bars = int(out.get("next_loss_guard_exit_bars", self.loss_guard_exit_bars))
             self._sync_after_trade()
             account_snapshot = self._get_account_snapshot()
             pos_qty, entry_price = self._get_net_position()
@@ -1498,12 +1614,14 @@ class LiveTrader:
             self.hold_bars = int(out.get("next_hold_bars", self.hold_bars))
             self.cooldown_bars_remaining = int(out.get("next_cooldown_bars", self.cooldown_bars_remaining))
             self.reverse_signal_bars = int(out.get("next_reverse_signal_bars", self.reverse_signal_bars))
+            self.loss_guard_exit_bars = int(out.get("next_loss_guard_exit_bars", self.loss_guard_exit_bars))
             self.core.set_state(
                 pos_qty,
                 entry_price,
                 self.hold_bars,
                 cooldown_bars_remaining=self.cooldown_bars_remaining,
                 reverse_signal_bars=self.reverse_signal_bars,
+                loss_guard_exit_bars=self.loss_guard_exit_bars,
             )
             position_snapshot = self._build_position_snapshot(pos_qty, entry_price, current_price=price, pending_orders=0)
             self._write_dashboard_snapshot(

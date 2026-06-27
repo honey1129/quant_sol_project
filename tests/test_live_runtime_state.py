@@ -43,6 +43,7 @@ class LiveRuntimeStateTests(unittest.TestCase):
                 hold_bars=7,
                 cooldown_bars_remaining=3,
                 reverse_signal_bars=2,
+                loss_guard_exit_bars=1,
             )
             state = load_runtime_state(state_path)
 
@@ -50,6 +51,7 @@ class LiveRuntimeStateTests(unittest.TestCase):
             self.assertEqual(state["hold_bars"], 7)
             self.assertEqual(state["cooldown_bars_remaining"], 3)
             self.assertEqual(state["reverse_signal_bars"], 2)
+            self.assertEqual(state["loss_guard_exit_bars"], 1)
 
     def test_load_runtime_state_legacy_payload_without_hold_bars(self):
         import json
@@ -64,6 +66,7 @@ class LiveRuntimeStateTests(unittest.TestCase):
             self.assertEqual(state["hold_bars"], 0)
             self.assertEqual(state["cooldown_bars_remaining"], 0)
             self.assertEqual(state["reverse_signal_bars"], 0)
+            self.assertEqual(state["loss_guard_exit_bars"], 0)
 
     def test_load_runtime_state_missing_file_defaults_zero(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -72,6 +75,7 @@ class LiveRuntimeStateTests(unittest.TestCase):
             self.assertIsNone(state["last_bar_ts"])
             self.assertEqual(state["hold_bars"], 0)
             self.assertEqual(state["reverse_signal_bars"], 0)
+            self.assertEqual(state["loss_guard_exit_bars"], 0)
 
     def test_load_last_bar_ts_missing_file_returns_none(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -115,6 +119,55 @@ class LiveRuntimeStateTests(unittest.TestCase):
 
         with patch("run.live_trading_monitor.config.KELLY_REWARD_RISK", 2.8):
             self.assertAlmostEqual(trader._load_reward_risk(), 2.8)
+
+    def test_loss_guard_reason_is_humanized_for_short_block(self):
+        text = LiveTrader._humanize_reason("LossGuardDirection(short)")
+
+        self.assertIn("禁止做空新开仓", text)
+
+    def test_long_entry_guard_reason_is_humanized_for_weak_gap(self):
+        text = LiveTrader._humanize_reason("LongEntryGuard(weak_trend_gap=0.2500%)")
+
+        self.assertIn("趋势强度不足", text)
+        self.assertIn("暂不开多", text)
+
+    def test_loss_guard_reason_key_groups_parameterized_reasons(self):
+        trader = LiveTrader.__new__(LiveTrader)
+
+        self.assertEqual(trader._hold_reason_key("LossGuardDirection(short)"), "LossGuardDirection")
+        self.assertEqual(trader._hold_reason_key("LossGuardRegime(range_high_vol)"), "LossGuardRegime")
+        self.assertEqual(trader._hold_reason_key("LongEntryGuard(weak_trend_gap=0.2500%)"), "LongEntryGuard")
+
+    def test_execute_delta_blocks_short_new_entry_when_loss_guard_blocks_short(self):
+        trader = LiveTrader.__new__(LiveTrader)
+        trader.client = object()
+
+        with patch("run.live_trading_monitor.config.LOSS_GUARD_BLOCK_DIRECTIONS", ["short"]):
+            with patch("run.live_trading_monitor.log_error") as mock_log:
+                success = trader._execute_delta(
+                    current_pos_qty=0.0,
+                    delta_qty=-1.5,
+                    decision={"reason": "LossGuardDirection(short)"},
+                )
+
+        self.assertFalse(success)
+        mock_log.assert_called_once()
+
+    def test_execute_delta_allows_short_reduction_when_loss_guard_blocks_short(self):
+        class Client:
+            def close_short_sz(self, qty, leverage):
+                self.closed = (qty, leverage)
+                return True
+
+        trader = LiveTrader.__new__(LiveTrader)
+        trader.client = Client()
+
+        with patch("run.live_trading_monitor.config.LOSS_GUARD_BLOCK_DIRECTIONS", ["short"]):
+            with patch("run.live_trading_monitor.config.LEVERAGE", 3):
+                success = trader._execute_delta(current_pos_qty=-2.0, delta_qty=1.0)
+
+        self.assertTrue(success)
+        self.assertEqual(trader.client.closed, (1.0, 3))
 
 
 class OkxOrderHelperTests(unittest.TestCase):
