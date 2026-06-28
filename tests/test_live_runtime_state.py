@@ -131,6 +131,12 @@ class LiveRuntimeStateTests(unittest.TestCase):
         self.assertIn("趋势强度不足", text)
         self.assertIn("暂不开多", text)
 
+    def test_long_entry_guard_reason_is_humanized_for_overheat_money_flow(self):
+        text = LiveTrader._humanize_reason("LongEntryGuard(overheat_money_flow=3.200)")
+
+        self.assertIn("资金流过热", text)
+        self.assertIn("暂不开多", text)
+
     def test_loss_guard_reason_key_groups_parameterized_reasons(self):
         trader = LiveTrader.__new__(LiveTrader)
 

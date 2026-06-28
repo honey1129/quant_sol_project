@@ -91,6 +91,8 @@ class MultiPeriodSignalPredictor:
             long_entry_high_vol_gap_buffer=float(config.LONG_ENTRY_HIGH_VOL_GAP_BUFFER),
             long_entry_high_vol_min_trend_gap=float(config.LONG_ENTRY_HIGH_VOL_MIN_TREND_GAP),
             long_entry_block_high_vol=bool(config.LONG_ENTRY_BLOCK_HIGH_VOL),
+            long_entry_overheat_guard_enabled=bool(config.LONG_ENTRY_OVERHEAT_GUARD_ENABLED),
+            long_entry_overheat_money_flow_max=float(config.LONG_ENTRY_OVERHEAT_MONEY_FLOW_MAX),
             dynamic_risk_controller=DynamicRiskController(),
         )
 

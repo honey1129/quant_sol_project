@@ -87,6 +87,8 @@ class StrategyCore:
         long_entry_high_vol_gap_buffer: float = 0.0,
         long_entry_block_high_vol: bool = True,
         long_entry_high_vol_min_trend_gap: float = 0.0,
+        long_entry_overheat_guard_enabled: bool = True,
+        long_entry_overheat_money_flow_max: float = 2.5,
         dynamic_risk_controller=None,
     ):
         self.pm = position_manager
@@ -176,6 +178,8 @@ class StrategyCore:
         self.long_entry_high_vol_gap_buffer = max(0.0, float(long_entry_high_vol_gap_buffer))
         self.long_entry_block_high_vol = bool(long_entry_block_high_vol)
         self.long_entry_high_vol_min_trend_gap = max(0.0, float(long_entry_high_vol_min_trend_gap))
+        self.long_entry_overheat_guard_enabled = bool(long_entry_overheat_guard_enabled)
+        self.long_entry_overheat_money_flow_max = max(0.0, float(long_entry_overheat_money_flow_max))
         self.dynamic_risk_controller = dynamic_risk_controller
 
         self.position = 0.0
@@ -307,7 +311,15 @@ class StrategyCore:
     def _is_high_vol_regime(self, regime):
         return str(regime or "").lower() in {"high_vol", "range_high_vol"}
 
-    def _long_entry_guard_reason(self, *, trend_bias=None, trend_gap=None, market_regime=None, is_high_vol=False):
+    def _long_entry_guard_reason(
+        self,
+        *,
+        trend_bias=None,
+        trend_gap=None,
+        money_flow_ratio=None,
+        market_regime=None,
+        is_high_vol=False,
+    ):
         if not self.long_entry_guard_enabled:
             return None
         trend_bias = str(trend_bias or "neutral").lower()
@@ -326,6 +338,15 @@ class StrategyCore:
             return f"LongEntryGuard(weak_trend_gap={gap_abs:.4%})"
         if self.long_entry_block_high_vol and self._is_high_vol_regime(market_regime):
             return f"LongEntryGuard({str(market_regime or 'high_vol').lower()})"
+        money_flow = self._clean_optional_ratio(money_flow_ratio)
+        if (
+            self.long_entry_overheat_guard_enabled
+            and self.long_entry_overheat_money_flow_max > 0
+            and money_flow is not None
+            and money_flow >= self.long_entry_overheat_money_flow_max
+            and (is_high_vol or self._is_high_vol_regime(market_regime))
+        ):
+            return f"LongEntryGuard(overheat_money_flow={money_flow:.3f})"
         return None
 
     def resolve_risk_thresholds(self, *, volatility: float = None, atr_ratio: float = None, market_regime: str = None):
@@ -783,6 +804,7 @@ class StrategyCore:
             long_entry_guard_reason = self._long_entry_guard_reason(
                 trend_bias=trend_bias,
                 trend_gap=trend_gap,
+                money_flow_ratio=money_flow_ratio,
                 market_regime=market_regime,
                 is_high_vol=is_high_vol,
             )

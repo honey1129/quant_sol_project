@@ -310,6 +310,8 @@ class LiveTrader:
             long_entry_high_vol_gap_buffer=float(config.LONG_ENTRY_HIGH_VOL_GAP_BUFFER),
             long_entry_high_vol_min_trend_gap=float(config.LONG_ENTRY_HIGH_VOL_MIN_TREND_GAP),
             long_entry_block_high_vol=bool(config.LONG_ENTRY_BLOCK_HIGH_VOL),
+            long_entry_overheat_guard_enabled=bool(config.LONG_ENTRY_OVERHEAT_GUARD_ENABLED),
+            long_entry_overheat_money_flow_max=float(config.LONG_ENTRY_OVERHEAT_MONEY_FLOW_MAX),
             dynamic_risk_controller=self.dynamic_risk_controller,
         )
 
@@ -334,7 +336,9 @@ class LiveTrader:
             f"enabled={int(bool(config.LONG_ENTRY_GUARD_ENABLED))} "
             f"min_trend_gap={float(config.LONG_ENTRY_MIN_TREND_GAP):.4%} "
             f"high_vol_min_trend_gap={float(config.LONG_ENTRY_HIGH_VOL_MIN_TREND_GAP):.4%} "
-            f"block_high_vol_regime={int(bool(config.LONG_ENTRY_BLOCK_HIGH_VOL))}"
+            f"block_high_vol_regime={int(bool(config.LONG_ENTRY_BLOCK_HIGH_VOL))} "
+            f"overheat_guard={int(bool(config.LONG_ENTRY_OVERHEAT_GUARD_ENABLED))} "
+            f"overheat_money_flow_max={float(config.LONG_ENTRY_OVERHEAT_MONEY_FLOW_MAX):.3f}"
         )
 
         if self.last_bar_ts is not None:
@@ -981,6 +985,8 @@ class LiveTrader:
             detail = raw.split("(", 1)[1].split(")", 1)[0]
             if detail.startswith("weak_trend_gap="):
                 text = f"多头入场保护：趋势强度不足（{detail.split('=', 1)[1]}），暂不开多"
+            elif detail.startswith("overheat_money_flow="):
+                text = f"多头入场保护：资金流过热（{detail.split('=', 1)[1]}），暂不开多"
             elif detail in {"range_high_vol", "high_vol"}:
                 text = f"多头入场保护：{LiveTrader._humanize_regime(detail)}里不开新多"
             elif detail == "missing_trend_gap":
