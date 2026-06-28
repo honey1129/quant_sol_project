@@ -1015,6 +1015,60 @@ class StrategyCoreRegimeTests(unittest.TestCase):
         self.assertEqual(out["action"], "OPEN")
         self.assertEqual(out["reason"], "OpenFromFlat")
 
+    def test_long_entry_guard_blocks_high_vol_overheated_money_flow(self):
+        core = self.build_core(
+            target_ratio=0.2,
+            min_adjust_amount=0.0,
+            long_entry_guard_enabled=True,
+            long_entry_min_trend_gap=0.003,
+            long_entry_high_vol_min_trend_gap=0.005,
+            long_entry_overheat_guard_enabled=True,
+            long_entry_overheat_money_flow_max=2.5,
+        )
+
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.90,
+            short_prob=0.10,
+            money_flow_ratio=3.2,
+            volatility=0.003,
+            trend_bias="long",
+            trend_gap=0.006,
+            is_high_vol=True,
+            market_regime="trend_long",
+        )
+
+        self.assertEqual(out["action"], "HOLD")
+        self.assertEqual(out["reason"], "LongEntryGuard(overheat_money_flow=3.200)")
+
+    def test_long_entry_guard_allows_overheated_money_flow_outside_high_vol(self):
+        core = self.build_core(
+            target_ratio=0.2,
+            min_adjust_amount=0.0,
+            long_entry_guard_enabled=True,
+            long_entry_min_trend_gap=0.003,
+            long_entry_high_vol_min_trend_gap=0.005,
+            long_entry_overheat_guard_enabled=True,
+            long_entry_overheat_money_flow_max=2.5,
+        )
+
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.90,
+            short_prob=0.10,
+            money_flow_ratio=3.2,
+            volatility=0.001,
+            trend_bias="long",
+            trend_gap=0.006,
+            is_high_vol=False,
+            market_regime="trend_long",
+        )
+
+        self.assertEqual(out["action"], "OPEN")
+        self.assertEqual(out["reason"], "OpenFromFlat")
+
     def test_loss_guard_does_not_block_position_reduction(self):
         core = self.build_core(
             target_ratio=0.2,

@@ -264,6 +264,9 @@ cp .env.example .env
 | `LIVE_AUTO_SET_LEVERAGE` | 自动设置杠杆 | 建议保持 `1` |
 | `LIVE_RECONCILE_PENDING_ORDERS` | 启动/轮询前清挂单 | 建议保持 `1` |
 | `LIVE_PERSIST_LAST_BAR` | 持久化最近 bar | 建议保持 `1` |
+| `LONG_ENTRY_GUARD_ENABLED` | 多头入场质量保护 | 建议保持 `1` |
+| `LONG_ENTRY_HIGH_VOL_MIN_TREND_GAP` | 高波动下开多所需最小趋势强度 | 当前建议 `0.0050` |
+| `LONG_ENTRY_OVERHEAT_MONEY_FLOW_MAX` | 高波动下资金流过热拦截阈值 | 当前建议 `2.5` |
 
 如果你是第一次做测试盘联调，建议先保留：
 
