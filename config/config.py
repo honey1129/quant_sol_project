@@ -2,8 +2,8 @@ import os
 from dotenv import load_dotenv
 from typing import Callable, Dict
 
-# 自动加载.env文件
-load_dotenv()
+# 自动加载.env文件，override=True 确保 .env 始终优先于 PM2/shell 注入的旧环境变量
+load_dotenv(override=True)
 
 # ✅ 辅助函数：解析 key:value,key:value 格式字符串为字典
 def parse_env_dict(env_str: str, value_type: Callable[[str], any] = str) -> Dict[str, any]:

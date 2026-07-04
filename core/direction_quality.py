@@ -211,6 +211,23 @@ class DirectionQualityModel:
         self.diagnostics = dict(diagnostics or {})
         self.classes_ = np.asarray([0, 1], dtype=int)
 
+    def __setstate__(self, state):
+        """Restore pickle state with backward compatibility.
+
+        Old pickles (trained before direction_regime_calibrators was added)
+        don't have that key in their __dict__. Inject a safe default so that
+        _calibrate_probabilities never raises AttributeError on legacy models.
+        """
+        self.__dict__.update(state)
+        if not hasattr(self, "direction_regime_calibrators"):
+            self.direction_regime_calibrators = {}
+        if not hasattr(self, "direction_calibrators"):
+            self.direction_calibrators = {}
+        if not hasattr(self, "direction_models"):
+            self.direction_models = {}
+        if not hasattr(self, "diagnostics"):
+            self.diagnostics = {}
+
     def _trend_bias_values(self, X):
         if hasattr(X, "columns") and "trend_bias_num" in X.columns:
             values = np.asarray(X["trend_bias_num"], dtype=float)
