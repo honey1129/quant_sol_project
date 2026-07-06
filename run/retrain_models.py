@@ -20,8 +20,9 @@ from utils.utils import BASE_DIR, LOGS_DIR, notify_important
 LOCK_PATH = os.path.join(LOGS_DIR, "model_retrain.lock")
 STATE_PATH = os.path.join(LOGS_DIR, "model_retrain_state.json")
 BACKUP_ROOT = os.path.join(BASE_DIR, "models", "backups")
-HARD_MIN_CLOSED_TRADES = 1
-HARD_MIN_PROFIT_FACTOR = 1.0
+# 通过 config 读取，允许用环境变量覆盖（默认保持原来的 1 和 0.0 以兼容现有配置）
+HARD_MIN_CLOSED_TRADES = int(getattr(config, "MODEL_RETRAIN_HARD_MIN_CLOSED_TRADES", 1))
+HARD_MIN_PROFIT_FACTOR = float(getattr(config, "MODEL_RETRAIN_HARD_MIN_PROFIT_FACTOR", 0.0))
 IMPROVEMENT_EPSILON = 1e-9
 
 
