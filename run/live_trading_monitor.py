@@ -254,6 +254,10 @@ class LiveTrader:
         self._daily_start_equity: float = None  # 当日起始权益（每日重置）
         self._daily_start_date: str = None       # 当日日期（UTC，用于跨天重置）
 
+        # ===== 交易所端 TP/SL 算法单追踪 =====
+        # 每次开仓后记录 algoId，平仓前撤销，防止进程崩溃后残留单触发
+        self._active_algo_id: str = ""
+
         # ===== 模型/特征=====
         feature_path = os.path.join(BASE_DIR, config.FEATURE_LIST_PATH) if "BASE_DIR" in globals() else config.FEATURE_LIST_PATH
         self.feature_cols = joblib.load(feature_path)
@@ -1364,6 +1368,42 @@ class LiveTrader:
             f"当前最新已收盘bar={format_display_ts(current_bar_ts)}, 连续跳过同bar次数={self.same_bar_skip_count}"
         )
 
+    def _place_exchange_tpsl(self, pos_side: str, pos_qty: float, entry_price: float, decision: dict):
+        """开仓后立即在交易所下 TP/SL OCO 算法单。
+
+        - 算法单 reduceOnly=True，只减仓不反向开仓。
+        - algoId 保存到 self._active_algo_id，平仓前撤销。
+        - 若下单失败只记录错误，不阻断交易流程（本地止损仍兜底）。
+        """
+        if not getattr(config, "EXCHANGE_TPSL_ENABLED", True):
+            return
+        tp = float(decision.get("take_profit") or 0)
+        sl = float(decision.get("stop_loss") or 0)
+        if tp <= 0 or sl <= 0 or abs(pos_qty) < 1e-9 or entry_price <= 0:
+            log_error(
+                f"_place_exchange_tpsl: 参数不足，跳过交易所端止损单"
+                f" tp={tp} sl={sl} qty={pos_qty} entry={entry_price}"
+            )
+            return
+        algo_id = self.client.place_tpsl_algo_order(
+            pos_side=pos_side,
+            sz=abs(pos_qty),
+            entry_price=entry_price,
+            take_profit_ratio=tp,
+            stop_loss_ratio=sl,
+        )
+        if algo_id:
+            self._active_algo_id = algo_id
+        else:
+            log_error("⚠ 交易所端 TP/SL 下单失败，依赖本地止损兜底")
+
+    def _cancel_exchange_tpsl(self):
+        """平仓前撤销活跃的交易所端 TP/SL 算法单，防止残留单触发后反向开仓。"""
+        if not self._active_algo_id:
+            return
+        self.client.cancel_algo_order(self._active_algo_id)
+        self._active_algo_id = ""
+
     def _check_safety_gates(self, equity: float) -> bool:
         """检查 Kill Switch 和日亏损熔断。返回 True 表示应当拒绝新开仓。
 
@@ -1533,6 +1573,8 @@ class LiveTrader:
         }
 
         if action == "CLOSE":
+            # 平仓前先撤销交易所端 TP/SL 算法单，防止残留单触发后反向开仓
+            self._cancel_exchange_tpsl()
             success = False
             leverage = self._resolve_order_leverage(decision)
             if pos_qty > 0:
@@ -1608,6 +1650,16 @@ class LiveTrader:
             pos_qty, entry_price = self._get_net_position()
             trade_record = None
             if success:
+                # 开仓成功后立即在交易所下 TP/SL 算法单（P0修复）
+                # entry_price 优先使用 OKX 返回的实际成交均价
+                actual_entry = float(entry_price) if entry_price and float(entry_price) > 0 else float(price)
+                pos_side_open = "long" if float(delta) > 0 else "short"
+                self._place_exchange_tpsl(
+                    pos_side=pos_side_open,
+                    pos_qty=float(pos_qty) if pos_qty else abs(float(delta)),
+                    entry_price=actual_entry,
+                    decision=decision,
+                )
                 trade_record = self._record_trade_execution(
                     order_result=success,
                     action="OPEN",

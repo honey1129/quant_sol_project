@@ -426,3 +426,5 @@ POLL_SEC = int(os.getenv("POLL_SEC", 10))
 MAX_DAILY_LOSS_PCT = float(os.getenv("MAX_DAILY_LOSS_PCT", 0.05))
 # KILL_SWITCH_FILE：该文件存在时立即停止所有新开仓（touch kill_switch.flag 即可触发）
 KILL_SWITCH_FILE = os.getenv("KILL_SWITCH_FILE", "kill_switch.flag")
+# EXCHANGE_TPSL_ENABLED：开仓后自动在 OKX 下 TP/SL 算法单（进程崩溃时止损仍有效）
+EXCHANGE_TPSL_ENABLED = parse_env_bool(os.getenv("EXCHANGE_TPSL_ENABLED"), True)

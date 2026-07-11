@@ -977,6 +977,118 @@ class OKXClient:
         close_size = min(float(sz), float(short_pos['size']))
         return self.place_order_with_size("buy", "short", close_size, leverage, reduce_only=True)
 
+    # ─────────────────────────────────────────────────────────────
+    # 交易所端 TP/SL 算法单（P0修复：进程崩溃时交易所端止损仍有效）
+    # ─────────────────────────────────────────────────────────────
+
+    def place_tpsl_algo_order(
+        self,
+        pos_side: str,
+        sz: float,
+        entry_price: float,
+        take_profit_ratio: float,
+        stop_loss_ratio: float,
+    ):
+        """在 OKX 下 OCO 算法止盈止损单（tpsl 类型）。
+
+        持仓存续期间即使进程崩溃，止损也不会失效。
+        平仓或手动撤销前，该单会持续有效。
+
+        Args:
+            pos_side: "long" 或 "short"
+            sz:        持仓张数
+            entry_price:  实际成交均价
+            take_profit_ratio: 止盈距离比例（如 0.026 = 2.6%）
+            stop_loss_ratio:   止损距离比例（如 0.012 = 1.2%）
+
+        Returns:
+            algo order ID（str）或 None（下单失败）
+        """
+        if pos_side == "long":
+            tp_price = round(entry_price * (1 + take_profit_ratio), 6)
+            sl_price = round(entry_price * (1 - stop_loss_ratio), 6)
+            side = "sell"
+        elif pos_side == "short":
+            tp_price = round(entry_price * (1 - take_profit_ratio), 6)
+            sl_price = round(entry_price * (1 + stop_loss_ratio), 6)
+            side = "buy"
+        else:
+            log_error(f"place_tpsl_algo_order: 未知 pos_side={pos_side}")
+            return None
+
+        lot_size = float(config.LOT_SIZE)
+        sz_floors = round(math.floor(float(sz) / lot_size) * lot_size, 6)
+        if sz_floors <= 0:
+            log_error(f"place_tpsl_algo_order: 下单数量为0，跳过")
+            return None
+
+        try:
+            result = self._call_with_retry(
+                "下 TP/SL 算法单",
+                lambda: self.trade_api.place_algo_order(
+                    instId=config.SYMBOL,
+                    tdMode="cross",
+                    side=side,
+                    posSide=pos_side,
+                    ordType="oco",
+                    sz=str(sz_floors),
+                    tpTriggerPx=str(tp_price),
+                    tpOrdPx="-1",         # 市价触发
+                    tpTriggerPxType="last",
+                    slTriggerPx=str(sl_price),
+                    slOrdPx="-1",         # 市价触发
+                    slTriggerPxType="last",
+                    reduceOnly=True,
+                ),
+            )
+            if result.get("code") == "0" and result.get("data"):
+                algo_id = result["data"][0].get("algoId", "")
+                log_info(
+                    f"✅ 交易所端 TP/SL 已下单: {pos_side} algoId={algo_id}"
+                    f" TP触发={tp_price} SL触发={sl_price} sz={sz_floors}"
+                )
+                return algo_id
+            else:
+                log_error(f"⚠ 交易所端 TP/SL 下单失败: {result}")
+                return None
+        except Exception as exc:
+            log_error(f"⚠ 交易所端 TP/SL 下单异常: {exc}")
+            return None
+
+    def cancel_algo_order(self, algo_id: str) -> bool:
+        """撤销指定 algo 算法单（平仓前调用，防止残留单反向开仓）。
+
+        Args:
+            algo_id: place_tpsl_algo_order 返回的 algoId
+
+        Returns:
+            True 表示成功撤销或已不存在，False 表示撤销失败
+        """
+        if not algo_id:
+            return True
+        try:
+            result = self._call_with_retry(
+                "撤销 TP/SL 算法单",
+                lambda: self.trade_api.cancel_algo_order(
+                    [{"instId": config.SYMBOL, "algoId": algo_id}]
+                ),
+            )
+            code = result.get("code", "")
+            if code == "0":
+                log_info(f"✅ 交易所端 TP/SL 算法单已撤销: algoId={algo_id}")
+                return True
+            # 51603: 算法单不存在（可能已触发或已撤销），视为成功
+            data = result.get("data", [{}])
+            s_code = data[0].get("sCode", "") if data else ""
+            if s_code in ("51603", "51609"):
+                log_info(f"交易所端 TP/SL 算法单不存在（已触发/已撤），algoId={algo_id}")
+                return True
+            log_error(f"⚠ 撤销 TP/SL 算法单失败: {result}")
+            return False
+        except Exception as exc:
+            log_error(f"⚠ 撤销 TP/SL 算法单异常: algoId={algo_id}, err={exc}")
+            return False
+
 
 
 if __name__ == '__main__':
