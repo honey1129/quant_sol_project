@@ -1023,6 +1023,8 @@ class OKXClient:
             return None
 
         try:
+            # mark price 比 last price 更稳定：不会被闪崩/价格操纵触发止损
+            trigger_px_type = str(getattr(config, "TPSL_TRIGGER_PX_TYPE", "mark")).lower()
             result = self._call_with_retry(
                 "下 TP/SL 算法单",
                 lambda: self.trade_api.place_algo_order(
@@ -1034,10 +1036,10 @@ class OKXClient:
                     sz=str(sz_floors),
                     tpTriggerPx=str(tp_price),
                     tpOrdPx="-1",         # 市价触发
-                    tpTriggerPxType="last",
+                    tpTriggerPxType=trigger_px_type,
                     slTriggerPx=str(sl_price),
                     slOrdPx="-1",         # 市价触发
-                    slTriggerPxType="last",
+                    slTriggerPxType=trigger_px_type,
                     reduceOnly=True,
                 ),
             )
@@ -1046,6 +1048,7 @@ class OKXClient:
                 log_info(
                     f"✅ 交易所端 TP/SL 已下单: {pos_side} algoId={algo_id}"
                     f" TP触发={tp_price} SL触发={sl_price} sz={sz_floors}"
+                    f" 触发价格类型={trigger_px_type}"
                 )
                 return algo_id
             else:

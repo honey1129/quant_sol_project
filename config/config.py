@@ -428,3 +428,8 @@ MAX_DAILY_LOSS_PCT = float(os.getenv("MAX_DAILY_LOSS_PCT", 0.05))
 KILL_SWITCH_FILE = os.getenv("KILL_SWITCH_FILE", "kill_switch.flag")
 # EXCHANGE_TPSL_ENABLED：开仓后自动在 OKX 下 TP/SL 算法单（进程崩溃时止损仍有效）
 EXCHANGE_TPSL_ENABLED = parse_env_bool(os.getenv("EXCHANGE_TPSL_ENABLED"), True)
+# TPSL_TRIGGER_PX_TYPE：交易所端 TP/SL 触发价格类型
+#   mark  - 标记价格（推荐）：抗闪崩/价格操纵，OKX 强平计算也用标记价格
+#   last  - 最新成交价：对价格变动更敏感，TP 触发更快但 SL 可能被短暂插针触发
+#   index - 指数价格：多所综合，最平滑，SL 最难被操纵触发
+TPSL_TRIGGER_PX_TYPE = os.getenv("TPSL_TRIGGER_PX_TYPE", "mark")
