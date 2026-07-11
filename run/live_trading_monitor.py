@@ -210,6 +210,24 @@ class LiveTrader:
             self.cooldown_bars_remaining = 0
             self.reverse_signal_bars = 0
             self.loss_guard_exit_bars = 0
+
+        # 重启一致性检查：若 OKX 实际仓位为0，强制重置策略状态，防止 hold_bars/cooldown
+        # 从旧 JSON 恢复后与实际无仓位状态不一致（P1-2修复）
+        try:
+            _pos_qty, _entry = client.get_position()
+            _actual_qty = (_pos_qty.get("size", 0.0) if isinstance(_pos_qty, dict) else 0.0)
+            if abs(float(_actual_qty or 0)) < 1e-9:
+                if self.hold_bars != 0 or self.cooldown_bars_remaining != 0:
+                    from utils.utils import log_info as _log_info
+                    _log_info(
+                        f"重启一致性修正: OKX仓位=0 但本地 hold_bars={self.hold_bars}/"
+                        f"cooldown={self.cooldown_bars_remaining}，已强制重置。"
+                    )
+                self.hold_bars = 0
+                self.reverse_signal_bars = 0
+                self.loss_guard_exit_bars = 0
+        except Exception:
+            pass  # 初始化时读仓位失败不阻断启动
         self.loop_count = 0
         self.same_bar_skip_count = 0
         self.last_heartbeat_logged_at = None
@@ -229,6 +247,12 @@ class LiveTrader:
         self.consecutive_abnormal_hold_count = 0
         self.last_hold_alert_notified_at = None
         self.last_hold_alert_key = None
+
+        # ===== 账户级安全门禁 =====
+        self._trading_halted = False   # Kill Switch 或日亏损熔断触发后置 True
+        self._halt_reason: str = ""
+        self._daily_start_equity: float = None  # 当日起始权益（每日重置）
+        self._daily_start_date: str = None       # 当日日期（UTC，用于跨天重置）
 
         # ===== 模型/特征=====
         feature_path = os.path.join(BASE_DIR, config.FEATURE_LIST_PATH) if "BASE_DIR" in globals() else config.FEATURE_LIST_PATH
@@ -1340,6 +1364,62 @@ class LiveTrader:
             f"当前最新已收盘bar={format_display_ts(current_bar_ts)}, 连续跳过同bar次数={self.same_bar_skip_count}"
         )
 
+    def _check_safety_gates(self, equity: float) -> bool:
+        """检查 Kill Switch 和日亏损熔断。返回 True 表示应当拒绝新开仓。
+
+        规则：
+        - Kill Switch：只要 KILL_SWITCH_FILE 文件存在，立即停止所有新开仓。
+          通过 ``touch kill_switch.flag`` 触发，``rm kill_switch.flag`` 恢复。
+        - 日亏损熔断：当日权益亏损超过 MAX_DAILY_LOSS_PCT 时停止新开仓。
+          每天 UTC 0:00 自动重置，平仓单不受影响。
+        """
+        from datetime import datetime, timezone as _tz
+        today_utc = datetime.now(_tz.utc).strftime("%Y-%m-%d")
+
+        # 跨天重置日起始权益
+        if self._daily_start_date != today_utc:
+            self._daily_start_equity = float(equity)
+            self._daily_start_date = today_utc
+            if self._trading_halted and "DailyLoss" in self._halt_reason:
+                # 新的一天，自动解除日亏损熔断（Kill Switch 需要手动删文件）
+                self._trading_halted = False
+                self._halt_reason = ""
+                log_info("🟢 日亏损熔断已在新交易日自动解除")
+
+        # Kill Switch 文件检查
+        kill_switch_path = os.path.join(BASE_DIR, config.KILL_SWITCH_FILE)
+        if os.path.exists(kill_switch_path):
+            if not self._trading_halted or "KillSwitch" not in self._halt_reason:
+                self._trading_halted = True
+                self._halt_reason = "KillSwitch"
+                log_error(
+                    f"🚨 Kill Switch 已激活（检测到 {kill_switch_path}）——拒绝所有新开仓。"
+                    f" 删除该文件并重启进程可恢复。"
+                )
+                notify_important("🚨 Kill Switch 已激活", "交易已暂停，删除 kill_switch.flag 并重启可恢复")
+            return True
+
+        # 日亏损熔断
+        max_loss_pct = float(getattr(config, "MAX_DAILY_LOSS_PCT", 0.05))
+        if max_loss_pct > 0 and self._daily_start_equity and self._daily_start_equity > 0:
+            loss_pct = (self._daily_start_equity - float(equity)) / self._daily_start_equity
+            if loss_pct >= max_loss_pct:
+                if not self._trading_halted or "DailyLoss" not in self._halt_reason:
+                    self._trading_halted = True
+                    self._halt_reason = f"DailyLoss({loss_pct:.2%})"
+                    log_error(
+                        f"🚨 日亏损熔断触发: 当日亏损 {loss_pct:.2%} ≥ 阈值 {max_loss_pct:.2%}"
+                        f" (起始权益={self._daily_start_equity:.2f}, 当前={equity:.2f})"
+                        f" ——今日拒绝新开仓，持仓的平仓/止损正常执行。"
+                    )
+                    notify_important(
+                        f"🚨 日亏损熔断: {loss_pct:.2%}",
+                        f"当日亏损超过 {max_loss_pct:.2%}，今日不再开新仓",
+                    )
+                return True
+
+        return False
+
     def run_once_on_new_bar(self):
         self.loop_count += 1
         bar_ts, price, long_prob, short_prob, money_flow_ratio, volatility, atr_ratio, trend_context, regime_context = self._get_latest_features()
@@ -1395,6 +1475,9 @@ class LiveTrader:
             return
         account_snapshot = self._get_account_snapshot()
         equity = self._get_sizing_equity(account_snapshot)
+
+        # 安全门禁：Kill Switch / 日亏损熔断（只阻止新开仓，不影响平仓/止损）
+        safety_halted = self._check_safety_gates(equity)
 
         if pos_qty == 0:
             self.hold_bars = 0
@@ -1507,6 +1590,15 @@ class LiveTrader:
             return
 
         elif action == "OPEN":
+            # 安全门禁：Kill Switch / 日亏损熔断触发时拒绝开仓，平仓/止损正常执行
+            if safety_halted:
+                log_info(
+                    f"HOLD (安全门禁 {self._halt_reason}): 拒绝新开仓"
+                    f" target_ratio={out.get('target_ratio', 0):.4f}"
+                    f" dominant={out.get('dominant_prob', 0):.4f}"
+                )
+                self._persist_last_bar_state(bar_ts)
+                return
             success = self._execute_delta(pos_qty, delta, decision)
             self.cooldown_bars_remaining = int(out.get("next_cooldown_bars", self.cooldown_bars_remaining))
             self.reverse_signal_bars = int(out.get("next_reverse_signal_bars", 0))
@@ -1667,7 +1759,29 @@ class LiveTrader:
 
 
 def run():
+    import atexit
     POLL_SEC = config.POLL_SEC
+
+    # ===== 多实例防护：PID 锁文件 =====
+    pid_file = os.path.join(LOGS_DIR, "live_trading_monitor.pid")
+    if os.path.exists(pid_file):
+        try:
+            old_pid = int(open(pid_file).read().strip())
+            # 检查旧进程是否仍在运行
+            try:
+                os.kill(old_pid, 0)   # 信号0：不发送信号，只检查进程存在
+                raise RuntimeError(
+                    f"检测到另一个 live_trading_monitor 进程正在运行 (PID={old_pid})。"
+                    f" 若确认旧进程已停止，请手动删除 {pid_file} 后重试。"
+                )
+            except ProcessLookupError:
+                log_info(f"旧 PID 文件残留（进程 {old_pid} 已不存在），覆盖重建。")
+        except (ValueError, OSError):
+            pass  # PID 文件损坏，直接覆盖
+    with open(pid_file, "w") as f:
+        f.write(str(os.getpid()))
+    atexit.register(lambda: os.path.exists(pid_file) and os.remove(pid_file))
+
     client = OKXClient()
     trader = LiveTrader(client)
     trader.ensure_runtime_ready()

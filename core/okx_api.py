@@ -206,6 +206,25 @@ class OKXClient:
                 if state in {"canceled", "rejected", "failed", "mmp_canceled"}:
                     return None
             if time.monotonic() >= deadline:
+                # 超时时主动撤单，防止订单悬空后意外成交
+                try:
+                    pending = self.get_order_by_client_id(cl_ord_id)
+                    if pending is not None:
+                        pstate = str(pending.get("state", "") or "").lower()
+                        if pstate not in {"filled", "canceled", "rejected", "failed", "mmp_canceled"}:
+                            cancel_result = self.trade_api.cancel_order(
+                                instId=config.SYMBOL,
+                                clOrdId=cl_ord_id,
+                            )
+                            if cancel_result.get("code") == "0":
+                                log_error(f"⚠ 下单超时（{timeout_sec}s）已自动撤单: clOrdId={cl_ord_id}")
+                            else:
+                                log_error(f"⚠ 下单超时但撤单失败: clOrdId={cl_ord_id}, result={cancel_result}")
+                        elif pstate == "filled":
+                            # 超时查询时已成交，返回成交结果
+                            return self._attach_order_fills(pending)
+                except Exception as exc:
+                    log_error(f"⚠ 超时撤单异常: clOrdId={cl_ord_id}, err={exc}")
                 return None
             time.sleep(poll_interval_sec)
 
@@ -320,6 +339,37 @@ class OKXClient:
             f"交易环境校验完成: simulated={str(config.USE_SERVER) == '1'}, "
             f"pos_mode={pos_mode}, leverage_target={config.LEVERAGE}x"
         )
+        # 启动时从 OKX 动态读取合约规格，覆盖 .env 里的硬编码默认值
+        self._refresh_instrument_specs()
+
+    def _refresh_instrument_specs(self):
+        """从 OKX 动态读取合约规格（lotSz、tickSz、ctVal），覆盖 config 默认值。
+        确保换品种或 OKX 调整规格后无需手动修改 .env。
+        """
+        try:
+            result = self._call_with_retry(
+                "获取合约规格",
+                lambda: self.public_api.get_instruments(instType="SWAP", instId=config.SYMBOL),
+            )
+            if result.get("code") != "0" or not result.get("data"):
+                log_error(f"获取合约规格失败，继续使用 .env 配置值: {result}")
+                return
+            inst = result["data"][0]
+            lot_sz = float(inst.get("lotSz", config.LOT_SIZE) or config.LOT_SIZE)
+            tick_sz = float(inst.get("tickSz", config.TICK_SIZE) or config.TICK_SIZE)
+            ct_val = float(inst.get("ctVal", 1.0) or 1.0)
+            min_sz = float(inst.get("minSz", lot_sz) or lot_sz)
+            # 运行时动态覆盖 config 属性（不影响其他进程）
+            config.LOT_SIZE = lot_sz
+            config.TICK_SIZE = tick_sz
+            config.CT_VAL = ct_val
+            config.MIN_SZ = min_sz
+            log_info(
+                f"合约规格已从 OKX 动态加载: {config.SYMBOL} "
+                f"lotSz={lot_sz} tickSz={tick_sz} ctVal={ct_val} minSz={min_sz}"
+            )
+        except Exception as exc:
+            log_error(f"动态加载合约规格异常，继续使用 .env 配置值: {exc}")
 
     # 获取当前账户余额等信息
     def get_account_balance(self):

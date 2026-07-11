@@ -10,8 +10,19 @@ def parse_env_dict(env_str: str, value_type: Callable[[str], any] = str) -> Dict
     items = env_str.split(",") if env_str else []
     parsed = {}
     for item in items:
-        key, value = item.split(":")
-        parsed[key] = value_type(value)
+        item = item.strip()
+        if not item:
+            continue
+        if ":" not in item:
+            import logging
+            logging.warning(f"parse_env_dict: 跳过格式不正确的条目（缺少冒号）: {item!r}")
+            continue
+        key, value = item.split(":", 1)
+        try:
+            parsed[key.strip()] = value_type(value.strip())
+        except (TypeError, ValueError) as exc:
+            import logging
+            logging.warning(f"parse_env_dict: 跳过无法转换的条目 {item!r}: {exc}")
     return parsed
 
 
@@ -408,4 +419,10 @@ DAILY_REPORT_HOUR = int(os.getenv("DAILY_REPORT_HOUR", 23))
 DAILY_REPORT_MINUTE = int(os.getenv("DAILY_REPORT_MINUTE", 59))
 
 
-POLL_SEC=os.getenv("POLL_SEC", 10)
+POLL_SEC = int(os.getenv("POLL_SEC", 10))
+
+# ✅ 账户级熔断和紧急控制
+# MAX_DAILY_LOSS_PCT：当日权益亏损超过该比例时拒绝新开仓（0.05=5%，0 表示不启用）
+MAX_DAILY_LOSS_PCT = float(os.getenv("MAX_DAILY_LOSS_PCT", 0.05))
+# KILL_SWITCH_FILE：该文件存在时立即停止所有新开仓（touch kill_switch.flag 即可触发）
+KILL_SWITCH_FILE = os.getenv("KILL_SWITCH_FILE", "kill_switch.flag")
