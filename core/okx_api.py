@@ -31,7 +31,32 @@ def order_is_filled(order):
     if not order:
         return False
     state = str(order.get("state", "") or "").lower()
-    return state in {"filled", "partially_filled"}
+    return state == "filled"
+
+
+def order_has_fill(order):
+    if not order:
+        return False
+    if str(order.get("state", "") or "").lower() == "partially_filled":
+        return True
+    for key in ("accFillSz", "fillSz"):
+        try:
+            if float(order.get(key, 0) or 0) > 0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def order_is_terminal(order):
+    if not order:
+        return False
+    state = str(order.get("state", "") or "").lower()
+    return state in {"filled", "canceled", "rejected", "failed", "mmp_canceled"}
+
+
+class OrderStateUnknownError(RuntimeError):
+    """Raised when an accepted order cannot be reconciled to a terminal state."""
 
 
 def floor_size_to_lot(size, lot_size):
@@ -191,44 +216,105 @@ class OKXClient:
         enriched["_fills"] = fills
         return enriched
 
-    def wait_until_filled(self, cl_ord_id, timeout_sec=5.0, poll_interval_sec=0.3):
+    def _terminal_order_result(self, order):
+        if order_is_filled(order):
+            return self._attach_order_fills(order)
+        if order_has_fill(order):
+            enriched = self._attach_order_fills(order)
+            enriched["_partial_fill"] = True
+            return enriched
+        return False
+
+    def wait_until_filled(
+        self,
+        cl_ord_id,
+        timeout_sec=5.0,
+        poll_interval_sec=0.3,
+        cancel_confirm_timeout_sec=5.0,
+    ):
         if not cl_ord_id:
             return None
         deadline = time.monotonic() + float(timeout_sec)
-        last_order = None
+        terminal_states = {"canceled", "rejected", "failed", "mmp_canceled"}
+        last_order_with_fill = None
+
+        def terminal_result(order):
+            nonlocal last_order_with_fill
+            if order_is_filled(order):
+                return self._attach_order_fills(order)
+            if order_has_fill(order):
+                enriched = self._attach_order_fills(order)
+                enriched["_partial_fill"] = True
+                return enriched
+            if last_order_with_fill is not None:
+                merged = dict(last_order_with_fill)
+                merged.update(order or {})
+                enriched = self._attach_order_fills(merged)
+                enriched["_partial_fill"] = True
+                return enriched
+            return None
+
         while True:
             order = self.get_order_by_client_id(cl_ord_id)
             if order is not None:
-                last_order = order
+                if order_has_fill(order):
+                    last_order_with_fill = order
                 if order_is_filled(order):
                     return self._attach_order_fills(order)
                 state = str(order.get("state", "") or "").lower()
-                if state in {"canceled", "rejected", "failed", "mmp_canceled"}:
-                    return None
+                if state in terminal_states:
+                    return terminal_result(order)
             if time.monotonic() >= deadline:
-                # 超时时主动撤单，防止订单悬空后意外成交
                 try:
                     pending = self.get_order_by_client_id(cl_ord_id)
-                    if pending is not None:
-                        pstate = str(pending.get("state", "") or "").lower()
-                        if pstate not in {"filled", "canceled", "rejected", "failed", "mmp_canceled"}:
-                            cancel_result = self.trade_api.cancel_order(
-                                instId=config.SYMBOL,
-                                clOrdId=cl_ord_id,
-                            )
-                            if cancel_result.get("code") == "0":
-                                log_error(f"⚠ 下单超时（{timeout_sec}s）已自动撤单: clOrdId={cl_ord_id}")
-                            else:
-                                log_error(f"⚠ 下单超时但撤单失败: clOrdId={cl_ord_id}, result={cancel_result}")
-                        elif pstate == "filled":
-                            # 超时查询时已成交，返回成交结果
-                            return self._attach_order_fills(pending)
+                    if pending is None:
+                        raise OrderStateUnknownError(
+                            f"订单超时后无法查询状态: clOrdId={cl_ord_id}"
+                        )
+                    pstate = str(pending.get("state", "") or "").lower()
+                    if order_has_fill(pending):
+                        last_order_with_fill = pending
+                    if pstate == "filled" or pstate in terminal_states:
+                        return terminal_result(pending)
+
+                    cancel_result = self.trade_api.cancel_order(
+                        instId=config.SYMBOL,
+                        clOrdId=cl_ord_id,
+                    )
+                    cancel_data = cancel_result.get("data", []) or []
+                    cancel_item_code = str(cancel_data[0].get("sCode", "") or "") if cancel_data else ""
+                    cancel_accepted = (
+                        str(cancel_result.get("code", "")) == "0"
+                        and cancel_item_code in {"", "0"}
+                    )
+                    if not cancel_accepted:
+                        raise OrderStateUnknownError(
+                            f"订单超时且撤单请求失败: clOrdId={cl_ord_id}, result={cancel_result}"
+                        )
+
+                    log_error(f"⚠ 下单超时（{timeout_sec}s），撤单请求已受理: clOrdId={cl_ord_id}")
+                    cancel_deadline = time.monotonic() + float(cancel_confirm_timeout_sec)
+                    while time.monotonic() < cancel_deadline:
+                        final_order = self.get_order_by_client_id(cl_ord_id)
+                        if final_order is not None:
+                            if order_has_fill(final_order):
+                                last_order_with_fill = final_order
+                            final_state = str(final_order.get("state", "") or "").lower()
+                            if final_state == "filled" or final_state in terminal_states:
+                                return terminal_result(final_order)
+                        time.sleep(poll_interval_sec)
+                    raise OrderStateUnknownError(
+                        f"撤单请求已受理但未确认终态: clOrdId={cl_ord_id}"
+                    )
+                except OrderStateUnknownError:
+                    raise
                 except Exception as exc:
-                    log_error(f"⚠ 超时撤单异常: clOrdId={cl_ord_id}, err={exc}")
-                return None
+                    raise OrderStateUnknownError(
+                        f"超时撤单或终态确认异常: clOrdId={cl_ord_id}, err={exc}"
+                    ) from exc
             time.sleep(poll_interval_sec)
 
-    def cancel_pending_orders(self):
+    def cancel_pending_orders(self, confirm_timeout_sec=5.0, poll_interval_sec=0.3):
         pending_orders = self.list_pending_orders()
         if not pending_orders:
             return []
@@ -243,19 +329,37 @@ class OKXClient:
                     ordId=ord_id,
                     clOrdId=cl_ord_id,
                 )
-                if result.get("code") == "0":
+                data = result.get("data", []) or []
+                item_code = str(data[0].get("sCode", "") or "") if data else ""
+                if str(result.get("code", "")) == "0" and item_code in {"", "0"}:
                     canceled.append({
                         "ordId": ord_id,
                         "clOrdId": cl_ord_id,
                         "state": order.get("state", ""),
                     })
                 else:
-                    log_error(f"撤销挂单失败: ordId={ord_id}, clOrdId={cl_ord_id}, result={result}")
+                    raise OrderStateUnknownError(
+                        f"撤销挂单请求失败: ordId={ord_id}, clOrdId={cl_ord_id}, result={result}"
+                    )
+            except OrderStateUnknownError:
+                raise
             except Exception as exc:
-                log_error(f"撤销挂单异常: ordId={ord_id}, clOrdId={cl_ord_id}, err={exc}")
+                raise OrderStateUnknownError(
+                    f"撤销挂单异常: ordId={ord_id}, clOrdId={cl_ord_id}, err={exc}"
+                ) from exc
 
         if canceled:
-            log_info(f"已清理挂单 {len(canceled)} 笔")
+            canceled_ids = {str(item.get("ordId", "")) for item in canceled}
+            deadline = time.monotonic() + float(confirm_timeout_sec)
+            while time.monotonic() < deadline:
+                remaining = self.list_pending_orders()
+                if not any(str(item.get("ordId", "")) in canceled_ids for item in remaining):
+                    log_info(f"已确认清理挂单 {len(canceled)} 笔")
+                    return canceled
+                time.sleep(poll_interval_sec)
+            raise OrderStateUnknownError(
+                f"挂单撤销请求已受理但未确认终态: ordIds={sorted(canceled_ids)}"
+            )
         return canceled
 
     def _extract_leverage_by_side(self, leverage_rows):
@@ -278,9 +382,6 @@ class OKXClient:
         account_config = self.get_account_config()
         pos_mode = str(account_config.get("posMode", "") or "").lower()
 
-        if bool(config.LIVE_RECONCILE_PENDING_ORDERS):
-            self.cancel_pending_orders()
-
         if pos_mode != "long_short_mode":
             if not bool(config.LIVE_AUTO_SET_POSITION_MODE):
                 raise RuntimeError(f"账户持仓模式为 {pos_mode or 'unknown'}，与策略要求的 long_short_mode 不一致")
@@ -301,6 +402,9 @@ class OKXClient:
             pos_mode = str(account_config.get("posMode", "") or "").lower()
             if pos_mode != "long_short_mode":
                 raise RuntimeError(f"持仓模式校验失败，当前为 {pos_mode or 'unknown'}")
+
+        if bool(config.LIVE_RECONCILE_PENDING_ORDERS):
+            self.cancel_pending_orders()
 
         leverage_rows = self._call_with_retry(
             "获取杠杆配置",
@@ -702,11 +806,14 @@ class OKXClient:
                 enriched = self._attach_order_fills(existing_order)
                 log_info(f"✅ 订单已成交（查询确认）: clOrdId={cl_ord_id}, state={existing_order.get('state')}")
                 return enriched
+            if order_is_terminal(existing_order):
+                return self._terminal_order_result(existing_order)
             if order_is_acknowledged(existing_order):
                 final_order = self.wait_until_filled(cl_ord_id, fill_timeout_sec)
                 if final_order is not None:
                     log_info(f"✅ 订单已受理后成交: clOrdId={cl_ord_id}")
                     return final_order
+                return False
 
             try:
                 # 使用缓存 size 保证幂等（重试时 size 与首次相同）
@@ -774,18 +881,21 @@ class OKXClient:
                     if final_order is not None:
                         log_info(f"✅ 下单已成交: ordId={order_id}, state={final_order.get('state')}")
                         return final_order
-                    log_error(f"⚠ 下单提交后 {fill_timeout_sec}s 内未确认成交，进入下一轮校验: clOrdId={cl_ord_id}")
-                    time.sleep(sleep_sec)
+                    log_error(f"⚠ 下单未成交且已确认终态: clOrdId={cl_ord_id}")
+                    return False
                 else:
                     existing_order = self.get_order_by_client_id(cl_ord_id)
                     if order_is_filled(existing_order):
                         log_info(f"✅ 下单响应异常但订单已成交: clOrdId={cl_ord_id}")
                         return self._attach_order_fills(existing_order)
+                    if order_is_terminal(existing_order):
+                        return self._terminal_order_result(existing_order)
                     if order_is_acknowledged(existing_order):
                         final_order = self.wait_until_filled(cl_ord_id, fill_timeout_sec)
                         if final_order is not None:
                             log_info(f"✅ 下单响应异常但订单已成交: clOrdId={cl_ord_id}")
                             return final_order
+                        return False
                     # ✅ 保险：防止无 data 崩溃
                     error_data = result.get('data', [{}])[0]
                     error_code = error_data.get('sCode', '')
@@ -795,16 +905,21 @@ class OKXClient:
                         return False
                     time.sleep(sleep_sec)
 
+            except OrderStateUnknownError:
+                raise
             except Exception as e:
                 existing_order = self.get_order_by_client_id(cl_ord_id)
                 if order_is_filled(existing_order):
                     log_info(f"✅ 下单异常但订单已成交: clOrdId={cl_ord_id}")
                     return self._attach_order_fills(existing_order)
+                if order_is_terminal(existing_order):
+                    return self._terminal_order_result(existing_order)
                 if order_is_acknowledged(existing_order):
                     final_order = self.wait_until_filled(cl_ord_id, fill_timeout_sec)
                     if final_order is not None:
                         log_info(f"✅ 下单异常但订单已成交: clOrdId={cl_ord_id}")
                         return final_order
+                    return False
                 log_error(f"⚠ 下单异常({attempt + 1}): {e}")
                 time.sleep(sleep_sec)
 
@@ -863,11 +978,14 @@ class OKXClient:
             if order_is_filled(existing_order):
                 log_info(f"✅ 订单已成交（查询确认，sz模式）: clOrdId={cl_ord_id}, state={existing_order.get('state')}")
                 return self._attach_order_fills(existing_order)
+            if order_is_terminal(existing_order):
+                return self._terminal_order_result(existing_order)
             if order_is_acknowledged(existing_order):
                 final_order = self.wait_until_filled(cl_ord_id, fill_timeout_sec)
                 if final_order is not None:
                     log_info(f"✅ 订单已受理后成交(sz模式): clOrdId={cl_ord_id}")
                     return final_order
+                return False
 
             try:
                 if not reduce_only:
@@ -920,18 +1038,21 @@ class OKXClient:
                     if final_order is not None:
                         log_info(f"✅ 下单已成交(sz模式): ordId={order_id}, state={final_order.get('state')}")
                         return final_order
-                    log_error(f"⚠ 下单提交后 {fill_timeout_sec}s 内未确认成交(sz模式)，进入下一轮校验: clOrdId={cl_ord_id}")
-                    time.sleep(sleep_sec)
+                    log_error(f"⚠ 下单未成交且已确认终态(sz模式): clOrdId={cl_ord_id}")
+                    return False
                 else:
                     existing_order = self.get_order_by_client_id(cl_ord_id)
                     if order_is_filled(existing_order):
                         log_info(f"✅ 下单响应异常但订单已成交(sz模式): clOrdId={cl_ord_id}")
                         return self._attach_order_fills(existing_order)
+                    if order_is_terminal(existing_order):
+                        return self._terminal_order_result(existing_order)
                     if order_is_acknowledged(existing_order):
                         final_order = self.wait_until_filled(cl_ord_id, fill_timeout_sec)
                         if final_order is not None:
                             log_info(f"✅ 下单响应异常但订单已成交(sz模式): clOrdId={cl_ord_id}")
                             return final_order
+                        return False
                     error_data = result.get('data', [{}])[0]
                     error_code = error_data.get('sCode', '')
                     error_msg = error_data.get('sMsg', '')
@@ -940,16 +1061,21 @@ class OKXClient:
                         return False
                     time.sleep(sleep_sec)
 
+            except OrderStateUnknownError:
+                raise
             except Exception as e:
                 existing_order = self.get_order_by_client_id(cl_ord_id)
                 if order_is_filled(existing_order):
                     log_info(f"✅ 下单异常但订单已成交(sz模式): clOrdId={cl_ord_id}")
                     return self._attach_order_fills(existing_order)
+                if order_is_terminal(existing_order):
+                    return self._terminal_order_result(existing_order)
                 if order_is_acknowledged(existing_order):
                     final_order = self.wait_until_filled(cl_ord_id, fill_timeout_sec)
                     if final_order is not None:
                         log_info(f"✅ 下单异常但订单已成交(sz模式): clOrdId={cl_ord_id}")
                         return final_order
+                    return False
                 log_error(f"⚠ 下单异常(sz模式)({attempt + 1}): {e}")
                 time.sleep(sleep_sec)
 
@@ -1058,7 +1184,30 @@ class OKXClient:
             log_error(f"⚠ 交易所端 TP/SL 下单异常: {exc}")
             return None
 
-    def cancel_algo_order(self, algo_id: str) -> bool:
+    def list_pending_tpsl_algo_orders(self, pos_side=None):
+        result = self._call_with_retry(
+            "查询待触发 TP/SL 算法单",
+            lambda: self.trade_api.order_algos_list(
+                ordType="oco",
+                instType="SWAP",
+                instId=config.SYMBOL,
+                limit="100",
+            ),
+        )
+        if str(result.get("code", "")) != "0":
+            raise RuntimeError(f"查询待触发 TP/SL 算法单失败: {result}")
+        orders = list(result.get("data", []) or [])
+        if pos_side is not None:
+            orders = [item for item in orders if str(item.get("posSide", "")) == str(pos_side)]
+        return orders
+
+    def cancel_algo_order(
+        self,
+        algo_id: str,
+        *,
+        confirm_timeout_sec=5.0,
+        poll_interval_sec=0.3,
+    ) -> bool:
         """撤销指定 algo 算法单（平仓前调用，防止残留单反向开仓）。
 
         Args:
@@ -1076,10 +1225,19 @@ class OKXClient:
                     [{"instId": config.SYMBOL, "algoId": algo_id}]
                 ),
             )
-            code = result.get("code", "")
-            if code == "0":
-                log_info(f"✅ 交易所端 TP/SL 算法单已撤销: algoId={algo_id}")
-                return True
+            code = str(result.get("code", ""))
+            response_data = result.get("data", []) or []
+            item_code = str(response_data[0].get("sCode", "") or "") if response_data else ""
+            if code == "0" and item_code in {"", "0"}:
+                deadline = time.monotonic() + float(confirm_timeout_sec)
+                while time.monotonic() < deadline:
+                    pending = self.list_pending_tpsl_algo_orders()
+                    if not any(str(item.get("algoId", "")) == str(algo_id) for item in pending):
+                        log_info(f"✅ 交易所端 TP/SL 算法单已确认撤销: algoId={algo_id}")
+                        return True
+                    time.sleep(poll_interval_sec)
+                log_error(f"⚠ TP/SL 撤单请求已受理但未确认终态: algoId={algo_id}")
+                return False
             # 51603: 算法单不存在（可能已触发或已撤销），视为成功
             data = result.get("data", [{}])
             s_code = data[0].get("sCode", "") if data else ""

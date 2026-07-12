@@ -7,6 +7,7 @@ import pandas as pd
 
 from core.okx_api import (
     OKXClient,
+    OrderStateUnknownError,
     build_client_order_id,
     order_is_acknowledged,
     order_is_filled,
@@ -17,6 +18,7 @@ from run.live_trading_monitor import (
     load_runtime_state,
     persist_last_bar_ts,
     persist_runtime_state,
+    net_position_from_sides,
     should_emit_interval_log,
 )
 
@@ -44,6 +46,11 @@ class LiveRuntimeStateTests(unittest.TestCase):
                 cooldown_bars_remaining=3,
                 reverse_signal_bars=2,
                 loss_guard_exit_bars=1,
+                position_qty=-2.5,
+                entry_price=145.2,
+                take_profit=0.02,
+                stop_loss=0.01,
+                active_algo_id="algo-1",
             )
             state = load_runtime_state(state_path)
 
@@ -52,6 +59,11 @@ class LiveRuntimeStateTests(unittest.TestCase):
             self.assertEqual(state["cooldown_bars_remaining"], 3)
             self.assertEqual(state["reverse_signal_bars"], 2)
             self.assertEqual(state["loss_guard_exit_bars"], 1)
+            self.assertEqual(state["position_qty"], -2.5)
+            self.assertEqual(state["entry_price"], 145.2)
+            self.assertEqual(state["take_profit"], 0.02)
+            self.assertEqual(state["stop_loss"], 0.01)
+            self.assertEqual(state["active_algo_id"], "algo-1")
 
     def test_load_runtime_state_legacy_payload_without_hold_bars(self):
         import json
@@ -67,6 +79,8 @@ class LiveRuntimeStateTests(unittest.TestCase):
             self.assertEqual(state["cooldown_bars_remaining"], 0)
             self.assertEqual(state["reverse_signal_bars"], 0)
             self.assertEqual(state["loss_guard_exit_bars"], 0)
+            self.assertIsNone(state["position_qty"])
+            self.assertEqual(state["active_algo_id"], "")
 
     def test_load_runtime_state_missing_file_defaults_zero(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -81,6 +95,24 @@ class LiveRuntimeStateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             state_path = os.path.join(tmpdir, "missing.json")
             self.assertIsNone(load_last_bar_ts(state_path))
+
+    def test_net_position_from_sides_handles_short_only_position(self):
+        qty, entry = net_position_from_sides(
+            {"size": 0.0, "entry_price": 0.0},
+            {"size": 3.5, "entry_price": 142.0},
+        )
+
+        self.assertEqual(qty, -3.5)
+        self.assertEqual(entry, 142.0)
+
+    def test_net_position_from_sides_rejects_dual_side_position(self):
+        qty, entry = net_position_from_sides(
+            {"size": 1.0, "entry_price": 140.0},
+            {"size": 2.0, "entry_price": 141.0},
+        )
+
+        self.assertIsNone(qty)
+        self.assertIsNone(entry)
 
     def test_should_emit_interval_log_when_never_logged(self):
         self.assertTrue(should_emit_interval_log(None, 100.0, 30.0))
@@ -145,8 +177,15 @@ class LiveRuntimeStateTests(unittest.TestCase):
         self.assertEqual(trader._hold_reason_key("LongEntryGuard(weak_trend_gap=0.2500%)"), "LongEntryGuard")
 
     def test_execute_delta_blocks_short_new_entry_when_loss_guard_blocks_short(self):
+        class Client:
+            def get_position(self):
+                return (
+                    {"size": 0.0, "entry_price": 0.0},
+                    {"size": 0.0, "entry_price": 0.0},
+                )
+
         trader = LiveTrader.__new__(LiveTrader)
-        trader.client = object()
+        trader.client = Client()
 
         with patch("run.live_trading_monitor.config.LOSS_GUARD_BLOCK_DIRECTIONS", ["short"]):
             with patch("run.live_trading_monitor.log_error") as mock_log:
@@ -161,6 +200,12 @@ class LiveRuntimeStateTests(unittest.TestCase):
 
     def test_execute_delta_allows_short_reduction_when_loss_guard_blocks_short(self):
         class Client:
+            def get_position(self):
+                return (
+                    {"size": 0.0, "entry_price": 0.0},
+                    {"size": 2.0, "entry_price": 100.0},
+                )
+
             def close_short_sz(self, qty, leverage):
                 self.closed = (qty, leverage)
                 return True
@@ -174,6 +219,98 @@ class LiveRuntimeStateTests(unittest.TestCase):
 
         self.assertTrue(success)
         self.assertEqual(trader.client.closed, (1.0, 3))
+
+    def test_execute_delta_rejects_when_exchange_position_changed(self):
+        class Client:
+            def __init__(self):
+                self.opened = False
+
+            def get_position(self):
+                return (
+                    {"size": 1.0, "entry_price": 100.0},
+                    {"size": 0.0, "entry_price": 0.0},
+                )
+
+            def open_short_sz(self, qty, leverage):
+                self.opened = True
+                return True
+
+        trader = LiveTrader.__new__(LiveTrader)
+        trader.client = Client()
+
+        with patch("run.live_trading_monitor.config.LOT_SIZE", 0.01):
+            success = trader._execute_delta(current_pos_qty=0.0, delta_qty=-1.0)
+
+        self.assertFalse(success)
+        self.assertFalse(trader.client.opened)
+
+    def test_startup_tpsl_reconciliation_adopts_matching_short_order(self):
+        class Client:
+            def list_pending_tpsl_algo_orders(self):
+                return [{"algoId": "algo-short", "posSide": "short", "sz": "2.0"}]
+
+        trader = LiveTrader.__new__(LiveTrader)
+        trader.client = Client()
+        trader._startup_position_verified = True
+        trader._startup_position_qty = -2.0
+        trader._startup_entry_price = 140.0
+        trader._active_algo_id = ""
+        trader._tpsl_coverage_verified = False
+
+        with patch("run.live_trading_monitor.config.EXCHANGE_TPSL_ENABLED", True):
+            with patch("run.live_trading_monitor.config.LOT_SIZE", 0.01):
+                reconciled = trader._reconcile_exchange_tpsl_on_startup()
+
+        self.assertTrue(reconciled)
+        self.assertTrue(trader._tpsl_coverage_verified)
+        self.assertEqual(trader._active_algo_id, "algo-short")
+
+    def test_realtime_risk_check_closes_long_without_waiting_for_new_bar(self):
+        class Client:
+            def __init__(self):
+                self.closed = None
+
+            def get_position(self):
+                return (
+                    {"size": 2.0, "entry_price": 100.0},
+                    {"size": 0.0, "entry_price": 0.0},
+                )
+
+            def get_price(self):
+                return 98.0
+
+            def close_long_sz(self, qty, leverage):
+                self.closed = (qty, leverage)
+                return {"state": "filled"}
+
+        class Core:
+            def get_risk_thresholds(self):
+                return 0.03, 0.01
+
+        trader = LiveTrader.__new__(LiveTrader)
+        trader.client = Client()
+        trader.core = Core()
+        trader._active_algo_id = ""
+        trader._tpsl_coverage_verified = True
+        trader._last_tpsl_reconcile_at = None
+        trader.cooldown_bars_remaining = 0
+        trader.reverse_signal_bars = 0
+        trader.loss_guard_exit_bars = 0
+        trader.last_bar_ts = pd.Timestamp("2026-07-12T00:00:00Z")
+        trader.last_execution = {}
+
+        with patch("run.live_trading_monitor.config.EXCHANGE_TPSL_ENABLED", True):
+            with patch("run.live_trading_monitor.config.LEVERAGE", 3):
+                with patch("run.live_trading_monitor.config.STOP_LOSS_COOLDOWN_BARS", 12):
+                    with patch.object(trader, "_sync_after_trade", return_value=True):
+                        with patch.object(trader, "_persist_last_bar_state"):
+                            with patch("run.live_trading_monitor.notify_important"):
+                                triggered = trader.run_realtime_risk_check()
+
+        self.assertTrue(triggered)
+        self.assertEqual(trader.client.closed, (2.0, 3))
+        self.assertEqual(trader.cooldown_bars_remaining, 12)
+        self.assertEqual(trader.last_execution["reason"], "StopLossRealtime")
 
 
 class OkxOrderHelperTests(unittest.TestCase):
@@ -193,7 +330,7 @@ class OkxOrderHelperTests(unittest.TestCase):
 
     def test_order_is_filled_only_for_filled_states(self):
         self.assertTrue(order_is_filled({"state": "filled"}))
-        self.assertTrue(order_is_filled({"state": "partially_filled"}))
+        self.assertFalse(order_is_filled({"state": "partially_filled"}))
         self.assertFalse(order_is_filled({"state": "live"}))
         self.assertFalse(order_is_filled({"state": "canceled"}))
         self.assertFalse(order_is_filled(None))
@@ -222,10 +359,71 @@ class OkxOrderHelperTests(unittest.TestCase):
     def test_wait_until_filled_times_out_when_never_filled(self):
         client = OKXClient.__new__(OKXClient)
 
-        with patch.object(OKXClient, "get_order_by_client_id", return_value={"state": "live"}):
-            order = client.wait_until_filled("cid", timeout_sec=0.05, poll_interval_sec=0.01)
+        class TradeAPI:
+            def __init__(self):
+                self.canceled = False
+
+            def cancel_order(self, **kwargs):
+                self.canceled = True
+                return {"code": "0", "data": [{"sCode": "0"}]}
+
+        client.trade_api = TradeAPI()
+
+        def get_order(_):
+            state = "canceled" if client.trade_api.canceled else "live"
+            return {"state": state, "ordId": "1"}
+
+        with patch.object(OKXClient, "get_order_by_client_id", side_effect=get_order):
+            order = client.wait_until_filled(
+                "cid",
+                timeout_sec=0.01,
+                poll_interval_sec=0.0,
+                cancel_confirm_timeout_sec=0.05,
+            )
 
         self.assertIsNone(order)
+        self.assertTrue(client.trade_api.canceled)
+
+    def test_wait_until_filled_raises_when_cancel_never_reaches_terminal_state(self):
+        client = OKXClient.__new__(OKXClient)
+
+        class TradeAPI:
+            def cancel_order(self, **kwargs):
+                return {"code": "0", "data": [{"sCode": "0"}]}
+
+        client.trade_api = TradeAPI()
+        with patch.object(OKXClient, "get_order_by_client_id", return_value={"state": "live", "ordId": "1"}):
+            with self.assertRaises(OrderStateUnknownError):
+                client.wait_until_filled(
+                    "cid",
+                    timeout_sec=0.01,
+                    poll_interval_sec=0.0,
+                    cancel_confirm_timeout_sec=0.01,
+                )
+
+    def test_wait_until_filled_returns_canceled_partial_fill(self):
+        client = OKXClient.__new__(OKXClient)
+        order_payload = {"state": "canceled", "ordId": "1", "accFillSz": "0.5"}
+
+        with patch.object(OKXClient, "get_order_by_client_id", return_value=order_payload):
+            order = client.wait_until_filled("cid", timeout_sec=1.0, poll_interval_sec=0.0)
+
+        self.assertTrue(order["_partial_fill"])
+        self.assertEqual(order["accFillSz"], "0.5")
+
+    def test_wait_until_filled_remembers_partial_fill_when_terminal_payload_omits_size(self):
+        client = OKXClient.__new__(OKXClient)
+        sequence = iter([
+            {"state": "partially_filled", "ordId": "1", "accFillSz": "0.5"},
+            {"state": "canceled", "ordId": "1"},
+        ])
+
+        with patch.object(OKXClient, "get_order_by_client_id", side_effect=lambda _: next(sequence)):
+            order = client.wait_until_filled("cid", timeout_sec=1.0, poll_interval_sec=0.0)
+
+        self.assertTrue(order["_partial_fill"])
+        self.assertEqual(order["accFillSz"], "0.5")
+        self.assertEqual(order["state"], "canceled")
 
 
 if __name__ == "__main__":

@@ -419,7 +419,9 @@ DAILY_REPORT_HOUR = int(os.getenv("DAILY_REPORT_HOUR", 23))
 DAILY_REPORT_MINUTE = int(os.getenv("DAILY_REPORT_MINUTE", 59))
 
 
-POLL_SEC = int(os.getenv("POLL_SEC", 10))
+# Realtime local risk checks run every second; heavier bar/model work keeps its own cadence.
+POLL_SEC = int(os.getenv("POLL_SEC", 1))
+BAR_POLL_SEC = int(os.getenv("BAR_POLL_SEC", 10))
 
 # ✅ 账户级熔断和紧急控制
 # MAX_DAILY_LOSS_PCT：当日权益亏损超过该比例时拒绝新开仓（0.05=5%，0 表示不启用）
