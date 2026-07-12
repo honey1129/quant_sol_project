@@ -576,8 +576,8 @@ class StrategyCore:
                 direction = "long"
                 dominant_prob = long_prob
 
-                # neutral 时不交易
-                if long_prob <= 0.6:  # 说明是 neutral (0.5, 0.5)
+                # neutral 时不交易（long_prob 由 simple_rule_mode 注入：trend_long=0.9, neutral=0.5）
+                if long_prob <= self.threshold_long:
                     return 0.0, prob_gap, dominant_prob, "Neutral", None, 0.0
 
                 # trend_long 时做多
@@ -587,8 +587,8 @@ class StrategyCore:
                 direction = "short"
                 dominant_prob = short_prob
 
-                # neutral 时不交易
-                if short_prob <= 0.6:
+                # neutral 时不交易（short_prob 由 simple_rule_mode 注入：trend_short=0.9, neutral=0.5）
+                if short_prob <= self.threshold_short:
                     return 0.0, prob_gap, dominant_prob, "Neutral", None, 0.0
 
                 # trend_short 时做空
@@ -748,6 +748,9 @@ class StrategyCore:
             stop_loss=stop_loss,
             trend_bias=trend_bias,
             market_regime=market_regime,
+            # trend filter 在本函数外层单独计算（见 trend_block_reason），
+            # 此处关闭避免双重拦截：_resolve_directional_target_ratio 里的 trend check
+            # 和 on_bar 外层的 trend_block_reason 会产生冲突，外层结果更完整（含 risk_decision）
             apply_trend_filter=False,
         )
         raw_target_ratio = float(raw_target_ratio)
