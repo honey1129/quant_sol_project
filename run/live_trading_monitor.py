@@ -13,7 +13,7 @@ from core.strategy_core import StrategyCore
 from core.dynamic_risk import DynamicRiskController
 from core.trend_filter import derive_trend_context
 from core.regime_filter import derive_market_regime
-from utils.utils import log_info, log_error, notify_important, BASE_DIR
+from utils.utils import log_info, log_error, notify_important, BASE_DIR, LOGS_DIR
 from utils.utils import DISPLAY_TIMEZONE
 from utils.runtime_dashboard import write_runtime_dashboard_snapshot
 from utils.trade_audit import build_trade_record, append_trade_record, write_daily_report
