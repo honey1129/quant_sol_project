@@ -342,6 +342,8 @@ class LiveTrader:
         self._halt_reason: str = ""
         self._daily_start_equity: float = None  # 当日起始权益（每日重置）
         self._daily_start_date: str = None       # 当日日期（UTC，用于跨天重置）
+        # 交易后同步 OKX 仓位失败时置 True，阻止下一轮新开仓/加仓
+        self._position_uncertain: bool = False
 
         # ===== 交易所端 TP/SL 算法单追踪 =====
         # 每次开仓后记录 algoId，平仓前撤销，防止进程崩溃后残留单触发
@@ -745,8 +747,13 @@ class LiveTrader:
     def _sync_after_trade(self):
         pos_qty2, entry_price2 = self._get_net_position()
         if pos_qty2 is None:
-            log_error("交易后检测到双边仓位，状态同步失败。")
+            # OKX 仓位查询失败（双边持仓/网络超时），内存状态不可信
+            # 标记为不确定，阻止下一轮新开仓/加仓，避免用过期内存值执行错误方向交易
+            self._position_uncertain = True
+            log_error("交易后仓位同步失败，position_uncertain=True，下一轮将拒绝新开仓/加仓")
             return False
+        # 查询成功，清除不确定标志
+        self._position_uncertain = False
         if pos_qty2 == 0:
             self.hold_bars = 0
         self.core.set_state(
@@ -1846,6 +1853,8 @@ class LiveTrader:
         if pos_qty is None:
             log_error("双边持仓仍未清理完成，本轮跳过信号执行。")
             return
+        # 本轮成功从 OKX 读取到仓位，清除上一轮可能遗留的不确定标志
+        self._position_uncertain = False
         account_snapshot = self._get_account_snapshot()
         equity = self._get_sizing_equity(account_snapshot)
 
@@ -1975,6 +1984,13 @@ class LiveTrader:
                 )
                 self._persist_last_bar_state(bar_ts)
                 return
+            # 仓位不确定门禁：上一轮 _sync_after_trade 失败，内存状态不可信，拒绝新开仓
+            if self._position_uncertain:
+                log_error(
+                    "HOLD (position_uncertain): 上一轮仓位同步失败，拒绝新开仓直到获得新鲜 OKX 仓位数据"
+                )
+                self._persist_last_bar_state(bar_ts)
+                return
             success = self._execute_delta(pos_qty, delta, decision)
             if success:
                 self.cooldown_bars_remaining = int(out.get("next_cooldown_bars", self.cooldown_bars_remaining))
@@ -2046,6 +2062,15 @@ class LiveTrader:
             return
 
         elif action == "REBALANCE":
+            # 仓位不确定时拒绝加仓方向的 REBALANCE（减仓仍允许）
+            if self._position_uncertain and delta > 0 and pos_qty >= 0:
+                log_error("HOLD (position_uncertain): 上一轮仓位同步失败，拒绝 REBALANCE 加仓")
+                self._persist_last_bar_state(bar_ts)
+                return
+            if self._position_uncertain and delta < 0 and pos_qty <= 0:
+                log_error("HOLD (position_uncertain): 上一轮仓位同步失败，拒绝 REBALANCE 加仓")
+                self._persist_last_bar_state(bar_ts)
+                return
             success = self._execute_delta(pos_qty, delta, decision)
             if success:
                 self.cooldown_bars_remaining = int(out.get("next_cooldown_bars", self.cooldown_bars_remaining))
