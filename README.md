@@ -11,6 +11,10 @@
 - **市场状态分类（Regime）**：规则based分类（trend_long/trend_short/range/range_high_vol），动态调整阈值与仓位
 - **自适应 TP/SL**：基于 ATR 和波动率动态调整，结合 TP/SL 比例下限保证期望值
 - **多层风控守卫**：LossGuard / LongEntryGuard / RegimeFilter / TrendFilter 分层拦截
+- **交易所端 TP/SL 保护**：每次开仓后立即在 OKX 下 OCO 算法止盈止损单（mark price 触发），进程崩溃时止损仍有效
+- **账户级熔断**：Kill Switch 文件开关 + 单日最大亏损熔断，触发后只平仓不新开仓
+- **动态合约规格**：启动时从 OKX `get_instruments` 读取 lotSz/tickSz/ctVal，避免硬编码精度失效
+- **单实例保护**：PID 锁文件防止 PM2 重启窗口内双进程同时下单
 - **自动每日重训**：walk-forward 验证 + OOS 回测 + regime 偏置门禁，不达标自动回滚旧模型
 - **GitHub Actions CI/CD**：push main 分支自动通过 rsync 部署到 VPS
 - **PM2 常驻运行**：进程保活、日志管理、状态持久化
@@ -258,6 +262,49 @@ MODEL_WALK_FORWARD_ENABLED=False           # 当模型 recall ≈ 0 时可关闭
 
 ---
 
+## 安全与风控机制
+
+系统在下单链路上做了多层保护，核心目标是"进程不可用时资金仍受保护"，以及"策略失控时自动停手"。
+
+### 交易所端 TP/SL（进程崩溃保护）
+
+每次开仓成交后，`okx_api.py` 立即通过 `place_algo_order` 在 OKX 下一张 OCO 止盈止损单：
+
+- `reduceOnly=True`，只平仓不反向开仓
+- 触发价类型为 **mark price**（`EXCHANGE_TPSL_TRIGGER_PX_TYPE=mark`），比 last price 抗插针
+- 平仓 / 反手前会先撤销残留算法单，避免旧止损单触发后意外反向开仓
+- 若算法单下单失败，会立即市价平掉刚开的仓位（`_close_unprotected_position`），绝不留裸仓
+
+```env
+EXCHANGE_TPSL_ENABLED=1              # 开启交易所端 TP/SL
+EXCHANGE_TPSL_TRIGGER_PX_TYPE=mark   # mark / last / index
+```
+
+### 账户级熔断与 Kill Switch
+
+主循环每根 bar 前检查两个熔断条件（`_check_safety_gates`）：
+
+- **Kill Switch**：检测到 `KILL_SWITCH_FILE` 指定的文件存在时，立即停止所有新开仓
+- **单日最大亏损**：当日权益回撤超过 `DAILY_MAX_LOSS_PCT` 时熔断，跨 UTC 日自动重置
+
+熔断触发后只拒绝新开仓，平仓 / 止损照常执行。
+
+```env
+DAILY_MAX_LOSS_PCT=0.05                          # 单日最大亏损 5% 触发熔断
+KILL_SWITCH_FILE=logs/kill_switch.flag           # 该文件存在即停止开仓
+```
+
+紧急停止交易：在 VPS 上 `touch /root/quant_sol_project/logs/kill_switch.flag` 即可，删除文件后恢复。
+
+### 订单一致性保护
+
+- **执行前对账**：`_execute_delta` 下单前重新从 OKX 读取实时仓位，与决策时的仓位不一致则本轮拒绝下单
+- **成交超时撤单**：`wait_until_filled` 超时后主动撤销未确认订单，防止悬空单稍后意外成交
+- **重启一致性修正**：重启时若 OKX 实时仓位与本地持久化状态不符，重置持仓计数并进入保守冷却
+- **clOrdId 幂等**：下单前先按 clOrdId 查询是否已受理，网络超时重试不会重复下单
+
+---
+
 ## VPS 部署
 
 ### GitHub Actions 自动部署（推荐）
@@ -389,6 +436,10 @@ python -m unittest \
 **方向质量模型 pickle 兼容性**
 
 `core/direction_quality.py` 中的 `DirectionQualityModel` 加入了 `__setstate__` 方法，确保旧 pickle 文件（缺少 `direction_regime_calibrators` 属性）在加载时自动补全，不再抛出 `AttributeError`。如遇模型加载报错，检查 Python 版本与 scikit-learn 版本是否兼容。
+
+**单实例保护**
+
+`live_trading_monitor.py` 启动时会写入 `logs/live_trading_monitor.pid` 并检测已有进程，防止 PM2 重启窗口期出现双进程同时下单。若异常退出后 PID 文件残留导致无法启动，手动删除该文件即可。
 
 **参数过多**
 
