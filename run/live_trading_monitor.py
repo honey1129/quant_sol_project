@@ -2192,13 +2192,26 @@ def run():
     if os.path.exists(pid_file):
         try:
             old_pid = int(open(pid_file).read().strip())
-            # 检查旧进程是否仍在运行
+            # 检查旧进程是否仍在运行（且不是僵尸进程）
             try:
                 os.kill(old_pid, 0)   # 信号0：不发送信号，只检查进程存在
-                raise RuntimeError(
-                    f"检测到另一个 live_trading_monitor 进程正在运行 (PID={old_pid})。"
-                    f" 若确认旧进程已停止，请手动删除 {pid_file} 后重试。"
-                )
+                # os.kill 对僵尸进程同样会成功，需额外检查进程状态
+                is_zombie = False
+                try:
+                    with open(f"/proc/{old_pid}/status", "r") as _sf:
+                        for _line in _sf:
+                            if _line.startswith("State:"):
+                                is_zombie = "Z" in _line
+                                break
+                except OSError:
+                    pass  # /proc 读取失败，保守地认为进程存活
+                if is_zombie:
+                    log_info(f"旧 PID {old_pid} 是僵尸进程，覆盖重建 PID 文件。")
+                else:
+                    raise RuntimeError(
+                        f"检测到另一个 live_trading_monitor 进程正在运行 (PID={old_pid})。"
+                        f" 若确认旧进程已停止，请手动删除 {pid_file} 后重试。"
+                    )
             except ProcessLookupError:
                 log_info(f"旧 PID 文件残留（进程 {old_pid} 已不存在），覆盖重建。")
         except (ValueError, OSError):
