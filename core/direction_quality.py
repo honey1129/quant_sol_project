@@ -3,6 +3,13 @@ import math
 import numpy as np
 
 
+def _fallback_calibrator(base_payload, reason):
+    return BinaryProbabilityCalibrator(
+        **base_payload,
+        fallback_reason=reason,
+    )
+
+
 class BinaryProbabilityCalibrator:
     """Calibrate a binary model's trade score while keeping the same interface."""
 
@@ -18,6 +25,7 @@ class BinaryProbabilityCalibrator:
         positive_rows=0,
         negative_rows=0,
         weighted=False,
+        inverted=False,
     ):
         self.method = str(method or "none").lower()
         self.model = model
@@ -28,6 +36,7 @@ class BinaryProbabilityCalibrator:
         self.positive_rows = int(positive_rows or 0)
         self.negative_rows = int(negative_rows or 0)
         self.weighted = bool(weighted)
+        self.inverted = bool(inverted)
 
     @property
     def active(self):
@@ -58,6 +67,7 @@ class BinaryProbabilityCalibrator:
             "positive_rows": int(self.positive_rows),
             "negative_rows": int(self.negative_rows),
             "weighted": bool(self.weighted),
+            "inverted": bool(self.inverted),
         }
         if self.active and self.method == "sigmoid":
             payload["coef"] = float(self.model.coef_[0][0])
@@ -79,6 +89,7 @@ def fit_binary_probability_calibrator(
     min_rows=50,
     min_positive_rows=5,
     min_negative_rows=5,
+    allow_negative_slope=False,
 ):
     method = str(method or "none").lower()
     if method == "none":
@@ -115,39 +126,36 @@ def fit_binary_probability_calibrator(
         "positive_rows": positive_rows,
         "negative_rows": negative_rows,
         "weighted": weights is not None,
+        "inverted": False,
     }
 
     if fitted_rows < int(min_rows):
-        return BinaryProbabilityCalibrator(
-            **base_payload,
-            fallback_reason="calibration_rows_below_minimum",
-        )
+        return _fallback_calibrator(base_payload, "calibration_rows_below_minimum")
     if positive_rows < int(min_positive_rows):
-        return BinaryProbabilityCalibrator(
-            **base_payload,
-            fallback_reason="calibration_positive_rows_below_minimum",
-        )
+        return _fallback_calibrator(base_payload, "calibration_positive_rows_below_minimum")
     if negative_rows < int(min_negative_rows):
-        return BinaryProbabilityCalibrator(
-            **base_payload,
-            fallback_reason="calibration_negative_rows_below_minimum",
-        )
+        return _fallback_calibrator(base_payload, "calibration_negative_rows_below_minimum")
     if positive_rows == 0 or negative_rows == 0:
-        return BinaryProbabilityCalibrator(
-            **base_payload,
-            fallback_reason="single_class_calibration_data",
-        )
+        return _fallback_calibrator(base_payload, "single_class_calibration_data")
 
     if method == "sigmoid":
         from sklearn.linear_model import LogisticRegression
 
         model = LogisticRegression(solver="lbfgs")
         model.fit(probs.reshape(-1, 1), targets, sample_weight=weights)
+        coef = float(model.coef_[0][0])
+        if coef < 0.0:
+            if not bool(allow_negative_slope):
+                return _fallback_calibrator(base_payload, "calibration_negative_slope")
+            base_payload["inverted"] = True
     elif method == "isotonic":
         from sklearn.isotonic import IsotonicRegression
 
         model = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
         model.fit(probs, targets, sample_weight=weights)
+        thresholds = np.asarray(getattr(model, "y_thresholds_", []), dtype=float)
+        if len(thresholds) > 1 and np.any(np.diff(thresholds) < -1e-12):
+            return _fallback_calibrator(base_payload, "calibration_non_monotonic")
     else:
         raise ValueError(f"不支持的方向质量概率校准方法: {method}")
 
@@ -202,6 +210,23 @@ class DirectionQualityModel:
             }
         self.diagnostics = dict(diagnostics or {})
         self.classes_ = np.asarray([0, 1], dtype=int)
+
+    def __setstate__(self, state):
+        """Restore pickle state with backward compatibility.
+
+        Old pickles (trained before direction_regime_calibrators was added)
+        don't have that key in their __dict__. Inject a safe default so that
+        _calibrate_probabilities never raises AttributeError on legacy models.
+        """
+        self.__dict__.update(state)
+        if not hasattr(self, "direction_regime_calibrators"):
+            self.direction_regime_calibrators = {}
+        if not hasattr(self, "direction_calibrators"):
+            self.direction_calibrators = {}
+        if not hasattr(self, "direction_models"):
+            self.direction_models = {}
+        if not hasattr(self, "diagnostics"):
+            self.diagnostics = {}
 
     def _trend_bias_values(self, X):
         if hasattr(X, "columns") and "trend_bias_num" in X.columns:

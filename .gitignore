@@ -4,6 +4,9 @@ __pycache__/
 *.pyo
 *.pyd
 
+# Kiro/Claude AI 工具的本地工作目录（项目记忆、plan草稿等，无需上传）
+.claude/
+
 # 虚拟环境 (venv, .venv, env)
 venv/
 .venv/

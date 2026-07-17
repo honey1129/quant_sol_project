@@ -2,6 +2,7 @@ import math
 import sys
 import types
 import unittest
+from unittest.mock import patch
 
 
 if "dotenv" not in sys.modules:
@@ -138,27 +139,28 @@ class WeightedPredictProbaTests(unittest.TestCase):
     def test_binary_trade_quality_maps_trade_prob_to_trend_direction(self):
         models = {"lgb_v1": StubModel([0.80, 0.20], classes=[0, 1])}
 
-        long_out = signal_engine.weighted_predict_proba(
-            models,
-            object(),
-            {"lgb_v1": 1.0},
-            trend_bias="long",
-            model_metadata={"target_schema": "binary_trade_quality"},
-        )
-        short_out = signal_engine.weighted_predict_proba(
-            models,
-            object(),
-            {"lgb_v1": 1.0},
-            trend_bias="short",
-            model_metadata={"target_schema": "binary_trade_quality"},
-        )
-        neutral_out = signal_engine.weighted_predict_proba(
-            models,
-            object(),
-            {"lgb_v1": 1.0},
-            trend_bias="neutral",
-            model_metadata={"target_schema": "binary_trade_quality"},
-        )
+        with patch("core.signal_engine.config.MODEL_QUALITY_PROBABILITY_EXECUTION_SCALE_ENABLED", False):
+            long_out = signal_engine.weighted_predict_proba(
+                models,
+                object(),
+                {"lgb_v1": 1.0},
+                trend_bias="long",
+                model_metadata={"target_schema": "binary_trade_quality"},
+            )
+            short_out = signal_engine.weighted_predict_proba(
+                models,
+                object(),
+                {"lgb_v1": 1.0},
+                trend_bias="short",
+                model_metadata={"target_schema": "binary_trade_quality"},
+            )
+            neutral_out = signal_engine.weighted_predict_proba(
+                models,
+                object(),
+                {"lgb_v1": 1.0},
+                trend_bias="neutral",
+                model_metadata={"target_schema": "binary_trade_quality"},
+            )
 
         self.assertAlmostEqual(float(long_out[0]), 0.0)
         self.assertAlmostEqual(float(long_out[1]), 0.20)
@@ -166,6 +168,49 @@ class WeightedPredictProbaTests(unittest.TestCase):
         self.assertAlmostEqual(float(short_out[1]), 0.0)
         self.assertAlmostEqual(float(neutral_out[0]), 0.0)
         self.assertAlmostEqual(float(neutral_out[1]), 0.0)
+
+    def test_binary_trade_quality_scales_rare_quality_probability_to_execution_probability(self):
+        models = {"lgb_v1": StubModel([0.875, 0.125], classes=[0, 1])}
+        metadata = {
+            "target_schema": "binary_trade_quality",
+            "label_quality_summary": {
+                "by_regime": {
+                    "trend_long": {"trade_pct": 12.5},
+                },
+            },
+        }
+
+        out = signal_engine.weighted_predict_proba(
+            models,
+            object(),
+            {"lgb_v1": 1.0},
+            trend_bias="long",
+            model_metadata=metadata,
+        )
+
+        self.assertAlmostEqual(float(out[0]), 0.0)
+        self.assertAlmostEqual(float(out[1]), 0.50)
+
+    def test_binary_trade_quality_execution_scale_can_use_lift_above_base_rate(self):
+        models = {"lgb_v1": StubModel([0.80, 0.20], classes=[0, 1])}
+        metadata = {
+            "target_schema": "binary_trade_quality",
+            "label_quality_summary": {
+                "by_regime": {
+                    "trend_long": {"trade_pct": 10.0},
+                },
+            },
+        }
+
+        out = signal_engine.weighted_predict_proba(
+            models,
+            object(),
+            {"lgb_v1": 1.0},
+            trend_bias="long",
+            model_metadata=metadata,
+        )
+
+        self.assertAlmostEqual(float(out[1]), 2.25 / 3.25, places=6)
 
     def test_batch_binary_trade_quality_maps_each_row_trend_direction(self):
         import pandas as pd
@@ -177,13 +222,14 @@ class WeightedPredictProbaTests(unittest.TestCase):
             )
         }
 
-        out = signal_engine.weighted_predict_proba_batch(
-            models,
-            pd.DataFrame({"feature": [1.0, 2.0, 3.0]}),
-            {"lgb_v1": 1.0},
-            trend_biases=["long", "short", "neutral"],
-            model_metadata={"target_schema": "binary_trade_quality"},
-        )
+        with patch("core.signal_engine.config.MODEL_QUALITY_PROBABILITY_EXECUTION_SCALE_ENABLED", False):
+            out = signal_engine.weighted_predict_proba_batch(
+                models,
+                pd.DataFrame({"feature": [1.0, 2.0, 3.0]}),
+                {"lgb_v1": 1.0},
+                trend_biases=["long", "short", "neutral"],
+                model_metadata={"target_schema": "binary_trade_quality"},
+            )
 
         self.assertAlmostEqual(float(out[0][0]), 0.0)
         self.assertAlmostEqual(float(out[0][1]), 0.20)
@@ -191,6 +237,43 @@ class WeightedPredictProbaTests(unittest.TestCase):
         self.assertAlmostEqual(float(out[1][1]), 0.0)
         self.assertAlmostEqual(float(out[2][0]), 0.0)
         self.assertAlmostEqual(float(out[2][1]), 0.0)
+
+    def test_direction_model_weight_overrides_single_and_batch_predictions(self):
+        import pandas as pd
+
+        models = {
+            "lgb_v1": BatchStubModel([[0.80, 0.20], [0.80, 0.20]], classes=[0, 1]),
+            "rf_v1": BatchStubModel([[0.20, 0.80], [0.20, 0.80]], classes=[0, 1]),
+        }
+        X = pd.DataFrame({"feature": [1.0, 2.0]})
+        direction_weights = {
+            "long": "rf_v1:1.0",
+            "short": "lgb_v1:1.0",
+        }
+
+        with patch("core.signal_engine.config.MODEL_QUALITY_PROBABILITY_EXECUTION_SCALE_ENABLED", False):
+            batch = signal_engine.weighted_predict_proba_batch(
+                models,
+                X,
+                {"lgb_v1": 0.5, "rf_v1": 0.5},
+                trend_biases=["long", "short"],
+                model_metadata={"target_schema": "binary_trade_quality"},
+                direction_model_weights=direction_weights,
+            )
+            single_long = signal_engine.weighted_predict_proba(
+                models,
+                X.iloc[:1],
+                {"lgb_v1": 0.5, "rf_v1": 0.5},
+                trend_bias="long",
+                model_metadata={"target_schema": "binary_trade_quality"},
+                direction_model_weights=direction_weights,
+            )
+
+        self.assertAlmostEqual(float(batch[0][1]), 0.80)
+        self.assertAlmostEqual(float(batch[0][0]), 0.0)
+        self.assertAlmostEqual(float(batch[1][0]), 0.20)
+        self.assertAlmostEqual(float(batch[1][1]), 0.0)
+        self.assertAlmostEqual(float(single_long[1]), 0.80)
 
     def test_batch_and_single_row_predictions_match(self):
         import pandas as pd
@@ -202,27 +285,28 @@ class WeightedPredictProbaTests(unittest.TestCase):
         X = pd.DataFrame({"feature": [1.0, 2.0]})
         weights = {"lgb_v1": 0.75, "xgb_v1": 0.25}
 
-        batch = signal_engine.weighted_predict_proba_batch(
-            models,
-            X,
-            weights,
-            trend_biases=["long", "short"],
-            model_metadata={"target_schema": "binary_trade_quality"},
-        )
-        first = signal_engine.weighted_predict_proba(
-            {"lgb_v1": BatchStubModel([[0.60, 0.40]], classes=[0, 1]), "xgb_v1": BatchStubModel([[0.50, 0.50]], classes=[0, 1])},
-            X.iloc[:1],
-            weights,
-            trend_bias="long",
-            model_metadata={"target_schema": "binary_trade_quality"},
-        )
-        second = signal_engine.weighted_predict_proba(
-            {"lgb_v1": BatchStubModel([[0.20, 0.80]], classes=[0, 1]), "xgb_v1": BatchStubModel([[0.70, 0.30]], classes=[0, 1])},
-            X.iloc[1:2],
-            weights,
-            trend_bias="short",
-            model_metadata={"target_schema": "binary_trade_quality"},
-        )
+        with patch("core.signal_engine.config.MODEL_QUALITY_PROBABILITY_EXECUTION_SCALE_ENABLED", False):
+            batch = signal_engine.weighted_predict_proba_batch(
+                models,
+                X,
+                weights,
+                trend_biases=["long", "short"],
+                model_metadata={"target_schema": "binary_trade_quality"},
+            )
+            first = signal_engine.weighted_predict_proba(
+                {"lgb_v1": BatchStubModel([[0.60, 0.40]], classes=[0, 1]), "xgb_v1": BatchStubModel([[0.50, 0.50]], classes=[0, 1])},
+                X.iloc[:1],
+                weights,
+                trend_bias="long",
+                model_metadata={"target_schema": "binary_trade_quality"},
+            )
+            second = signal_engine.weighted_predict_proba(
+                {"lgb_v1": BatchStubModel([[0.20, 0.80]], classes=[0, 1]), "xgb_v1": BatchStubModel([[0.70, 0.30]], classes=[0, 1])},
+                X.iloc[1:2],
+                weights,
+                trend_bias="short",
+                model_metadata={"target_schema": "binary_trade_quality"},
+            )
 
         self.assertAlmostEqual(float(batch[0][0]), float(first[0]))
         self.assertAlmostEqual(float(batch[0][1]), float(first[1]))
@@ -240,20 +324,21 @@ class WeightedPredictProbaTests(unittest.TestCase):
             },
         )
 
-        long_out = signal_engine.weighted_predict_proba(
-            {"lgb_v1": model},
-            pd.DataFrame({"trend_bias_num": [1.0]}),
-            {"lgb_v1": 1.0},
-            trend_bias="long",
-            model_metadata={"target_schema": "binary_trade_quality"},
-        )
-        short_out = signal_engine.weighted_predict_proba(
-            {"lgb_v1": model},
-            pd.DataFrame({"trend_bias_num": [-1.0]}),
-            {"lgb_v1": 1.0},
-            trend_bias="short",
-            model_metadata={"target_schema": "binary_trade_quality"},
-        )
+        with patch("core.signal_engine.config.MODEL_QUALITY_PROBABILITY_EXECUTION_SCALE_ENABLED", False):
+            long_out = signal_engine.weighted_predict_proba(
+                {"lgb_v1": model},
+                pd.DataFrame({"trend_bias_num": [1.0]}),
+                {"lgb_v1": 1.0},
+                trend_bias="long",
+                model_metadata={"target_schema": "binary_trade_quality"},
+            )
+            short_out = signal_engine.weighted_predict_proba(
+                {"lgb_v1": model},
+                pd.DataFrame({"trend_bias_num": [-1.0]}),
+                {"lgb_v1": 1.0},
+                trend_bias="short",
+                model_metadata={"target_schema": "binary_trade_quality"},
+            )
 
         self.assertAlmostEqual(float(long_out[0]), 0.0)
         self.assertAlmostEqual(float(long_out[1]), 0.90)
@@ -277,13 +362,14 @@ class WeightedPredictProbaTests(unittest.TestCase):
             direction_calibrators={"long": ScaleCalibrator(method="custom", direction="long")},
         )
 
-        long_out = signal_engine.weighted_predict_proba(
-            {"lgb_v1": model},
-            pd.DataFrame({"trend_bias_num": [1.0]}),
-            {"lgb_v1": 1.0},
-            trend_bias="long",
-            model_metadata={"target_schema": "binary_trade_quality"},
-        )
+        with patch("core.signal_engine.config.MODEL_QUALITY_PROBABILITY_EXECUTION_SCALE_ENABLED", False):
+            long_out = signal_engine.weighted_predict_proba(
+                {"lgb_v1": model},
+                pd.DataFrame({"trend_bias_num": [1.0]}),
+                {"lgb_v1": 1.0},
+                trend_bias="long",
+                model_metadata={"target_schema": "binary_trade_quality"},
+            )
 
         self.assertAlmostEqual(float(long_out[0]), 0.0)
         self.assertAlmostEqual(float(long_out[1]), 0.45)
@@ -314,28 +400,29 @@ class WeightedPredictProbaTests(unittest.TestCase):
             },
         )
 
-        trend_short_out = signal_engine.weighted_predict_proba(
-            {"lgb_v1": model},
-            pd.DataFrame({
-                "trend_bias_num": [-1.0],
-                "regime_trend_short": [1.0],
-                "regime_trend_long": [0.0],
-            }),
-            {"lgb_v1": 1.0},
-            trend_bias="short",
-            model_metadata={"target_schema": "binary_trade_quality"},
-        )
-        range_out = signal_engine.weighted_predict_proba(
-            {"lgb_v1": model},
-            pd.DataFrame({
-                "trend_bias_num": [-1.0],
-                "regime_trend_short": [0.0],
-                "regime_trend_long": [0.0],
-            }),
-            {"lgb_v1": 1.0},
-            trend_bias="short",
-            model_metadata={"target_schema": "binary_trade_quality"},
-        )
+        with patch("core.signal_engine.config.MODEL_QUALITY_PROBABILITY_EXECUTION_SCALE_ENABLED", False):
+            trend_short_out = signal_engine.weighted_predict_proba(
+                {"lgb_v1": model},
+                pd.DataFrame({
+                    "trend_bias_num": [-1.0],
+                    "regime_trend_short": [1.0],
+                    "regime_trend_long": [0.0],
+                }),
+                {"lgb_v1": 1.0},
+                trend_bias="short",
+                model_metadata={"target_schema": "binary_trade_quality"},
+            )
+            range_out = signal_engine.weighted_predict_proba(
+                {"lgb_v1": model},
+                pd.DataFrame({
+                    "trend_bias_num": [-1.0],
+                    "regime_trend_short": [0.0],
+                    "regime_trend_long": [0.0],
+                }),
+                {"lgb_v1": 1.0},
+                trend_bias="short",
+                model_metadata={"target_schema": "binary_trade_quality"},
+            )
 
         self.assertAlmostEqual(float(trend_short_out[0]), 0.12)
         self.assertAlmostEqual(float(trend_short_out[1]), 0.0)

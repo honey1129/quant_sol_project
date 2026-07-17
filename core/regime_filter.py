@@ -4,6 +4,9 @@ import math
 
 TREND_REGIMES = {"trend_long", "trend_short"}
 RANGE_REGIMES = {"range", "range_high_vol"}
+# 注意：HIGH_VOL_REGIMES 中的 "high_vol" 是兼容性保留值；
+# derive_market_regime 不会返回它（无趋势+高波动统一返回 "range_high_vol"）。
+# 如果在 LOSS_GUARD_BLOCK_NEW_REGIMES 等配置中写入 "high_vol"，该条件永远不会被触发。
 HIGH_VOL_REGIMES = {"high_vol", "range_high_vol"}
 SUPPORTED_REGIMES = {"trend_long", "trend_short", "range", "high_vol", "range_high_vol", "unknown"}
 

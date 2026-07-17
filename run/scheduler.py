@@ -45,11 +45,24 @@ def backtest_job():
     logger.info("✅ 回测任务完成")
 
 def _pid_is_running(pid: int) -> bool:
+    """Return True only if the process exists AND is not a zombie.
+
+    os.kill(pid, 0) succeeds for zombie processes, which would cause
+    ensure_live_monitor_running to skip restarting a dead monitor.
+    """
     try:
         os.kill(pid, 0)
-        return True
     except OSError:
         return False
+    # Process exists — verify it is not in zombie state via /proc
+    try:
+        with open(f"/proc/{pid}/status") as _sf:
+            for _line in _sf:
+                if _line.startswith("State:"):
+                    return "Z" not in _line
+    except OSError:
+        pass
+    return True
 
 
 def _load_json(path, default):
@@ -109,19 +122,17 @@ def stop_live_monitor_for_model_reload():
     logger.info("✅ live monitor 已停止，下一轮 scheduler 将自动拉起")
 
 def ensure_live_monitor_running():
-    # 1) pidfile存在且进程仍在 -> 不做事
+    # 1) pidfile 存在且进程仍在（非僵尸）-> 不做事
     pid = _read_monitor_pid()
     if pid and _pid_is_running(pid):
         return
 
     # 2) 不在运行 -> 拉起常驻进程（非阻塞）
     logger.info("🟡 实盘监控未运行，尝试启动 run.live_trading_monitor")
-    p = subprocess.Popen([sys.executable, "-m", "run.live_trading_monitor"])
-
-    with open(PID_FILE, "w") as f:
-        f.write(str(p.pid))
-
-    logger.info(f"✅ 已启动实盘监控进程 pid={p.pid}")
+    subprocess.Popen([sys.executable, "-m", "run.live_trading_monitor"])
+    # ⚠ 不在这里写 PID 文件：monitor 自己负责写 live_trading_monitor.pid。
+    #   若 scheduler 也写，monitor 启动时会读到自己的 PID，误判"另一实例运行中"。
+    logger.info("✅ 已发出启动 live_trading_monitor 指令（PID 由 monitor 自行写入）")
 
 
 def should_run_model_retrain(now=None):

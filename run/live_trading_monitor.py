@@ -13,7 +13,7 @@ from core.strategy_core import StrategyCore
 from core.dynamic_risk import DynamicRiskController
 from core.trend_filter import derive_trend_context
 from core.regime_filter import derive_market_regime
-from utils.utils import log_info, log_error, notify_important, BASE_DIR
+from utils.utils import log_info, log_error, notify_important, BASE_DIR, LOGS_DIR
 from utils.utils import DISPLAY_TIMEZONE
 from utils.runtime_dashboard import write_runtime_dashboard_snapshot
 from utils.trade_audit import build_trade_record, append_trade_record, write_daily_report
@@ -32,6 +32,9 @@ TELEGRAM_HOLD_ALERT_REASONS = (
     "CostGate",
     "RegimeFilter",
     "TrendFilter",
+    "LossGuardDirection",
+    "LossGuardRegime",
+    "LongEntryGuard",
 )
 
 
@@ -48,12 +51,34 @@ def load_last_bar_ts(state_path):
 
 def load_runtime_state(state_path):
     if not os.path.exists(state_path):
-        return {"last_bar_ts": None, "hold_bars": 0, "cooldown_bars_remaining": 0, "reverse_signal_bars": 0}
+        return {
+            "last_bar_ts": None,
+            "hold_bars": 0,
+            "cooldown_bars_remaining": 0,
+            "reverse_signal_bars": 0,
+            "loss_guard_exit_bars": 0,
+            "position_qty": None,
+            "entry_price": None,
+            "take_profit": None,
+            "stop_loss": None,
+            "active_algo_id": "",
+        }
     try:
         with open(state_path, "r", encoding="utf-8") as f:
             payload = json.load(f)
     except Exception:
-        return {"last_bar_ts": None, "hold_bars": 0, "cooldown_bars_remaining": 0, "reverse_signal_bars": 0}
+        return {
+            "last_bar_ts": None,
+            "hold_bars": 0,
+            "cooldown_bars_remaining": 0,
+            "reverse_signal_bars": 0,
+            "loss_guard_exit_bars": 0,
+            "position_qty": None,
+            "entry_price": None,
+            "take_profit": None,
+            "stop_loss": None,
+            "active_algo_id": "",
+        }
 
     last_bar_ts = None
     raw_value = payload.get("last_bar_ts")
@@ -84,11 +109,33 @@ def load_runtime_state(state_path):
     if reverse_signal_bars < 0:
         reverse_signal_bars = 0
 
+    try:
+        loss_guard_exit_bars = int(payload.get("loss_guard_exit_bars", 0) or 0)
+    except (TypeError, ValueError):
+        loss_guard_exit_bars = 0
+    if loss_guard_exit_bars < 0:
+        loss_guard_exit_bars = 0
+
+    def optional_float(key):
+        value = payload.get(key)
+        if value in (None, ""):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
     return {
         "last_bar_ts": last_bar_ts,
         "hold_bars": hold_bars,
         "cooldown_bars_remaining": cooldown_bars_remaining,
         "reverse_signal_bars": reverse_signal_bars,
+        "loss_guard_exit_bars": loss_guard_exit_bars,
+        "position_qty": optional_float("position_qty"),
+        "entry_price": optional_float("entry_price"),
+        "take_profit": optional_float("take_profit"),
+        "stop_loss": optional_float("stop_loss"),
+        "active_algo_id": str(payload.get("active_algo_id", "") or ""),
     }
 
 
@@ -106,9 +153,25 @@ def persist_last_bar_ts(state_path, bar_ts):
         hold_bars=0,
         cooldown_bars_remaining=0,
         reverse_signal_bars=0,
+        loss_guard_exit_bars=0,
+        position_qty=0.0,
+        entry_price=0.0,
     )
 
-def persist_runtime_state(state_path, *, last_bar_ts, hold_bars, cooldown_bars_remaining=0, reverse_signal_bars=0):
+def persist_runtime_state(
+    state_path,
+    *,
+    last_bar_ts,
+    hold_bars,
+    cooldown_bars_remaining=0,
+    reverse_signal_bars=0,
+    loss_guard_exit_bars=0,
+    position_qty=None,
+    entry_price=None,
+    take_profit=None,
+    stop_loss=None,
+    active_algo_id="",
+):
     if last_bar_ts is None:
         return
     os.makedirs(os.path.dirname(state_path), exist_ok=True)
@@ -117,6 +180,12 @@ def persist_runtime_state(state_path, *, last_bar_ts, hold_bars, cooldown_bars_r
         "hold_bars": int(hold_bars),
         "cooldown_bars_remaining": max(0, int(cooldown_bars_remaining)),
         "reverse_signal_bars": max(0, int(reverse_signal_bars)),
+        "loss_guard_exit_bars": max(0, int(loss_guard_exit_bars)),
+        "position_qty": None if position_qty is None else float(position_qty),
+        "entry_price": None if entry_price is None else float(entry_price),
+        "take_profit": None if take_profit is None else float(take_profit),
+        "stop_loss": None if stop_loss is None else float(stop_loss),
+        "active_algo_id": str(active_algo_id or ""),
     }
     tmp_path = f"{state_path}.tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
@@ -151,6 +220,18 @@ def fmt_optional(value, digits=2):
         return "-"
 
 
+def net_position_from_sides(long_pos, short_pos, tolerance=1e-9):
+    long_size = float((long_pos or {}).get("size", 0.0) or 0.0)
+    short_size = float((short_pos or {}).get("size", 0.0) or 0.0)
+    if long_size > tolerance and short_size > tolerance:
+        return None, None
+    if long_size > tolerance:
+        return long_size, float((long_pos or {}).get("entry_price", 0.0) or 0.0)
+    if short_size > tolerance:
+        return -short_size, float((short_pos or {}).get("entry_price", 0.0) or 0.0)
+    return 0.0, 0.0
+
+
 class LiveTrader:
     def __init__(self, client):
         self.client = client
@@ -170,11 +251,72 @@ class LiveTrader:
             self.hold_bars = persisted.get("hold_bars", 0)
             self.cooldown_bars_remaining = persisted.get("cooldown_bars_remaining", 0)
             self.reverse_signal_bars = persisted.get("reverse_signal_bars", 0)
+            self.loss_guard_exit_bars = persisted.get("loss_guard_exit_bars", 0)
         else:
             self.last_bar_ts = None
             self.hold_bars = 0
             self.cooldown_bars_remaining = 0
             self.reverse_signal_bars = 0
+            self.loss_guard_exit_bars = 0
+            persisted = {
+                "position_qty": None,
+                "entry_price": None,
+                "take_profit": None,
+                "stop_loss": None,
+                "active_algo_id": "",
+            }
+
+        self._restored_take_profit = persisted.get("take_profit")
+        self._restored_stop_loss = persisted.get("stop_loss")
+        self._restored_algo_id = str(persisted.get("active_algo_id", "") or "")
+        self._startup_position_verified = False
+        self._startup_position_qty = None
+        self._startup_entry_price = 0.0
+
+        # Runtime counters are only reusable when the persisted position fingerprint
+        # still matches the exchange position.
+        try:
+            long_pos, short_pos = client.get_position()
+            tolerance = max(1e-9, float(config.LOT_SIZE) / 2.0)
+            actual_qty, actual_entry = net_position_from_sides(
+                long_pos,
+                short_pos,
+                tolerance=tolerance,
+            )
+
+            persisted_qty = persisted.get("position_qty")
+            position_mismatch = (
+                persisted_qty is not None
+                and actual_qty is not None
+                and abs(float(persisted_qty) - float(actual_qty)) > tolerance
+            )
+            if actual_qty == 0.0:
+                self.hold_bars = 0
+                self.reverse_signal_bars = 0
+                self.loss_guard_exit_bars = 0
+                if persisted_qty is not None and abs(float(persisted_qty)) > tolerance:
+                    self.cooldown_bars_remaining = max(
+                        int(self.cooldown_bars_remaining),
+                        int(config.TRADE_COOLDOWN_BARS),
+                    )
+                    log_info(
+                        "重启一致性修正: 持久化状态有仓但 OKX 已空仓，"
+                        f"进入保守冷却 cooldown={self.cooldown_bars_remaining}。"
+                    )
+            elif actual_qty is None or persisted_qty is None or position_mismatch:
+                self.hold_bars = 0
+                self.reverse_signal_bars = 0
+                self.loss_guard_exit_bars = 0
+                log_info(
+                    "重启一致性修正: 持久化仓位与 OKX 实时仓位不一致，"
+                    "已重置持仓计数并保留冷却状态。"
+                )
+
+            self._startup_position_verified = True
+            self._startup_position_qty = actual_qty
+            self._startup_entry_price = actual_entry
+        except Exception as exc:
+            log_error(f"启动仓位一致性检查失败，首次交易前必须重新对账: {exc}")
         self.loop_count = 0
         self.same_bar_skip_count = 0
         self.last_heartbeat_logged_at = None
@@ -195,6 +337,20 @@ class LiveTrader:
         self.last_hold_alert_notified_at = None
         self.last_hold_alert_key = None
 
+        # ===== 账户级安全门禁 =====
+        self._trading_halted = False   # Kill Switch 或日亏损熔断触发后置 True
+        self._halt_reason: str = ""
+        self._daily_start_equity: float = None  # 当日起始权益（每日重置）
+        self._daily_start_date: str = None       # 当日日期（UTC，用于跨天重置）
+        # 交易后同步 OKX 仓位失败时置 True，阻止下一轮新开仓/加仓
+        self._position_uncertain: bool = False
+
+        # ===== 交易所端 TP/SL 算法单追踪 =====
+        # 每次开仓后记录 algoId，平仓前撤销，防止进程崩溃后残留单触发
+        self._active_algo_id: str = self._restored_algo_id
+        self._tpsl_coverage_verified = not bool(config.EXCHANGE_TPSL_ENABLED)
+        self._last_tpsl_reconcile_at = None
+
         # ===== 模型/特征=====
         feature_path = os.path.join(BASE_DIR, config.FEATURE_LIST_PATH) if "BASE_DIR" in globals() else config.FEATURE_LIST_PATH
         self.feature_cols = joblib.load(feature_path)
@@ -210,6 +366,7 @@ class LiveTrader:
         model_paths = {n: os.path.join(BASE_DIR, p) for n, p in config.MODEL_PATHS.items()} if "BASE_DIR" in globals() else config.MODEL_PATHS
         self.models = signal_engine.load_models(model_paths)
         self.model_weights = config.MODEL_WEIGHTS
+        self.direction_model_weights = getattr(config, "MODEL_DIRECTION_MODEL_WEIGHTS", {})
 
 
         self.reward_risk = self._load_reward_risk()
@@ -261,20 +418,83 @@ class LiveTrader:
             regime_range_min_signal_target_ratio=float(config.REGIME_RANGE_MIN_SIGNAL_TARGET_RATIO),
             regime_high_vol_min_signal_target_ratio=float(config.REGIME_HIGH_VOL_MIN_SIGNAL_TARGET_RATIO),
             block_losing_position_adds=bool(config.BLOCK_LOSING_POSITION_ADDS),
+            loss_condition_guard_enabled=bool(config.LOSS_CONDITION_GUARD_ENABLED),
+            loss_guard_block_new_regimes=config.LOSS_GUARD_BLOCK_NEW_REGIMES,
+            loss_guard_block_directions=config.LOSS_GUARD_BLOCK_DIRECTIONS,
+            loss_guard_exit_regimes=config.LOSS_GUARD_EXIT_REGIMES,
+            loss_guard_exit_min_hold_bars=int(config.LOSS_GUARD_EXIT_MIN_HOLD_BARS),
+            loss_guard_exit_only_when_unprofitable=bool(config.LOSS_GUARD_EXIT_ONLY_WHEN_UNPROFITABLE),
+            loss_guard_exit_min_unrealized_loss=float(config.LOSS_GUARD_EXIT_MIN_UNREALIZED_LOSS),
+            loss_guard_exit_confirm_bars=int(config.LOSS_GUARD_EXIT_CONFIRM_BARS),
+            long_entry_guard_enabled=bool(config.LONG_ENTRY_GUARD_ENABLED),
+            long_entry_min_trend_gap=float(config.LONG_ENTRY_MIN_TREND_GAP),
+            long_entry_high_vol_gap_buffer=float(config.LONG_ENTRY_HIGH_VOL_GAP_BUFFER),
+            long_entry_high_vol_min_trend_gap=float(config.LONG_ENTRY_HIGH_VOL_MIN_TREND_GAP),
+            long_entry_block_high_vol=bool(config.LONG_ENTRY_BLOCK_HIGH_VOL),
+            long_entry_overheat_guard_enabled=bool(config.LONG_ENTRY_OVERHEAT_GUARD_ENABLED),
+            long_entry_overheat_money_flow_max=float(config.LONG_ENTRY_OVERHEAT_MONEY_FLOW_MAX),
             dynamic_risk_controller=self.dynamic_risk_controller,
         )
+
+        if self._restored_take_profit and self._restored_take_profit > 0:
+            self.core.current_take_profit = float(self._restored_take_profit)
+        if self._restored_stop_loss and self._restored_stop_loss > 0:
+            self.core.current_stop_loss = float(self._restored_stop_loss)
+        if self._startup_position_verified and self._startup_position_qty is not None:
+            self.core.set_state(
+                self._startup_position_qty,
+                self._startup_entry_price,
+                self.hold_bars,
+                cooldown_bars_remaining=self.cooldown_bars_remaining,
+                reverse_signal_bars=self.reverse_signal_bars,
+                loss_guard_exit_bars=self.loss_guard_exit_bars,
+            )
 
         # 启用简单规则模式
         if bool(config.USE_SIMPLE_RULE_MODE):
             self.core._simple_rule_mode = True
             self.core._simple_rule_position_size = float(config.SIMPLE_RULE_POSITION_SIZE)
             log_info(f"✅ 简单规则模式已启用 - 仓位: {config.SIMPLE_RULE_POSITION_SIZE:.0%}, 绕过ML模型")
+        log_info(
+            "LossGuard配置: "
+            f"enabled={int(bool(config.LOSS_CONDITION_GUARD_ENABLED))} "
+            f"block_new_regimes={','.join(config.LOSS_GUARD_BLOCK_NEW_REGIMES) or '-'} "
+            f"block_directions={','.join(config.LOSS_GUARD_BLOCK_DIRECTIONS) or '-'} "
+            f"exit_regimes={','.join(config.LOSS_GUARD_EXIT_REGIMES) or '-'} "
+            f"exit_min_hold_bars={int(config.LOSS_GUARD_EXIT_MIN_HOLD_BARS)} "
+            f"exit_only_when_unprofitable={int(bool(config.LOSS_GUARD_EXIT_ONLY_WHEN_UNPROFITABLE))} "
+            f"exit_min_unrealized_loss={float(config.LOSS_GUARD_EXIT_MIN_UNREALIZED_LOSS):.4%} "
+            f"exit_confirm_bars={int(config.LOSS_GUARD_EXIT_CONFIRM_BARS)}"
+        )
+        log_info(
+            "LongEntryGuard配置: "
+            f"enabled={int(bool(config.LONG_ENTRY_GUARD_ENABLED))} "
+            f"min_trend_gap={float(config.LONG_ENTRY_MIN_TREND_GAP):.4%} "
+            f"high_vol_min_trend_gap={float(config.LONG_ENTRY_HIGH_VOL_MIN_TREND_GAP):.4%} "
+            f"block_high_vol_regime={int(bool(config.LONG_ENTRY_BLOCK_HIGH_VOL))} "
+            f"overheat_guard={int(bool(config.LONG_ENTRY_OVERHEAT_GUARD_ENABLED))} "
+            f"overheat_money_flow_max={float(config.LONG_ENTRY_OVERHEAT_MONEY_FLOW_MAX):.3f}"
+        )
 
         if self.last_bar_ts is not None:
             log_info(f"已恢复最近处理 bar: {format_display_ts(self.last_bar_ts)}")
 
     def ensure_runtime_ready(self):
         self.client.ensure_trading_ready()
+        pos_qty, entry_price = self._get_net_position()
+        self._startup_position_verified = True
+        self._startup_position_qty = pos_qty
+        self._startup_entry_price = 0.0 if entry_price is None else float(entry_price)
+        if pos_qty is not None:
+            self.core.set_state(
+                pos_qty,
+                entry_price,
+                self.hold_bars,
+                cooldown_bars_remaining=self.cooldown_bars_remaining,
+                reverse_signal_bars=self.reverse_signal_bars,
+                loss_guard_exit_bars=self.loss_guard_exit_bars,
+            )
+        self._reconcile_exchange_tpsl_on_startup()
 
     def _load_reward_risk(self):
         reward_risk = get_configured_reward_risk()
@@ -328,6 +548,7 @@ class LiveTrader:
             self.model_weights,
             trend_bias=trend_context.get("trend_bias"),
             model_metadata=self.model_metadata,
+            direction_model_weights=self.direction_model_weights,
         )
         long_prob, short_prob = float(avg[1]), float(avg[0])
         return long_prob, short_prob
@@ -491,6 +712,7 @@ class LiveTrader:
                 "heartbeat_interval_sec": float(self.heartbeat_log_interval_sec),
                 "cooldown_bars_remaining": int(getattr(self, "cooldown_bars_remaining", 0)),
                 "reverse_signal_bars": int(getattr(self, "reverse_signal_bars", 0)),
+                "loss_guard_exit_bars": int(getattr(self, "loss_guard_exit_bars", 0)),
                 "last_error": error_message,
             },
             "market": {
@@ -525,7 +747,13 @@ class LiveTrader:
     def _sync_after_trade(self):
         pos_qty2, entry_price2 = self._get_net_position()
         if pos_qty2 is None:
-            return
+            # OKX 仓位查询失败（双边持仓/网络超时），内存状态不可信
+            # 标记为不确定，阻止下一轮新开仓/加仓，避免用过期内存值执行错误方向交易
+            self._position_uncertain = True
+            log_error("交易后仓位同步失败，position_uncertain=True，下一轮将拒绝新开仓/加仓")
+            return False
+        # 查询成功，清除不确定标志
+        self._position_uncertain = False
         if pos_qty2 == 0:
             self.hold_bars = 0
         self.core.set_state(
@@ -534,9 +762,15 @@ class LiveTrader:
             self.hold_bars,
             cooldown_bars_remaining=self.cooldown_bars_remaining,
             reverse_signal_bars=self.reverse_signal_bars,
+            loss_guard_exit_bars=self.loss_guard_exit_bars,
         )
         _, _, self.hold_bars = self.core.get_state()
         self.reverse_signal_bars = self.core.get_reverse_signal_bars()
+        self.loss_guard_exit_bars = self.core.get_loss_guard_exit_bars()
+        self._startup_position_verified = True
+        self._startup_position_qty = pos_qty2
+        self._startup_entry_price = entry_price2
+        return True
 
     def _get_position_sides(self):
         return self.client.get_position()
@@ -625,14 +859,7 @@ class LiveTrader:
 
     def _get_net_position(self):
         long_pos, short_pos = self._get_position_sides()
-        if long_pos["size"] > 0 and short_pos["size"] > 0:
-            return None, None
-
-        if long_pos["size"] > 0:
-            return float(long_pos["size"]), float(long_pos["entry_price"])
-        if short_pos["size"] > 0:
-            return -float(short_pos["size"]), float(short_pos["entry_price"])
-        return 0.0, 0.0
+        return net_position_from_sides(long_pos, short_pos)
 
     def _resolve_order_leverage(self, decision=None):
         risk = (decision or {}).get("risk") or {}
@@ -646,6 +873,27 @@ class LiveTrader:
     def _execute_delta(self, current_pos_qty: float, delta_qty: float, decision=None) -> bool:
         qty = abs(float(delta_qty))
         if qty <= 0:
+            return False
+
+        try:
+            actual_pos_qty, _ = self._get_net_position()
+        except Exception as exc:
+            log_error(f"执行前仓位对账失败，本轮拒绝下单: {exc}")
+            return False
+        tolerance = max(1e-9, float(config.LOT_SIZE) / 2.0)
+        if actual_pos_qty is None or abs(float(actual_pos_qty) - float(current_pos_qty)) > tolerance:
+            log_error(
+                "执行前仓位已变化，本轮拒绝下单: "
+                f"decision_pos={float(current_pos_qty):.6f}, actual_pos={actual_pos_qty}"
+            )
+            return False
+        blocked_directions = set(str(item).lower() for item in config.LOSS_GUARD_BLOCK_DIRECTIONS)
+        if delta_qty < 0 and current_pos_qty >= 0 and "short" in blocked_directions:
+            log_error(
+                "LossGuard运行时保险: 已拒绝short新开仓 "
+                f"qty={qty:.6f}, current_pos={float(current_pos_qty):.6f}, "
+                f"reason={(decision or {}).get('reason') or '-'}"
+            )
             return False
         leverage = self._resolve_order_leverage(decision)
 
@@ -666,12 +914,20 @@ class LiveTrader:
     def _persist_last_bar_state(self, bar_ts):
         if not bool(config.LIVE_PERSIST_LAST_BAR):
             return
+        position_qty, entry_price, _ = self.core.get_state()
+        take_profit, stop_loss = self.core.get_risk_thresholds()
         persist_runtime_state(
             self.state_path,
             last_bar_ts=bar_ts,
             hold_bars=int(self.hold_bars),
             cooldown_bars_remaining=int(self.cooldown_bars_remaining),
             reverse_signal_bars=int(self.reverse_signal_bars),
+            loss_guard_exit_bars=int(getattr(self, "loss_guard_exit_bars", 0)),
+            position_qty=float(position_qty),
+            entry_price=float(entry_price),
+            take_profit=float(take_profit),
+            stop_loss=float(stop_loss),
+            active_algo_id=str(getattr(self, "_active_algo_id", "") or ""),
         )
 
     def _record_trade_execution(
@@ -875,6 +1131,10 @@ class LiveTrader:
             "SameDirNoRebalance": "方向一致且仓位接近目标，继续持有",
             "Neutral": "多空信号持平，观望不动",
             "SameClosedBarSkip": "这根K线已处理过，等下一根",
+            "LossGuardDirection": "亏损诊断保护：已禁止该方向新开仓",
+            "LossGuardRegime": "亏损诊断保护：当前市场状态暂停新开仓",
+            "LossGuardExit": "亏损诊断保护：进入高风险亏损状态，提前退出",
+            "LongEntryGuard": "多头入场保护：趋势质量不够，暂不开多",
         }
         text = labels.get(key, raw)
         if key == "Cooldown" and "(" in raw and ")" in raw:
@@ -883,6 +1143,30 @@ class LiveTrader:
         if key == "MinHold" and "(" in raw and ")" in raw:
             hold_info = raw.split("(", 1)[1].split(")", 1)[0]
             text = f"最短持仓期未到（已持{hold_info}根K线），继续持有"
+        if key == "LossGuardDirection" and "(" in raw and ")" in raw:
+            direction = raw.split("(", 1)[1].split(")", 1)[0]
+            direction_text = "做空" if direction == "short" else direction
+            text = f"亏损诊断保护：已禁止{direction_text}新开仓"
+        if key == "LossGuardRegime" and "(" in raw and ")" in raw:
+            regime = raw.split("(", 1)[1].split(")", 1)[0]
+            text = f"亏损诊断保护：{LiveTrader._humanize_regime(regime)}暂停新开仓"
+        if key == "LossGuardExit" and "(" in raw and ")" in raw:
+            regime = raw.split("(", 1)[1].split(")", 1)[0]
+            text = f"亏损诊断保护：进入{LiveTrader._humanize_regime(regime)}，提前退出"
+        if key == "LongEntryGuard" and "(" in raw and ")" in raw:
+            detail = raw.split("(", 1)[1].split(")", 1)[0]
+            if detail.startswith("weak_trend_gap="):
+                text = f"多头入场保护：趋势强度不足（{detail.split('=', 1)[1]}），暂不开多"
+            elif detail.startswith("overheat_money_flow="):
+                text = f"多头入场保护：资金流过热（{detail.split('=', 1)[1]}），暂不开多"
+            elif detail in {"range_high_vol", "high_vol"}:
+                text = f"多头入场保护：{LiveTrader._humanize_regime(detail)}里不开新多"
+            elif detail == "missing_trend_gap":
+                text = "多头入场保护：缺少趋势强度数据，暂不开多"
+            elif detail == "trend_not_long":
+                text = "多头入场保护：大趋势不是偏多，暂不开多"
+            else:
+                text = f"多头入场保护：{detail}，暂不开多"
         return text
 
     def _format_hold_reason_counts(self):
@@ -1028,6 +1312,7 @@ class LiveTrader:
             f"regime={decision.get('market_regime') or '-'} "
             f"cooldown_next={int(out.get('next_cooldown_bars', 0) or 0)} "
             f"reverse_bars_next={int(out.get('next_reverse_signal_bars', 0) or 0)} "
+            f"loss_guard_exit_bars_next={int(out.get('next_loss_guard_exit_bars', 0) or 0)} "
             f"{self._format_risk_fields(risk)}"
         )
 
@@ -1065,6 +1350,14 @@ class LiveTrader:
             return "RegimeFilter"
         if reason.startswith("TrendFilter"):
             return "TrendFilter"
+        if reason.startswith("LossGuardDirection"):
+            return "LossGuardDirection"
+        if reason.startswith("LossGuardRegime"):
+            return "LossGuardRegime"
+        if reason.startswith("LossGuardExit"):
+            return "LossGuardExit"
+        if reason.startswith("LongEntryGuard"):
+            return "LongEntryGuard"
         if reason.startswith("Cooldown"):
             return "Cooldown"
         return reason
@@ -1192,7 +1485,8 @@ class LiveTrader:
         self.last_hold_alert_key = alert_key
         notify_important(
             "[异常HOLD聚合]\n"
-            f"原因: {reason}\n"
+            f"原因: {self._humanize_reason(reason)}\n"
+            f"原始原因: {reason}\n"
             f"连续bar数: {self.consecutive_abnormal_hold_count}\n"
             f"最近bar: {format_display_ts(bar_ts)} price={fmt_optional(price, 4)} equity={fmt_optional(equity, 2)}\n"
             f"信号: long={fmt_optional(signal_snapshot.get('long_prob'), 3)} short={fmt_optional(signal_snapshot.get('short_prob'), 3)} "
@@ -1217,6 +1511,294 @@ class LiveTrader:
             f"心跳: 运行中，最近已处理bar={format_display_ts(self.last_bar_ts)}, "
             f"当前最新已收盘bar={format_display_ts(current_bar_ts)}, 连续跳过同bar次数={self.same_bar_skip_count}"
         )
+
+    def _place_exchange_tpsl(self, pos_side: str, pos_qty: float, entry_price: float, decision: dict):
+        """开仓后立即在交易所下 TP/SL OCO 算法单。
+
+        - 算法单 reduceOnly=True，只减仓不反向开仓。
+        - algoId 保存到 self._active_algo_id，平仓前撤销。
+        - 若下单失败，上层会触发紧急平仓并暂停新开仓。
+        """
+        if not getattr(config, "EXCHANGE_TPSL_ENABLED", True):
+            self._tpsl_coverage_verified = True
+            return True
+        tp = float(decision.get("take_profit") or 0)
+        sl = float(decision.get("stop_loss") or 0)
+        if tp <= 0 or sl <= 0 or abs(pos_qty) < 1e-9 or entry_price <= 0:
+            log_error(
+                f"_place_exchange_tpsl: 参数不足，跳过交易所端止损单"
+                f" tp={tp} sl={sl} qty={pos_qty} entry={entry_price}"
+            )
+            self._tpsl_coverage_verified = False
+            return False
+        algo_id = self.client.place_tpsl_algo_order(
+            pos_side=pos_side,
+            sz=abs(pos_qty),
+            entry_price=entry_price,
+            take_profit_ratio=tp,
+            stop_loss_ratio=sl,
+        )
+        if algo_id:
+            self._active_algo_id = algo_id
+            self._tpsl_coverage_verified = True
+            return True
+        else:
+            log_error("⚠ 交易所端 TP/SL 下单失败，将触发上层紧急平仓")
+            self._tpsl_coverage_verified = False
+            return False
+
+    def _cancel_exchange_tpsl(self):
+        """平仓前撤销活跃的交易所端 TP/SL 算法单，防止残留单触发后反向开仓。"""
+        if not self._active_algo_id:
+            return True
+        canceled = self.client.cancel_algo_order(self._active_algo_id)
+        if canceled:
+            self._active_algo_id = ""
+            self._tpsl_coverage_verified = False
+        return bool(canceled)
+
+    def _reconcile_exchange_tpsl_on_startup(self):
+        if not bool(config.EXCHANGE_TPSL_ENABLED):
+            self._tpsl_coverage_verified = True
+            return True
+        if not self._startup_position_verified or self._startup_position_qty is None:
+            self._tpsl_coverage_verified = False
+            return False
+
+        try:
+            pending = self.client.list_pending_tpsl_algo_orders()
+        except Exception as exc:
+            self._tpsl_coverage_verified = False
+            log_error(f"启动时无法核验交易所 TP/SL 覆盖: {exc}")
+            return False
+
+        qty = float(self._startup_position_qty)
+        tolerance = max(1e-9, float(config.LOT_SIZE) / 2.0)
+        if abs(qty) <= tolerance:
+            all_canceled = True
+            for order in pending:
+                algo_id = str(order.get("algoId", "") or "")
+                if algo_id and not self.client.cancel_algo_order(algo_id):
+                    all_canceled = False
+            if all_canceled:
+                self._active_algo_id = ""
+                self._tpsl_coverage_verified = True
+            return all_canceled
+
+        pos_side = "long" if qty > 0 else "short"
+        matching = []
+        for order in pending:
+            try:
+                order_size = float(order.get("sz", 0) or 0)
+            except (TypeError, ValueError):
+                order_size = 0.0
+            if str(order.get("posSide", "")) == pos_side and abs(order_size - abs(qty)) <= tolerance:
+                matching.append(order)
+
+        if len(pending) == 1 and len(matching) == 1:
+            self._active_algo_id = str(matching[0].get("algoId", "") or "")
+            self._tpsl_coverage_verified = bool(self._active_algo_id)
+            if self._tpsl_coverage_verified:
+                log_info(f"启动时已接管交易所 TP/SL: algoId={self._active_algo_id}")
+            return self._tpsl_coverage_verified
+
+        for order in pending:
+            algo_id = str(order.get("algoId", "") or "")
+            if algo_id and not self.client.cancel_algo_order(algo_id):
+                self._tpsl_coverage_verified = False
+                return False
+        self._active_algo_id = ""
+        take_profit, stop_loss = self.core.get_risk_thresholds()
+        return self._place_exchange_tpsl(
+            pos_side=pos_side,
+            pos_qty=qty,
+            entry_price=float(self._startup_entry_price),
+            decision={"take_profit": take_profit, "stop_loss": stop_loss},
+        )
+
+    def _replace_exchange_tpsl(self, pos_qty, entry_price, decision):
+        if not bool(config.EXCHANGE_TPSL_ENABLED):
+            return True
+        if not self._cancel_exchange_tpsl():
+            log_error("旧 TP/SL 未确认撤销，拒绝创建可能重复的保护单。")
+            return False
+        if abs(float(pos_qty)) < 1e-9:
+            self._tpsl_coverage_verified = True
+            return True
+        return self._place_exchange_tpsl(
+            pos_side="long" if float(pos_qty) > 0 else "short",
+            pos_qty=float(pos_qty),
+            entry_price=float(entry_price),
+            decision=decision,
+        )
+
+    def _close_unprotected_position(self, pos_qty, reason="TPSLCoverageFailure"):
+        self._trading_halted = True
+        self._halt_reason = reason
+        leverage = int(config.LEVERAGE)
+        if float(pos_qty) > 0:
+            closed = self.client.close_long_sz(abs(float(pos_qty)), leverage)
+        else:
+            closed = self.client.close_short_sz(abs(float(pos_qty)), leverage)
+        if closed and self._sync_after_trade():
+            self.cooldown_bars_remaining = max(
+                int(self.cooldown_bars_remaining),
+                int(config.STOP_LOSS_COOLDOWN_BARS),
+            )
+            self.reverse_signal_bars = 0
+            self.loss_guard_exit_bars = 0
+            self._tpsl_coverage_verified = True
+            notify_important(
+                "[保护单失败紧急平仓]\n"
+                f"原因: {reason}\n"
+                f"原仓位: {float(pos_qty):.6f}\n"
+                "新开仓已暂停，需检查 OKX 算法单接口后重启。"
+            )
+            return True
+        notify_important(
+            "[严重风险] TP/SL 保护单失败且紧急平仓未确认，"
+            f"仓位={float(pos_qty):.6f}，请立即人工检查 OKX。"
+        )
+        return False
+
+    def run_realtime_risk_check(self):
+        """Check local TP/SL against a live ticker independently of bar generation."""
+        pos_qty, entry_price = self._get_net_position()
+        if pos_qty is None:
+            log_error("实时风控检测到双边仓位，交由仓位恢复流程处理。")
+            return False
+        if abs(float(pos_qty)) < 1e-9 or float(entry_price) <= 0:
+            return False
+
+        now = time.monotonic()
+        if (
+            bool(config.EXCHANGE_TPSL_ENABLED)
+            and not self._tpsl_coverage_verified
+            and (
+                self._last_tpsl_reconcile_at is None
+                or now - float(self._last_tpsl_reconcile_at) >= 30.0
+            )
+        ):
+            self._last_tpsl_reconcile_at = now
+            self._startup_position_verified = True
+            self._startup_position_qty = pos_qty
+            self._startup_entry_price = entry_price
+            self._reconcile_exchange_tpsl_on_startup()
+
+        price = float(self.client.get_price())
+        take_profit, stop_loss = self.core.get_risk_thresholds()
+        pnl_pct = (
+            (price - float(entry_price)) / float(entry_price)
+            if pos_qty > 0
+            else (float(entry_price) - price) / float(entry_price)
+        )
+        reason = None
+        if pnl_pct >= float(take_profit):
+            reason = "TakeProfitRealtime"
+        elif pnl_pct <= -float(stop_loss):
+            reason = "StopLossRealtime"
+        if reason is None:
+            return False
+
+        log_error(
+            f"实时风控触发 {reason}: price={price:.6f}, entry={float(entry_price):.6f}, "
+            f"pnl={pnl_pct:.4%}"
+        )
+        self._cancel_exchange_tpsl()
+        leverage = int(config.LEVERAGE)
+        if pos_qty > 0:
+            success = self.client.close_long_sz(abs(float(pos_qty)), leverage)
+        else:
+            success = self.client.close_short_sz(abs(float(pos_qty)), leverage)
+        if not success:
+            log_error(f"实时风控平仓未确认成交: reason={reason}")
+            return False
+
+        self.cooldown_bars_remaining = int(
+            config.STOP_LOSS_COOLDOWN_BARS
+            if reason.startswith("StopLoss")
+            else config.TAKE_PROFIT_COOLDOWN_BARS
+        )
+        self.reverse_signal_bars = 0
+        self.loss_guard_exit_bars = 0
+        if not self._sync_after_trade():
+            raise RuntimeError("实时风控平仓后仓位状态无法确认")
+        self._tpsl_coverage_verified = True
+        self.last_execution = {
+            "action": "CLOSE",
+            "reason": reason,
+            "success": True,
+            "timestamp": normalize_ts(pd.Timestamp.now(tz="UTC")),
+        }
+        self._persist_last_bar_state(self.last_bar_ts)
+        notify_important(
+            "[实时风控平仓]\n"
+            f"原因: {reason}\n"
+            f"价格: {price:.6f}\n"
+            f"PnL: {pnl_pct:.4%}"
+        )
+        return True
+
+    def _check_safety_gates(self, equity: float) -> bool:
+        """检查 Kill Switch 和日亏损熔断。返回 True 表示应当拒绝新开仓。
+
+        规则：
+        - Kill Switch：只要 KILL_SWITCH_FILE 文件存在，立即停止所有新开仓。
+          通过 ``touch kill_switch.flag`` 触发，``rm kill_switch.flag`` 恢复。
+        - 日亏损熔断：当日权益亏损超过 MAX_DAILY_LOSS_PCT 时停止新开仓。
+          每天 UTC 0:00 自动重置，平仓单不受影响。
+        """
+        from datetime import datetime, timezone as _tz
+        today_utc = datetime.now(_tz.utc).strftime("%Y-%m-%d")
+
+        # 跨天重置日起始权益
+        if self._daily_start_date != today_utc:
+            self._daily_start_equity = float(equity)
+            self._daily_start_date = today_utc
+            if self._trading_halted and "DailyLoss" in self._halt_reason:
+                # 新的一天，自动解除日亏损熔断（Kill Switch 需要手动删文件）
+                self._trading_halted = False
+                self._halt_reason = ""
+                log_info("🟢 日亏损熔断已在新交易日自动解除")
+
+        # Kill Switch 文件检查
+        kill_switch_path = os.path.join(BASE_DIR, config.KILL_SWITCH_FILE)
+        if os.path.exists(kill_switch_path):
+            if not self._trading_halted or "KillSwitch" not in self._halt_reason:
+                self._trading_halted = True
+                self._halt_reason = "KillSwitch"
+                log_error(
+                    f"🚨 Kill Switch 已激活（检测到 {kill_switch_path}）——拒绝所有新开仓。"
+                    f" 删除该文件并重启进程可恢复。"
+                )
+                notify_important(
+                    "🚨 Kill Switch 已激活\n"
+                    "交易已暂停，删除 kill_switch.flag 并重启可恢复"
+                )
+            return True
+
+        # 日亏损熔断
+        max_loss_pct = float(getattr(config, "MAX_DAILY_LOSS_PCT", 0.05))
+        if max_loss_pct > 0 and self._daily_start_equity and self._daily_start_equity > 0:
+            loss_pct = (self._daily_start_equity - float(equity)) / self._daily_start_equity
+            if loss_pct >= max_loss_pct:
+                if not self._trading_halted or "DailyLoss" not in self._halt_reason:
+                    self._trading_halted = True
+                    self._halt_reason = f"DailyLoss({loss_pct:.2%})"
+                    log_error(
+                        f"🚨 日亏损熔断触发: 当日亏损 {loss_pct:.2%} ≥ 阈值 {max_loss_pct:.2%}"
+                        f" (起始权益={self._daily_start_equity:.2f}, 当前={equity:.2f})"
+                        f" ——今日拒绝新开仓，持仓的平仓/止损正常执行。"
+                    )
+                    notify_important(
+                        f"🚨 日亏损熔断: {loss_pct:.2%}\n"
+                        f"当日亏损超过 {max_loss_pct:.2%}，今日不再开新仓"
+                    )
+                return True
+
+        if self._trading_halted:
+            return True
+        return False
 
     def run_once_on_new_bar(self):
         self.loop_count += 1
@@ -1271,8 +1853,13 @@ class LiveTrader:
         if pos_qty is None:
             log_error("双边持仓仍未清理完成，本轮跳过信号执行。")
             return
+        # 本轮成功从 OKX 读取到仓位，清除上一轮可能遗留的不确定标志
+        self._position_uncertain = False
         account_snapshot = self._get_account_snapshot()
         equity = self._get_sizing_equity(account_snapshot)
+
+        # 安全门禁：Kill Switch / 日亏损熔断（只阻止新开仓，不影响平仓/止损）
+        safety_halted = self._check_safety_gates(equity)
 
         if pos_qty == 0:
             self.hold_bars = 0
@@ -1282,6 +1869,7 @@ class LiveTrader:
             self.hold_bars,
             cooldown_bars_remaining=self.cooldown_bars_remaining,
             reverse_signal_bars=self.reverse_signal_bars,
+            loss_guard_exit_bars=self.loss_guard_exit_bars,
         )
 
         out = self.core.on_bar(
@@ -1293,6 +1881,8 @@ class LiveTrader:
             volatility=volatility,
             atr_ratio=atr_ratio,
             trend_bias=trend_context.get("trend_bias"),
+            trend_gap=trend_context.get("trend_gap"),
+            is_high_vol=bool(regime_context.get("is_high_vol")),
             market_regime=regime_context.get("regime"),
         )
 
@@ -1316,13 +1906,17 @@ class LiveTrader:
             "dominant_prob": out.get("dominant_prob"),
             "next_cooldown_bars": int(out.get("next_cooldown_bars", self.cooldown_bars_remaining)),
             "next_reverse_signal_bars": int(out.get("next_reverse_signal_bars", self.reverse_signal_bars)),
+            "next_loss_guard_exit_bars": int(out.get("next_loss_guard_exit_bars", self.loss_guard_exit_bars)),
             "trend_bias": trend_context.get("trend_bias"),
             "trend_gap": trend_context.get("trend_gap"),
             "market_regime": regime_context.get("regime"),
             "regime_reason": regime_context.get("regime_reason"),
+            "is_high_vol": bool(regime_context.get("is_high_vol")),
         }
 
         if action == "CLOSE":
+            # 平仓前先撤销交易所端 TP/SL 算法单，防止残留单触发后反向开仓
+            self._cancel_exchange_tpsl()
             success = False
             leverage = self._resolve_order_leverage(decision)
             if pos_qty > 0:
@@ -1332,7 +1926,9 @@ class LiveTrader:
             if success:
                 self.cooldown_bars_remaining = int(out.get("next_cooldown_bars", self.cooldown_bars_remaining))
                 self.reverse_signal_bars = int(out.get("next_reverse_signal_bars", 0))
-            self._sync_after_trade()
+                self.loss_guard_exit_bars = int(out.get("next_loss_guard_exit_bars", 0))
+            if not self._sync_after_trade():
+                raise RuntimeError("平仓后仓位状态无法确认")
             account_snapshot = self._get_account_snapshot()
             pos_qty, entry_price = self._get_net_position()
             trade_record = None
@@ -1379,14 +1975,47 @@ class LiveTrader:
             return
 
         elif action == "OPEN":
+            # 安全门禁：Kill Switch / 日亏损熔断触发时拒绝开仓，平仓/止损正常执行
+            if safety_halted:
+                log_info(
+                    f"HOLD (安全门禁 {self._halt_reason}): 拒绝新开仓"
+                    f" target_ratio={out.get('target_ratio', 0):.4f}"
+                    f" dominant={out.get('dominant_prob', 0):.4f}"
+                )
+                self._persist_last_bar_state(bar_ts)
+                return
+            # 仓位不确定门禁：上一轮 _sync_after_trade 失败，内存状态不可信，拒绝新开仓
+            if self._position_uncertain:
+                log_error(
+                    "HOLD (position_uncertain): 上一轮仓位同步失败，拒绝新开仓直到获得新鲜 OKX 仓位数据"
+                )
+                self._persist_last_bar_state(bar_ts)
+                return
             success = self._execute_delta(pos_qty, delta, decision)
-            self.cooldown_bars_remaining = int(out.get("next_cooldown_bars", self.cooldown_bars_remaining))
-            self.reverse_signal_bars = int(out.get("next_reverse_signal_bars", 0))
-            self._sync_after_trade()
+            if success:
+                self.cooldown_bars_remaining = int(out.get("next_cooldown_bars", self.cooldown_bars_remaining))
+                self.reverse_signal_bars = int(out.get("next_reverse_signal_bars", 0))
+                self.loss_guard_exit_bars = int(out.get("next_loss_guard_exit_bars", 0))
+            if not self._sync_after_trade():
+                raise RuntimeError("开仓后仓位状态无法确认")
             account_snapshot = self._get_account_snapshot()
             pos_qty, entry_price = self._get_net_position()
             trade_record = None
             if success:
+                # 开仓成功后立即在交易所下 TP/SL 算法单（P0修复）
+                # entry_price 优先使用 OKX 返回的实际成交均价
+                actual_entry = float(entry_price) if entry_price and float(entry_price) > 0 else float(price)
+                pos_side_open = "long" if float(pos_qty) > 0 else "short"
+                protected = self._place_exchange_tpsl(
+                    pos_side=pos_side_open,
+                    pos_qty=float(pos_qty) if pos_qty else abs(float(delta)),
+                    entry_price=actual_entry,
+                    decision=decision,
+                )
+                if not protected:
+                    self._close_unprotected_position(pos_qty)
+                    account_snapshot = self._get_account_snapshot()
+                    pos_qty, entry_price = self._get_net_position()
                 trade_record = self._record_trade_execution(
                     order_result=success,
                     action="OPEN",
@@ -1433,14 +2062,31 @@ class LiveTrader:
             return
 
         elif action == "REBALANCE":
+            # 仓位不确定时拒绝加仓方向的 REBALANCE（减仓仍允许）
+            if self._position_uncertain and delta > 0 and pos_qty >= 0:
+                log_error("HOLD (position_uncertain): 上一轮仓位同步失败，拒绝 REBALANCE 加仓")
+                self._persist_last_bar_state(bar_ts)
+                return
+            if self._position_uncertain and delta < 0 and pos_qty <= 0:
+                log_error("HOLD (position_uncertain): 上一轮仓位同步失败，拒绝 REBALANCE 加仓")
+                self._persist_last_bar_state(bar_ts)
+                return
             success = self._execute_delta(pos_qty, delta, decision)
-            self.cooldown_bars_remaining = int(out.get("next_cooldown_bars", self.cooldown_bars_remaining))
-            self.reverse_signal_bars = int(out.get("next_reverse_signal_bars", self.reverse_signal_bars))
-            self._sync_after_trade()
+            if success:
+                self.cooldown_bars_remaining = int(out.get("next_cooldown_bars", self.cooldown_bars_remaining))
+                self.reverse_signal_bars = int(out.get("next_reverse_signal_bars", self.reverse_signal_bars))
+                self.loss_guard_exit_bars = int(out.get("next_loss_guard_exit_bars", self.loss_guard_exit_bars))
+            if not self._sync_after_trade():
+                raise RuntimeError("调仓后仓位状态无法确认")
             account_snapshot = self._get_account_snapshot()
             pos_qty, entry_price = self._get_net_position()
             trade_record = None
             if success:
+                protected = self._replace_exchange_tpsl(pos_qty, entry_price, decision)
+                if not protected:
+                    self._close_unprotected_position(pos_qty)
+                    account_snapshot = self._get_account_snapshot()
+                    pos_qty, entry_price = self._get_net_position()
                 trade_record = self._record_trade_execution(
                     order_result=success,
                     action="REBALANCE",
@@ -1490,12 +2136,14 @@ class LiveTrader:
             self.hold_bars = int(out.get("next_hold_bars", self.hold_bars))
             self.cooldown_bars_remaining = int(out.get("next_cooldown_bars", self.cooldown_bars_remaining))
             self.reverse_signal_bars = int(out.get("next_reverse_signal_bars", self.reverse_signal_bars))
+            self.loss_guard_exit_bars = int(out.get("next_loss_guard_exit_bars", self.loss_guard_exit_bars))
             self.core.set_state(
                 pos_qty,
                 entry_price,
                 self.hold_bars,
                 cooldown_bars_remaining=self.cooldown_bars_remaining,
                 reverse_signal_bars=self.reverse_signal_bars,
+                loss_guard_exit_bars=self.loss_guard_exit_bars,
             )
             position_snapshot = self._build_position_snapshot(pos_qty, entry_price, current_price=price, pending_orders=0)
             self._write_dashboard_snapshot(
@@ -1535,7 +2183,43 @@ class LiveTrader:
 
 
 def run():
-    POLL_SEC = config.POLL_SEC
+    import atexit
+    POLL_SEC = max(1, int(config.POLL_SEC))
+    BAR_POLL_SEC = max(POLL_SEC, int(getattr(config, "BAR_POLL_SEC", 10)))
+
+    # ===== 多实例防护：PID 锁文件 =====
+    pid_file = os.path.join(LOGS_DIR, "live_trading_monitor.pid")
+    if os.path.exists(pid_file):
+        try:
+            old_pid = int(open(pid_file).read().strip())
+            # 检查旧进程是否仍在运行（且不是僵尸进程）
+            try:
+                os.kill(old_pid, 0)   # 信号0：不发送信号，只检查进程存在
+                # os.kill 对僵尸进程同样会成功，需额外检查进程状态
+                is_zombie = False
+                try:
+                    with open(f"/proc/{old_pid}/status", "r") as _sf:
+                        for _line in _sf:
+                            if _line.startswith("State:"):
+                                is_zombie = "Z" in _line
+                                break
+                except OSError:
+                    pass  # /proc 读取失败，保守地认为进程存活
+                if is_zombie:
+                    log_info(f"旧 PID {old_pid} 是僵尸进程，覆盖重建 PID 文件。")
+                else:
+                    raise RuntimeError(
+                        f"检测到另一个 live_trading_monitor 进程正在运行 (PID={old_pid})。"
+                        f" 若确认旧进程已停止，请手动删除 {pid_file} 后重试。"
+                    )
+            except ProcessLookupError:
+                log_info(f"旧 PID 文件残留（进程 {old_pid} 已不存在），覆盖重建。")
+        except (ValueError, OSError):
+            pass  # PID 文件损坏，直接覆盖
+    with open(pid_file, "w") as f:
+        f.write(str(os.getpid()))
+    atexit.register(lambda: os.path.exists(pid_file) and os.remove(pid_file))
+
     client = OKXClient()
     trader = LiveTrader(client)
     trader.ensure_runtime_ready()
@@ -1580,10 +2264,18 @@ def run():
         },
     )
 
-    log_info(f"🟢 Live trading monitor started (daemon loop, poll_sec={POLL_SEC})")
+    log_info(
+        "🟢 Live trading monitor started "
+        f"(risk_poll_sec={POLL_SEC}, bar_poll_sec={BAR_POLL_SEC})"
+    )
+    next_bar_poll_at = 0.0
     while True:
         try:
-            trader.run_once_on_new_bar()
+            risk_action_executed = trader.run_realtime_risk_check()
+            now = time.monotonic()
+            if not risk_action_executed and now >= next_bar_poll_at:
+                trader.run_once_on_new_bar()
+                next_bar_poll_at = now + BAR_POLL_SEC
             trader.consecutive_loop_errors = 0
             trader.last_error_notified_count = 0
         except Exception as e:

@@ -676,10 +676,6 @@ class StrategyCoreRebalanceTests(unittest.TestCase):
         self.assertEqual(out["action"], "OPEN")
         self.assertGreater(out["delta_qty"], 0)
 
-
-if __name__ == "__main__":
-    unittest.main()
-
 class StrategyCoreRegimeTests(unittest.TestCase):
     def build_core(self, target_ratio=0.2, **kwargs):
         defaults = dict(
@@ -804,3 +800,297 @@ class StrategyCoreRegimeTests(unittest.TestCase):
         )
         self.assertEqual(out["action"], "HOLD")
         self.assertEqual(out["reason"], "RegimeFilter(range_high_vol)")
+
+    def test_loss_guard_blocks_short_open(self):
+        core = self.build_core(
+            target_ratio=0.3,
+            loss_condition_guard_enabled=True,
+            loss_guard_block_directions=["short"],
+        )
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.10,
+            short_prob=0.90,
+            money_flow_ratio=1.0,
+            volatility=0.001,
+            market_regime="trend_short",
+        )
+        self.assertEqual(out["action"], "HOLD")
+        self.assertEqual(out["reason"], "LossGuardDirection(short)")
+
+    def test_loss_guard_blocks_range_high_vol_open_before_regime_filter(self):
+        core = self.build_core(
+            target_ratio=0.4,
+            loss_condition_guard_enabled=True,
+            loss_guard_block_new_regimes=["range_high_vol"],
+        )
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.90,
+            short_prob=0.10,
+            money_flow_ratio=1.0,
+            volatility=0.003,
+            market_regime="range_high_vol",
+        )
+        self.assertEqual(out["action"], "HOLD")
+        self.assertEqual(out["reason"], "LossGuardRegime(range_high_vol)")
+
+    def test_loss_guard_exits_position_on_range_high_vol_before_min_hold(self):
+        core = self.build_core(
+            target_ratio=0.2,
+            min_hold_bars=10,
+            loss_condition_guard_enabled=True,
+            loss_guard_exit_regimes=["range_high_vol"],
+            loss_guard_exit_min_hold_bars=0,
+        )
+        core.set_state(position=5.0, entry_price=100.0, hold_bars=0)
+        out = core.on_bar(
+            price=99.8,
+            equity=1000.0,
+            long_prob=0.80,
+            short_prob=0.20,
+            money_flow_ratio=1.0,
+            volatility=0.001,
+            market_regime="range_high_vol",
+        )
+        self.assertEqual(out["action"], "CLOSE")
+        self.assertEqual(out["reason"], "LossGuardExit(range_high_vol)")
+
+    def test_loss_guard_exit_waits_for_unrealized_loss_threshold(self):
+        core = self.build_core(
+            target_ratio=0.2,
+            min_hold_bars=5,
+            loss_condition_guard_enabled=True,
+            loss_guard_exit_regimes=["range_high_vol"],
+            loss_guard_exit_only_when_unprofitable=True,
+            loss_guard_exit_min_unrealized_loss=0.003,
+        )
+        core.set_state(position=5.0, entry_price=100.0, hold_bars=3)
+
+        out = core.on_bar(
+            price=99.8,
+            equity=1000.0,
+            long_prob=0.80,
+            short_prob=0.20,
+            money_flow_ratio=1.0,
+            volatility=0.001,
+            market_regime="range_high_vol",
+        )
+
+        self.assertEqual(out["action"], "HOLD")
+        self.assertEqual(out["reason"], "MinHold(4/5)")
+        self.assertEqual(out["next_loss_guard_exit_bars"], 0)
+
+    def test_loss_guard_exit_requires_confirmed_bars(self):
+        core = self.build_core(
+            target_ratio=0.2,
+            min_hold_bars=0,
+            loss_condition_guard_enabled=True,
+            loss_guard_exit_regimes=["range_high_vol"],
+            loss_guard_exit_only_when_unprofitable=True,
+            loss_guard_exit_min_unrealized_loss=0.003,
+            loss_guard_exit_confirm_bars=2,
+        )
+        core.set_state(position=5.0, entry_price=100.0, hold_bars=5)
+
+        first = core.on_bar(
+            price=99.6,
+            equity=1000.0,
+            long_prob=0.80,
+            short_prob=0.20,
+            money_flow_ratio=1.0,
+            volatility=0.001,
+            market_regime="range_high_vol",
+        )
+        self.assertEqual(first["action"], "HOLD")
+        self.assertEqual(first["next_loss_guard_exit_bars"], 1)
+        core.apply_decision(first)
+
+        second = core.on_bar(
+            price=99.5,
+            equity=1000.0,
+            long_prob=0.80,
+            short_prob=0.20,
+            money_flow_ratio=1.0,
+            volatility=0.001,
+            market_regime="range_high_vol",
+        )
+
+        self.assertEqual(second["action"], "CLOSE")
+        self.assertEqual(second["reason"], "LossGuardExit(range_high_vol)")
+
+    def test_loss_guard_exit_only_when_unprofitable_keeps_profitable_position(self):
+        core = self.build_core(
+            target_ratio=0.2,
+            min_hold_bars=5,
+            loss_condition_guard_enabled=True,
+            loss_guard_exit_regimes=["range_high_vol"],
+            loss_guard_exit_only_when_unprofitable=True,
+        )
+        core.set_state(position=5.0, entry_price=100.0, hold_bars=0)
+        out = core.on_bar(
+            price=100.2,
+            equity=1000.0,
+            long_prob=0.80,
+            short_prob=0.20,
+            money_flow_ratio=1.0,
+            volatility=0.001,
+            market_regime="range_high_vol",
+        )
+        self.assertEqual(out["action"], "HOLD")
+        self.assertEqual(out["reason"], "MinHold(1/5)")
+
+    def test_long_entry_guard_blocks_weak_trend_gap(self):
+        core = self.build_core(
+            target_ratio=0.2,
+            min_adjust_amount=0.0,
+            long_entry_guard_enabled=True,
+            long_entry_min_trend_gap=0.003,
+        )
+
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.90,
+            short_prob=0.10,
+            money_flow_ratio=1.0,
+            volatility=0.001,
+            trend_bias="long",
+            trend_gap=0.0025,
+            market_regime="trend_long",
+        )
+
+        self.assertEqual(out["action"], "HOLD")
+        self.assertTrue(out["reason"].startswith("LongEntryGuard(weak_trend_gap="))
+
+    def test_long_entry_guard_requires_stronger_gap_in_high_vol(self):
+        core = self.build_core(
+            target_ratio=0.2,
+            min_adjust_amount=0.0,
+            long_entry_guard_enabled=True,
+            long_entry_min_trend_gap=0.003,
+            long_entry_high_vol_min_trend_gap=0.0038,
+        )
+
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.90,
+            short_prob=0.10,
+            money_flow_ratio=1.0,
+            volatility=0.003,
+            trend_bias="long",
+            trend_gap=0.0035,
+            is_high_vol=True,
+            market_regime="trend_long",
+        )
+
+        self.assertEqual(out["action"], "HOLD")
+        self.assertTrue(out["reason"].startswith("LongEntryGuard(weak_trend_gap="))
+
+    def test_long_entry_guard_allows_strong_trend_long(self):
+        core = self.build_core(
+            target_ratio=0.2,
+            min_adjust_amount=0.0,
+            long_entry_guard_enabled=True,
+            long_entry_min_trend_gap=0.003,
+            long_entry_high_vol_min_trend_gap=0.0038,
+        )
+
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.90,
+            short_prob=0.10,
+            money_flow_ratio=1.0,
+            volatility=0.003,
+            trend_bias="long",
+            trend_gap=0.0042,
+            is_high_vol=True,
+            market_regime="trend_long",
+        )
+
+        self.assertEqual(out["action"], "OPEN")
+        self.assertEqual(out["reason"], "OpenFromFlat")
+
+    def test_long_entry_guard_blocks_high_vol_overheated_money_flow(self):
+        core = self.build_core(
+            target_ratio=0.2,
+            min_adjust_amount=0.0,
+            long_entry_guard_enabled=True,
+            long_entry_min_trend_gap=0.003,
+            long_entry_high_vol_min_trend_gap=0.005,
+            long_entry_overheat_guard_enabled=True,
+            long_entry_overheat_money_flow_max=2.5,
+        )
+
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.90,
+            short_prob=0.10,
+            money_flow_ratio=3.2,
+            volatility=0.003,
+            trend_bias="long",
+            trend_gap=0.006,
+            is_high_vol=True,
+            market_regime="trend_long",
+        )
+
+        self.assertEqual(out["action"], "HOLD")
+        self.assertEqual(out["reason"], "LongEntryGuard(overheat_money_flow=3.200)")
+
+    def test_long_entry_guard_allows_overheated_money_flow_outside_high_vol(self):
+        core = self.build_core(
+            target_ratio=0.2,
+            min_adjust_amount=0.0,
+            long_entry_guard_enabled=True,
+            long_entry_min_trend_gap=0.003,
+            long_entry_high_vol_min_trend_gap=0.005,
+            long_entry_overheat_guard_enabled=True,
+            long_entry_overheat_money_flow_max=2.5,
+        )
+
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.90,
+            short_prob=0.10,
+            money_flow_ratio=3.2,
+            volatility=0.001,
+            trend_bias="long",
+            trend_gap=0.006,
+            is_high_vol=False,
+            market_regime="trend_long",
+        )
+
+        self.assertEqual(out["action"], "OPEN")
+        self.assertEqual(out["reason"], "OpenFromFlat")
+
+    def test_loss_guard_does_not_block_position_reduction(self):
+        core = self.build_core(
+            target_ratio=0.2,
+            add_threshold=0.0,
+            loss_condition_guard_enabled=True,
+            loss_guard_block_new_regimes=["range_high_vol"],
+            loss_guard_block_directions=["long"],
+            loss_guard_exit_regimes=[],
+        )
+        core.set_state(position=5.0, entry_price=100.0, hold_bars=5)
+        out = core.on_bar(
+            price=100.0,
+            equity=1000.0,
+            long_prob=0.90,
+            short_prob=0.10,
+            money_flow_ratio=1.0,
+            volatility=0.003,
+            market_regime="trend_long",
+        )
+        self.assertEqual(out["action"], "REBALANCE")
+        self.assertLess(out["delta_qty"], 0.0)
+
+
+if __name__ == "__main__":
+    unittest.main()

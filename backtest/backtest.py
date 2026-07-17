@@ -238,6 +238,21 @@ class Backtester:
             regime_range_min_signal_target_ratio=float(config.REGIME_RANGE_MIN_SIGNAL_TARGET_RATIO),
             regime_high_vol_min_signal_target_ratio=float(config.REGIME_HIGH_VOL_MIN_SIGNAL_TARGET_RATIO),
             block_losing_position_adds=bool(config.BLOCK_LOSING_POSITION_ADDS),
+            loss_condition_guard_enabled=bool(config.LOSS_CONDITION_GUARD_ENABLED),
+            loss_guard_block_new_regimes=config.LOSS_GUARD_BLOCK_NEW_REGIMES,
+            loss_guard_block_directions=config.LOSS_GUARD_BLOCK_DIRECTIONS,
+            loss_guard_exit_regimes=config.LOSS_GUARD_EXIT_REGIMES,
+            loss_guard_exit_min_hold_bars=int(config.LOSS_GUARD_EXIT_MIN_HOLD_BARS),
+            loss_guard_exit_only_when_unprofitable=bool(config.LOSS_GUARD_EXIT_ONLY_WHEN_UNPROFITABLE),
+            loss_guard_exit_min_unrealized_loss=float(config.LOSS_GUARD_EXIT_MIN_UNREALIZED_LOSS),
+            loss_guard_exit_confirm_bars=int(config.LOSS_GUARD_EXIT_CONFIRM_BARS),
+            long_entry_guard_enabled=bool(config.LONG_ENTRY_GUARD_ENABLED),
+            long_entry_min_trend_gap=float(config.LONG_ENTRY_MIN_TREND_GAP),
+            long_entry_high_vol_gap_buffer=float(config.LONG_ENTRY_HIGH_VOL_GAP_BUFFER),
+            long_entry_high_vol_min_trend_gap=float(config.LONG_ENTRY_HIGH_VOL_MIN_TREND_GAP),
+            long_entry_block_high_vol=bool(config.LONG_ENTRY_BLOCK_HIGH_VOL),
+            long_entry_overheat_guard_enabled=bool(config.LONG_ENTRY_OVERHEAT_GUARD_ENABLED),
+            long_entry_overheat_money_flow_max=float(config.LONG_ENTRY_OVERHEAT_MONEY_FLOW_MAX),
             dynamic_risk_controller=self.dynamic_risk_controller,
         )
         if self.emit_diagnostics:
@@ -682,6 +697,8 @@ class Backtester:
                 volatility=volatility,
                 atr_ratio=atr_ratio,
                 trend_bias=trend_context.get("trend_bias"),
+                trend_gap=trend_context.get("trend_gap"),
+                is_high_vol=bool(regime_context.get("is_high_vol")),
                 market_regime=regime_context.get("regime"),
             )
 

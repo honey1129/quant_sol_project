@@ -1,3 +1,4 @@
+import base64
 import csv
 import glob
 import json
@@ -29,6 +30,8 @@ DASHBOARD_HISTORY_LIMIT = int(os.getenv("DASHBOARD_HISTORY_LIMIT", "240"))
 DASHBOARD_EVENT_LIMIT = int(os.getenv("DASHBOARD_EVENT_LIMIT", "24"))
 DASHBOARD_TRADE_LIMIT = int(os.getenv("DASHBOARD_TRADE_LIMIT", "18"))
 DASHBOARD_LOG_TAIL_LINES = int(os.getenv("DASHBOARD_LOG_TAIL_LINES", "18000"))
+# 访问密码（留空则不开启认证）。在 .env 中设置 DASHBOARD_PASSWORD=yourpassword
+DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "").strip()
 ENV_FILE_PATH = os.getenv("ENV_FILE", os.path.join(BASE_DIR, ".env"))
 
 FRONTEND_ROOT = os.path.join(BASE_DIR, "dashboard-ui")
@@ -1158,6 +1161,29 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
     def log_message(self, format, *args):
         return
 
+    def _check_auth(self):
+        """Return True if auth passes (or auth is disabled). Send 401 and return False otherwise."""
+        if not DASHBOARD_PASSWORD:
+            return True
+        auth_header = self.headers.get("Authorization", "")
+        if auth_header.startswith("Basic "):
+            try:
+                decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
+                _, provided_password = decoded.split(":", 1)
+                if provided_password == DASHBOARD_PASSWORD:
+                    return True
+            except Exception:
+                pass
+        # Send 401 with WWW-Authenticate to trigger browser login popup
+        body = b"Unauthorized"
+        self.send_response(HTTPStatus.UNAUTHORIZED)
+        self.send_header("WWW-Authenticate", 'Basic realm="Quant Dashboard"')
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        return False
+
     def do_OPTIONS(self):
         self.send_response(HTTPStatus.NO_CONTENT)
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -1166,6 +1192,8 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        if not self._check_auth():
+            return
         parsed = urlparse(self.path)
         path = parsed.path
 
@@ -1198,6 +1226,8 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
         return super().do_GET()
 
     def do_POST(self):
+        if not self._check_auth():
+            return
         parsed = urlparse(self.path)
         path = parsed.path
 

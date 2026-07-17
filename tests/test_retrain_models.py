@@ -186,6 +186,63 @@ class RetrainBacktestValidationTests(unittest.TestCase):
             with open(preserved_path, "r", encoding="utf-8") as file:
                 self.assertIn("oos_start", file.read())
 
+    def test_preserve_candidate_training_metadata_prefers_candidate_diagnostic_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = os.path.join(tmpdir, "project")
+            backup_dir = os.path.join(tmpdir, "backup")
+            metadata_dir = os.path.join(base_dir, "models")
+            os.makedirs(metadata_dir, exist_ok=True)
+            with open(os.path.join(metadata_dir, "training_metadata.json"), "w", encoding="utf-8") as file:
+                file.write('{"source":"old"}')
+            with open(os.path.join(metadata_dir, "candidate_training_metadata.json"), "w", encoding="utf-8") as file:
+                file.write('{"candidate_status":"validation_gate_pending"}')
+
+            with patch("run.retrain_models.BASE_DIR", base_dir):
+                with patch("run.retrain_models.config.TRAINING_METADATA_PATH", "models/training_metadata.json"):
+                    preserved_path = retrain_models.preserve_candidate_training_metadata(backup_dir)
+
+            with open(preserved_path, "r", encoding="utf-8") as file:
+                payload = file.read()
+
+        self.assertIn("validation_gate_pending", payload)
+        self.assertNotIn('"source":"old"', payload)
+
+    def test_update_candidate_training_metadata_merges_walk_forward_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = os.path.join(tmpdir, "project")
+            metadata_dir = os.path.join(base_dir, "models")
+            os.makedirs(metadata_dir, exist_ok=True)
+            with open(os.path.join(metadata_dir, "candidate_training_metadata.json"), "w", encoding="utf-8") as file:
+                file.write('{"candidate_status":"validation_gate_pending"}')
+
+            with patch("run.retrain_models.BASE_DIR", base_dir):
+                with patch("run.retrain_models.config.TRAINING_METADATA_PATH", "models/training_metadata.json"):
+                    updated_path = retrain_models.update_candidate_training_metadata(
+                        candidate_status="walk_forward_failed",
+                        walk_forward_failure_summary={"failure_reason": "fold failed"},
+                    )
+
+            with open(updated_path, "r", encoding="utf-8") as file:
+                payload = file.read()
+
+        self.assertIn("walk_forward_failed", payload)
+        self.assertIn("fold failed", payload)
+
+    def test_remove_candidate_training_metadata_deletes_working_diagnostic_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = os.path.join(tmpdir, "project")
+            metadata_dir = os.path.join(base_dir, "models")
+            os.makedirs(metadata_dir, exist_ok=True)
+            candidate_path = os.path.join(metadata_dir, "candidate_training_metadata.json")
+            with open(candidate_path, "w", encoding="utf-8") as file:
+                file.write("{}")
+
+            with patch("run.retrain_models.BASE_DIR", base_dir):
+                with patch("run.retrain_models.config.TRAINING_METADATA_PATH", "models/training_metadata.json"):
+                    retrain_models.remove_candidate_training_metadata()
+
+        self.assertFalse(os.path.exists(candidate_path))
+
     def test_preserve_candidate_training_metadata_returns_none_when_missing(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch("run.retrain_models.BASE_DIR", tmpdir):
@@ -457,6 +514,10 @@ class RetrainBacktestValidationTests(unittest.TestCase):
         self.assertIn("predicted_trade_direction_counts", diagnostics["ensemble"])
         self.assertIn("probability_scale_diagnostics", diagnostics["ensemble"])
         self.assertFalse(diagnostics["ensemble"]["probability_scale_diagnostics"]["collapse_warning"])
+        model_regime = diagnostics["model_group_diagnostics"]["fake"]["by_direction_regime"]
+        self.assertEqual(model_regime["long:trend_long"]["target_counts"], {"0": 1, "1": 1})
+        self.assertEqual(model_regime["long:trend_long"]["prediction_counts"], {"0": 1, "1": 1})
+        self.assertAlmostEqual(model_regime["long:trend_long"]["trade_recall"], 1.0)
 
     @unittest.skipUnless(HAS_REAL_PANDAS, "requires pandas")
     def test_walk_forward_fold_diagnostics_use_configurable_decision_threshold(self):

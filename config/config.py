@@ -2,16 +2,42 @@ import os
 from dotenv import load_dotenv
 from typing import Callable, Dict
 
-# 自动加载.env文件
-load_dotenv()
+# 自动加载.env文件，override=True 确保 .env 始终优先于 PM2/shell 注入的旧环境变量
+load_dotenv(override=True)
 
 # ✅ 辅助函数：解析 key:value,key:value 格式字符串为字典
 def parse_env_dict(env_str: str, value_type: Callable[[str], any] = str) -> Dict[str, any]:
     items = env_str.split(",") if env_str else []
     parsed = {}
     for item in items:
-        key, value = item.split(":")
-        parsed[key] = value_type(value)
+        item = item.strip()
+        if not item:
+            continue
+        if ":" not in item:
+            import logging
+            logging.warning(f"parse_env_dict: 跳过格式不正确的条目（缺少冒号）: {item!r}")
+            continue
+        key, value = item.split(":", 1)
+        try:
+            parsed[key.strip()] = value_type(value.strip())
+        except (TypeError, ValueError) as exc:
+            import logging
+            logging.warning(f"parse_env_dict: 跳过无法转换的条目 {item!r}: {exc}")
+    return parsed
+
+
+def parse_env_assignment_dict(env_str: str, value_type: Callable[[str], any] = str) -> Dict[str, any]:
+    items = env_str.split(",") if env_str else []
+    parsed = {}
+    for item in items:
+        item = item.strip()
+        if not item:
+            continue
+        if "=" in item:
+            key, value = item.split("=", 1)
+        else:
+            key, value = item.rsplit(":", 1)
+        parsed[key.strip()] = value_type(value.strip())
     return parsed
 
 # ✅ 辅助函数：解析用逗号分隔的列表
@@ -84,6 +110,10 @@ MODEL_WEIGHTS = parse_env_dict(
     os.getenv("MODEL_WEIGHTS", "lgb_v1:0.5,xgb_v1:0.3,rf_v1:0.2"),
     float,
 )
+MODEL_DIRECTION_MODEL_WEIGHTS = parse_env_assignment_dict(
+    os.getenv("MODEL_DIRECTION_MODEL_WEIGHTS", ""),
+    str,
+)
 MODEL_LABEL_FUTURE_WINDOW = int(os.getenv("MODEL_LABEL_FUTURE_WINDOW", 5))
 MODEL_LABEL_THRESHOLD = float(os.getenv("MODEL_LABEL_THRESHOLD", 0.002))
 MODEL_LABEL_USE_REALISTIC = parse_env_bool(os.getenv("MODEL_LABEL_USE_REALISTIC"), True)
@@ -93,8 +123,19 @@ MODEL_LABEL_STOP_LOSS = float(os.getenv("MODEL_LABEL_STOP_LOSS", 0.014))
 MODEL_LABEL_MIN_NET_RETURN = float(os.getenv("MODEL_LABEL_MIN_NET_RETURN", 0.0))
 MODEL_LABEL_MAX_MAE_RATIO = float(os.getenv("MODEL_LABEL_MAX_MAE_RATIO", 1.0))
 MODEL_LABEL_TIMEOUT_AS_TRADE = parse_env_bool(os.getenv("MODEL_LABEL_TIMEOUT_AS_TRADE"), True)
+MODEL_LABEL_TIMEOUT_WEAK_POSITIVE_AS_TRADE = parse_env_bool(
+    os.getenv("MODEL_LABEL_TIMEOUT_WEAK_POSITIVE_AS_TRADE"),
+    False,
+)
 MODEL_LABEL_TIMEOUT_MIN_NET_RETURN = float(os.getenv("MODEL_LABEL_TIMEOUT_MIN_NET_RETURN", 0.0015))
 MODEL_LABEL_TIMEOUT_MAX_MAE_RATIO = float(os.getenv("MODEL_LABEL_TIMEOUT_MAX_MAE_RATIO", 0.40))
+MODEL_LABEL_LONG_TREND_WEAK_TP_AS_TRADE = parse_env_bool(
+    os.getenv("MODEL_LABEL_LONG_TREND_WEAK_TP_AS_TRADE"),
+    False,
+)
+MODEL_LABEL_LONG_TREND_STRONG_MAX_EXIT_BARS = int(os.getenv("MODEL_LABEL_LONG_TREND_STRONG_MAX_EXIT_BARS", 16))
+MODEL_LABEL_LONG_TREND_STRONG_MAX_MAE_RATIO = float(os.getenv("MODEL_LABEL_LONG_TREND_STRONG_MAX_MAE_RATIO", 0.50))
+MODEL_LABEL_LONG_TREND_STRONG_MIN_MFE_MAE_RATIO = float(os.getenv("MODEL_LABEL_LONG_TREND_STRONG_MIN_MFE_MAE_RATIO", 0.0))
 MODEL_LABEL_REQUIRE_REGIME_ALLOWED = parse_env_bool(os.getenv("MODEL_LABEL_REQUIRE_REGIME_ALLOWED"), True)
 MODEL_TRAIN_TRADABLE_LABELS = parse_env_bool(os.getenv("MODEL_TRAIN_TRADABLE_LABELS"), True)
 MODEL_TRAIN_NO_TRADE_LABELS = parse_env_bool(os.getenv("MODEL_TRAIN_NO_TRADE_LABELS"), True)
@@ -107,18 +148,42 @@ MODEL_DIRECTION_QUALITY_CALIBRATION_MIN_ROWS = int(os.getenv("MODEL_DIRECTION_QU
 MODEL_DIRECTION_QUALITY_CALIBRATION_MIN_POSITIVES = int(os.getenv("MODEL_DIRECTION_QUALITY_CALIBRATION_MIN_POSITIVES", 5))
 MODEL_DIRECTION_QUALITY_CALIBRATION_MIN_NEGATIVES = int(os.getenv("MODEL_DIRECTION_QUALITY_CALIBRATION_MIN_NEGATIVES", 5))
 MODEL_DIRECTION_QUALITY_CALIBRATION_USE_SAMPLE_WEIGHT = parse_env_bool(os.getenv("MODEL_DIRECTION_QUALITY_CALIBRATION_USE_SAMPLE_WEIGHT"), False)
+MODEL_DIRECTION_QUALITY_ALLOW_INVERSE_CALIBRATION = parse_env_bool(
+    os.getenv("MODEL_DIRECTION_QUALITY_ALLOW_INVERSE_CALIBRATION"),
+    True,
+)
+MODEL_DIRECTION_QUALITY_INVERSE_CALIBRATION_DIRECTIONS = parse_env_list(
+    os.getenv("MODEL_DIRECTION_QUALITY_INVERSE_CALIBRATION_DIRECTIONS", "short")
+)
 MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION = parse_env_bool(os.getenv("MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION"), True)
 MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION_MIN_ROWS = int(os.getenv("MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION_MIN_ROWS", 50))
 MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION_MIN_POSITIVES = int(os.getenv("MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION_MIN_POSITIVES", 5))
 MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION_MIN_NEGATIVES = int(os.getenv("MODEL_DIRECTION_QUALITY_REGIME_CALIBRATION_MIN_NEGATIVES", 5))
+MODEL_QUALITY_PROBABILITY_EXECUTION_SCALE_ENABLED = parse_env_bool(
+    os.getenv("MODEL_QUALITY_PROBABILITY_EXECUTION_SCALE_ENABLED"),
+    True,
+)
+MODEL_QUALITY_PROBABILITY_EXECUTION_ANCHOR = float(os.getenv("MODEL_QUALITY_PROBABILITY_EXECUTION_ANCHOR", 0.50))
+MODEL_QUALITY_PROBABILITY_EXECUTION_TEMPERATURE = float(os.getenv("MODEL_QUALITY_PROBABILITY_EXECUTION_TEMPERATURE", 1.0))
+MODEL_QUALITY_PROBABILITY_BASE_RATE = float(os.getenv("MODEL_QUALITY_PROBABILITY_BASE_RATE", 0.0))
+MODEL_QUALITY_PROBABILITY_MIN_BASE_RATE = float(os.getenv("MODEL_QUALITY_PROBABILITY_MIN_BASE_RATE", 0.01))
+MODEL_QUALITY_PROBABILITY_MAX_BASE_RATE = float(os.getenv("MODEL_QUALITY_PROBABILITY_MAX_BASE_RATE", 0.50))
 # 是否接入 Rubik(OI/taker/多空比)平稳特征。默认关闭,用 OOS 对比确认有效后再开。
 MODEL_USE_RUBIK_FEATURES = parse_env_bool(os.getenv("MODEL_USE_RUBIK_FEATURES"), False)
 # Rubik 统计粒度;5m 历史仅~2天不可用,1H 可回溯~30天。
 MODEL_RUBIK_PERIOD = os.getenv("MODEL_RUBIK_PERIOD", "1H")
 MODEL_RECENT_SAMPLE_WEIGHT_BOOST = float(os.getenv("MODEL_RECENT_SAMPLE_WEIGHT_BOOST", 0.5))
-MODEL_TRADE_SAMPLE_WEIGHT_MULTIPLIER = float(os.getenv("MODEL_TRADE_SAMPLE_WEIGHT_MULTIPLIER", 2.0))
+MODEL_TRADE_SAMPLE_WEIGHT_MULTIPLIER = float(os.getenv("MODEL_TRADE_SAMPLE_WEIGHT_MULTIPLIER", 1.0))
 MODEL_NO_TRADE_SAMPLE_WEIGHT_MULTIPLIER = float(os.getenv("MODEL_NO_TRADE_SAMPLE_WEIGHT_MULTIPLIER", 1.0))
-MODEL_HARD_NEGATIVE_SAMPLE_WEIGHT_MULTIPLIER = float(os.getenv("MODEL_HARD_NEGATIVE_SAMPLE_WEIGHT_MULTIPLIER", 2.0))
+MODEL_HARD_NEGATIVE_SAMPLE_WEIGHT_MULTIPLIER = float(os.getenv("MODEL_HARD_NEGATIVE_SAMPLE_WEIGHT_MULTIPLIER", 3.0))
+MODEL_DIRECTION_TRADE_SAMPLE_WEIGHT_MULTIPLIERS = parse_env_assignment_dict(
+    os.getenv("MODEL_DIRECTION_TRADE_SAMPLE_WEIGHT_MULTIPLIERS", ""),
+    float,
+)
+MODEL_DIRECTION_HARD_NEGATIVE_SAMPLE_WEIGHT_MULTIPLIERS = parse_env_assignment_dict(
+    os.getenv("MODEL_DIRECTION_HARD_NEGATIVE_SAMPLE_WEIGHT_MULTIPLIERS", "long:trend_long=2.0,short:trend_short=2.0"),
+    float,
+)
 MODEL_SAMPLE_WEIGHT_MIN = float(os.getenv("MODEL_SAMPLE_WEIGHT_MIN", 0.25))
 MODEL_SAMPLE_WEIGHT_MAX = float(os.getenv("MODEL_SAMPLE_WEIGHT_MAX", 20.0))
 MODEL_TRAIN_RATIO = float(os.getenv("MODEL_TRAIN_RATIO", 0.70))
@@ -141,6 +206,12 @@ MODEL_WALK_FORWARD_FOLDS = int(os.getenv("MODEL_WALK_FORWARD_FOLDS", 3))
 MODEL_WALK_FORWARD_MIN_FOLDS = int(os.getenv("MODEL_WALK_FORWARD_MIN_FOLDS", 2))
 MODEL_WALK_FORWARD_MIN_VALIDATION_ROWS = int(os.getenv("MODEL_WALK_FORWARD_MIN_VALIDATION_ROWS", 100))
 MODEL_WALK_FORWARD_DIAGNOSTIC_THRESHOLD = float(os.getenv("MODEL_WALK_FORWARD_DIAGNOSTIC_THRESHOLD", 0.35))
+MODEL_RETRAIN_VALIDATION_GATE_THRESHOLD = os.getenv("MODEL_RETRAIN_VALIDATION_GATE_THRESHOLD", "auto")
+MODEL_RETRAIN_VALIDATION_GATE_THRESHOLD_SWEEP = os.getenv(
+    "MODEL_RETRAIN_VALIDATION_GATE_THRESHOLD_SWEEP",
+    "0.50,0.56,0.60,0.64,0.68,0.72,0.76,0.80",
+)
+MODEL_RETRAIN_VALIDATION_GATE_TARGET_PRECISION = float(os.getenv("MODEL_RETRAIN_VALIDATION_GATE_TARGET_PRECISION", 0.25))
 MODEL_WALK_FORWARD_FAIL_FAST = parse_env_bool(os.getenv("MODEL_WALK_FORWARD_FAIL_FAST"), True)
 MODEL_WALK_FORWARD_LIGHTWEIGHT_TRAINING = parse_env_bool(os.getenv("MODEL_WALK_FORWARD_LIGHTWEIGHT_TRAINING"), True)
 MODEL_WALK_FORWARD_LGB_ESTIMATORS = int(os.getenv("MODEL_WALK_FORWARD_LGB_ESTIMATORS", 40))
@@ -247,6 +318,30 @@ REGIME_TREND_AGAINST_BLOCK = parse_env_bool(os.getenv("REGIME_TREND_AGAINST_BLOC
 REGIME_RANGE_TARGET_MULTIPLIER = float(os.getenv("REGIME_RANGE_TARGET_MULTIPLIER", 0.60))
 REGIME_HIGH_VOL_TARGET_MULTIPLIER = float(os.getenv("REGIME_HIGH_VOL_TARGET_MULTIPLIER", 0.35))
 
+# ✅ 反向过滤风控：由 live_fills 亏损状态诊断驱动，先阻断系统性亏损的市场状态。
+LOSS_CONDITION_GUARD_ENABLED = parse_env_bool(os.getenv("LOSS_CONDITION_GUARD_ENABLED"), True)
+LOSS_GUARD_BLOCK_NEW_REGIMES = parse_env_list(os.getenv("LOSS_GUARD_BLOCK_NEW_REGIMES", "range_high_vol"))
+LOSS_GUARD_BLOCK_DIRECTIONS = parse_env_list(os.getenv("LOSS_GUARD_BLOCK_DIRECTIONS", "short"))
+LOSS_GUARD_EXIT_REGIMES = parse_env_list(os.getenv("LOSS_GUARD_EXIT_REGIMES", "range_high_vol"))
+LOSS_GUARD_EXIT_MIN_HOLD_BARS = int(os.getenv("LOSS_GUARD_EXIT_MIN_HOLD_BARS", 0))
+LOSS_GUARD_EXIT_ONLY_WHEN_UNPROFITABLE = parse_env_bool(os.getenv("LOSS_GUARD_EXIT_ONLY_WHEN_UNPROFITABLE"), False)
+LOSS_GUARD_EXIT_MIN_UNREALIZED_LOSS = float(os.getenv("LOSS_GUARD_EXIT_MIN_UNREALIZED_LOSS", 0.003))
+LOSS_GUARD_EXIT_CONFIRM_BARS = int(os.getenv("LOSS_GUARD_EXIT_CONFIRM_BARS", 2))
+
+# ✅ 多头入场质量保护：避免 trend_long 快衰减或高波动边缘追多。
+LONG_ENTRY_GUARD_ENABLED = parse_env_bool(os.getenv("LONG_ENTRY_GUARD_ENABLED"), True)
+LONG_ENTRY_MIN_TREND_GAP = float(os.getenv("LONG_ENTRY_MIN_TREND_GAP", TREND_FILTER_MIN_GAP))
+LONG_ENTRY_HIGH_VOL_GAP_BUFFER = float(os.getenv("LONG_ENTRY_HIGH_VOL_GAP_BUFFER", 0.0008))
+LONG_ENTRY_HIGH_VOL_MIN_TREND_GAP = float(
+    os.getenv(
+        "LONG_ENTRY_HIGH_VOL_MIN_TREND_GAP",
+        0.0050,
+    )
+)
+LONG_ENTRY_BLOCK_HIGH_VOL = parse_env_bool(os.getenv("LONG_ENTRY_BLOCK_HIGH_VOL"), False)
+LONG_ENTRY_OVERHEAT_GUARD_ENABLED = parse_env_bool(os.getenv("LONG_ENTRY_OVERHEAT_GUARD_ENABLED"), True)
+LONG_ENTRY_OVERHEAT_MONEY_FLOW_MAX = float(os.getenv("LONG_ENTRY_OVERHEAT_MONEY_FLOW_MAX", 2.5))
+
 # ✅ Kelly 盈亏比
 KELLY_REWARD_RISK = float(os.getenv("KELLY_REWARD_RISK", 2.8))
 
@@ -298,11 +393,15 @@ MODEL_RETRAIN_MAX_DRAWDOWN_PCT = float(os.getenv("MODEL_RETRAIN_MAX_DRAWDOWN_PCT
 MODEL_RETRAIN_MIN_CLOSED_TRADES = int(os.getenv("MODEL_RETRAIN_MIN_CLOSED_TRADES", 10))
 MODEL_RETRAIN_MIN_WIN_RATE_PCT = float(os.getenv("MODEL_RETRAIN_MIN_WIN_RATE_PCT", 45.0))
 MODEL_RETRAIN_MIN_PROFIT_FACTOR = float(os.getenv("MODEL_RETRAIN_MIN_PROFIT_FACTOR", 1.05))
+# 硬编码下限，用于覆盖 HARD_MIN_PROFIT_FACTOR 常量，设为 0.0 可完全由上层配置控制
+MODEL_RETRAIN_HARD_MIN_PROFIT_FACTOR = float(os.getenv("MODEL_RETRAIN_HARD_MIN_PROFIT_FACTOR", 0.0))
+MODEL_RETRAIN_HARD_MIN_CLOSED_TRADES = int(os.getenv("MODEL_RETRAIN_HARD_MIN_CLOSED_TRADES", 1))
 MODEL_RETRAIN_MIN_AVG_WIN_LOSS_RATIO = float(os.getenv("MODEL_RETRAIN_MIN_AVG_WIN_LOSS_RATIO", 0.8))
 MODEL_RETRAIN_MIN_NET_PNL_AFTER_COSTS = float(os.getenv("MODEL_RETRAIN_MIN_NET_PNL_AFTER_COSTS", 0.0))
 MODEL_RETRAIN_MIN_OOS_ROWS = int(os.getenv("MODEL_RETRAIN_MIN_OOS_ROWS", 100))
 MODEL_RETRAIN_VALIDATION_GATE_ENABLED = parse_env_bool(os.getenv("MODEL_RETRAIN_VALIDATION_GATE_ENABLED"), True)
 MODEL_RETRAIN_MIN_VALIDATION_TRADE_RECALL = float(os.getenv("MODEL_RETRAIN_MIN_VALIDATION_TRADE_RECALL", 0.01))
+MODEL_RETRAIN_MIN_VALIDATION_TRADE_PRECISION = float(os.getenv("MODEL_RETRAIN_MIN_VALIDATION_TRADE_PRECISION", 0.25))
 MODEL_RETRAIN_MIN_VALIDATION_PREDICTED_TRADES = int(os.getenv("MODEL_RETRAIN_MIN_VALIDATION_PREDICTED_TRADES", 1))
 MODEL_RETRAIN_REGIME_GATE_ENABLED = parse_env_bool(os.getenv("MODEL_RETRAIN_REGIME_GATE_ENABLED"), True)
 MODEL_RETRAIN_REGIME_GATE_MIN_ROWS = int(os.getenv("MODEL_RETRAIN_REGIME_GATE_MIN_ROWS", 30))
@@ -320,4 +419,19 @@ DAILY_REPORT_HOUR = int(os.getenv("DAILY_REPORT_HOUR", 23))
 DAILY_REPORT_MINUTE = int(os.getenv("DAILY_REPORT_MINUTE", 59))
 
 
-POLL_SEC=os.getenv("POLL_SEC", 10)
+# Realtime local risk checks run every second; heavier bar/model work keeps its own cadence.
+POLL_SEC = int(os.getenv("POLL_SEC", 1))
+BAR_POLL_SEC = int(os.getenv("BAR_POLL_SEC", 10))
+
+# ✅ 账户级熔断和紧急控制
+# MAX_DAILY_LOSS_PCT：当日权益亏损超过该比例时拒绝新开仓（0.05=5%，0 表示不启用）
+MAX_DAILY_LOSS_PCT = float(os.getenv("MAX_DAILY_LOSS_PCT", 0.05))
+# KILL_SWITCH_FILE：该文件存在时立即停止所有新开仓（touch kill_switch.flag 即可触发）
+KILL_SWITCH_FILE = os.getenv("KILL_SWITCH_FILE", "kill_switch.flag")
+# EXCHANGE_TPSL_ENABLED：开仓后自动在 OKX 下 TP/SL 算法单（进程崩溃时止损仍有效）
+EXCHANGE_TPSL_ENABLED = parse_env_bool(os.getenv("EXCHANGE_TPSL_ENABLED"), True)
+# TPSL_TRIGGER_PX_TYPE：交易所端 TP/SL 触发价格类型
+#   mark  - 标记价格（推荐）：抗闪崩/价格操纵，OKX 强平计算也用标记价格
+#   last  - 最新成交价：对价格变动更敏感，TP 触发更快但 SL 可能被短暂插针触发
+#   index - 指数价格：多所综合，最平滑，SL 最难被操纵触发
+TPSL_TRIGGER_PX_TYPE = os.getenv("TPSL_TRIGGER_PX_TYPE", "mark")
