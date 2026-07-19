@@ -252,9 +252,9 @@ MODEL_RETRAIN_MIN_CLOSED_TRADES=10         # OOS 最少平仓笔数
 MODEL_RETRAIN_MIN_PROFIT_FACTOR=1.05       # OOS 最低盈利因子
 MODEL_RETRAIN_MIN_VALIDATION_TRADE_PRECISION=0.25  # 验证集交易精度
 
-# 硬编码下限（新增，v2.2+）
-MODEL_RETRAIN_HARD_MIN_PROFIT_FACTOR=0.0   # 设为 0.0 则只由上方软门禁控制
-MODEL_RETRAIN_HARD_MIN_CLOSED_TRADES=1     # 设为 1 则不会因笔数不足强制失败
+# 绝对安全底线（只能提高，不能下调）
+MODEL_RETRAIN_HARD_MIN_PROFIT_FACTOR=1.0   # 候选模型的盈利因子必须严格大于 1
+MODEL_RETRAIN_HARD_MIN_CLOSED_TRADES=1     # 候选模型必须至少有 1 笔平仓交易
 
 # Walk-forward 验证
 MODEL_WALK_FORWARD_ENABLED=False           # 当模型 recall ≈ 0 时可关闭以允许部署
@@ -271,13 +271,13 @@ MODEL_WALK_FORWARD_ENABLED=False           # 当模型 recall ≈ 0 时可关闭
 每次开仓成交后，`okx_api.py` 立即通过 `place_algo_order` 在 OKX 下一张 OCO 止盈止损单：
 
 - `reduceOnly=True`，只平仓不反向开仓
-- 触发价类型为 **mark price**（`EXCHANGE_TPSL_TRIGGER_PX_TYPE=mark`），比 last price 抗插针
+- 触发价类型为 **mark price**（`TPSL_TRIGGER_PX_TYPE=mark`），比 last price 抗插针
 - 平仓 / 反手前会先撤销残留算法单，避免旧止损单触发后意外反向开仓
 - 若算法单下单失败，会立即市价平掉刚开的仓位（`_close_unprotected_position`），绝不留裸仓
 
 ```env
 EXCHANGE_TPSL_ENABLED=1              # 开启交易所端 TP/SL
-EXCHANGE_TPSL_TRIGGER_PX_TYPE=mark   # mark / last / index
+TPSL_TRIGGER_PX_TYPE=mark            # mark / last / index
 ```
 
 ### 账户级熔断与 Kill Switch
@@ -285,12 +285,12 @@ EXCHANGE_TPSL_TRIGGER_PX_TYPE=mark   # mark / last / index
 主循环每根 bar 前检查两个熔断条件（`_check_safety_gates`）：
 
 - **Kill Switch**：检测到 `KILL_SWITCH_FILE` 指定的文件存在时，立即停止所有新开仓
-- **单日最大亏损**：当日权益回撤超过 `DAILY_MAX_LOSS_PCT` 时熔断，跨 UTC 日自动重置
+- **单日最大亏损**：当日权益回撤超过 `MAX_DAILY_LOSS_PCT` 时熔断，跨 UTC 日自动重置
 
 熔断触发后只拒绝新开仓，平仓 / 止损照常执行。
 
 ```env
-DAILY_MAX_LOSS_PCT=0.05                          # 单日最大亏损 5% 触发熔断
+MAX_DAILY_LOSS_PCT=0.05                          # 单日最大亏损 5% 触发熔断
 KILL_SWITCH_FILE=logs/kill_switch.flag           # 该文件存在即停止开仓
 ```
 

@@ -284,6 +284,9 @@ class LiveRuntimeStateTests(unittest.TestCase):
                 return {"state": "filled"}
 
         class Core:
+            def get_state(self):
+                return 2.0, 100.0, 1
+
             def get_risk_thresholds(self):
                 return 0.03, 0.01
 
@@ -298,19 +301,75 @@ class LiveRuntimeStateTests(unittest.TestCase):
         trader.loss_guard_exit_bars = 0
         trader.last_bar_ts = pd.Timestamp("2026-07-12T00:00:00Z")
         trader.last_execution = {}
+        trader.last_dashboard_account = {}
+        trader.last_signal_snapshot = {}
 
         with patch("run.live_trading_monitor.config.EXCHANGE_TPSL_ENABLED", True):
             with patch("run.live_trading_monitor.config.LEVERAGE", 3):
                 with patch("run.live_trading_monitor.config.STOP_LOSS_COOLDOWN_BARS", 12):
                     with patch.object(trader, "_sync_after_trade", return_value=True):
                         with patch.object(trader, "_persist_last_bar_state"):
-                            with patch("run.live_trading_monitor.notify_important"):
-                                triggered = trader.run_realtime_risk_check()
+                            with patch.object(trader, "_record_trade_execution", return_value={"action": "CLOSE"}):
+                                with patch("run.live_trading_monitor.notify_important"):
+                                    triggered = trader.run_realtime_risk_check()
 
         self.assertTrue(triggered)
         self.assertEqual(trader.client.closed, (2.0, 3))
         self.assertEqual(trader.cooldown_bars_remaining, 12)
-        self.assertEqual(trader.last_execution["reason"], "StopLossRealtime")
+
+    def test_exchange_tpsl_execution_is_recorded_and_clears_algo(self):
+        class Client:
+            def fetch_algo_child_orders(self, algo_id):
+                return (
+                    {"algoId": algo_id, "state": "effective"},
+                    [{
+                        "ordId": "order-1",
+                        "state": "filled",
+                        "avgPx": "73.64",
+                        "accFillSz": "30.83",
+                        "side": "buy",
+                        "posSide": "short",
+                        "reduceOnly": "true",
+                    }],
+                )
+
+        class Core:
+            def set_state(self, *args, **kwargs):
+                self.state = (args, kwargs)
+
+        trader = LiveTrader.__new__(LiveTrader)
+        trader.client = Client()
+        trader.core = Core()
+        trader._active_algo_id = "algo-1"
+        trader._tpsl_coverage_verified = True
+        trader.hold_bars = 10
+        trader.cooldown_bars_remaining = 0
+        trader.reverse_signal_bars = 0
+        trader.loss_guard_exit_bars = 0
+        trader.last_bar_ts = pd.Timestamp("2026-07-17T13:10:00Z")
+        trader.last_dashboard_account = {"total_eq": 1000.0}
+        trader.last_signal_snapshot = {"short_prob": 0.9}
+
+        with patch("run.live_trading_monitor.config.LOT_SIZE", 0.01):
+            with patch("run.live_trading_monitor.config.TAKE_PROFIT_COOLDOWN_BARS", 6):
+                with patch("run.live_trading_monitor.trade_record_exists", return_value=False):
+                    with patch.object(trader, "_get_account_snapshot", return_value={"total_eq": 1059.0}):
+                        with patch.object(trader, "_record_trade_execution", return_value={}) as record:
+                            with patch.object(trader, "_persist_last_bar_state"):
+                                with patch("run.live_trading_monitor.notify_important"):
+                                    reconciled = trader._reconcile_exchange_tpsl_execution(
+                                        0.0,
+                                        0.0,
+                                        tracked_pos_qty=-30.83,
+                                        tracked_entry_price=75.63,
+                                    )
+
+        self.assertTrue(reconciled)
+        self.assertEqual(trader._active_algo_id, "")
+        self.assertTrue(trader._tpsl_coverage_verified)
+        self.assertEqual(trader.cooldown_bars_remaining, 6)
+        self.assertEqual(record.call_args.kwargs["reason"], "TakeProfitExchange")
+        self.assertAlmostEqual(record.call_args.kwargs["delta_qty"], 30.83)
 
 
 class OkxOrderHelperTests(unittest.TestCase):
@@ -334,6 +393,29 @@ class OkxOrderHelperTests(unittest.TestCase):
         self.assertFalse(order_is_filled({"state": "live"}))
         self.assertFalse(order_is_filled({"state": "canceled"}))
         self.assertFalse(order_is_filled(None))
+
+    def test_cancel_algo_order_accepts_already_terminal_51400(self):
+        client = OKXClient.__new__(OKXClient)
+        client.trade_api = type("TradeAPI", (), {
+            "cancel_algo_order": staticmethod(
+                lambda params: {"code": "1", "data": [{"sCode": "51400"}]}
+            )
+        })()
+        client._call_with_retry = lambda _label, func: func()
+
+        self.assertTrue(client.cancel_algo_order("algo-filled"))
+
+    def test_fetch_algo_child_orders_deduplicates_fallback_order_id(self):
+        client = OKXClient.__new__(OKXClient)
+        detail = {"algoId": "algo-1", "ordId": "order-1", "ordIdList": ["order-1"]}
+
+        with patch.object(OKXClient, "get_algo_order_details", return_value=detail):
+            with patch.object(OKXClient, "get_order_by_id", return_value={"ordId": "order-1"}) as get_order:
+                returned_detail, orders = client.fetch_algo_child_orders("algo-1")
+
+        self.assertEqual(returned_detail, detail)
+        self.assertEqual(orders, [{"ordId": "order-1"}])
+        get_order.assert_called_once_with("order-1")
 
     def test_wait_until_filled_returns_when_state_becomes_filled(self):
         client = OKXClient.__new__(OKXClient)

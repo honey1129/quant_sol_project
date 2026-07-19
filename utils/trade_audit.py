@@ -303,6 +303,19 @@ def append_trade_record(record, path=LIVE_FILLS_PATH):
         f.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
 
 
+def trade_record_exists(*, ord_id=None, cl_ord_id=None, path=LIVE_FILLS_PATH):
+    ord_id = str(ord_id or "")
+    cl_ord_id = str(cl_ord_id or "")
+    if not ord_id and not cl_ord_id:
+        return False
+    for record in load_trade_records(path):
+        if ord_id and str(record.get("ord_id") or "") == ord_id:
+            return True
+        if cl_ord_id and str(record.get("cl_ord_id") or "") == cl_ord_id:
+            return True
+    return False
+
+
 def load_trade_records(path=LIVE_FILLS_PATH):
     if not os.path.exists(path):
         return []

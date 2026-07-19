@@ -27,7 +27,7 @@ except ModuleNotFoundError:
     fake_okx = types.ModuleType("okx")
     fake_okx.__path__ = []
     sys.modules["okx"] = fake_okx
-    for name in ("Account", "Trade", "MarketData", "PublicData"):
+    for name in ("Account", "Trade", "MarketData", "PublicData", "TradingData"):
         module = types.ModuleType(f"okx.{name}")
         sys.modules[f"okx.{name}"] = module
 
@@ -37,6 +37,9 @@ from core.okx_api import cap_size_by_available_margin, floor_size_to_lot, is_ins
 class OKXMarginSizingTests(unittest.TestCase):
     def test_floor_size_to_lot_rounds_down(self):
         self.assertAlmostEqual(floor_size_to_lot(1.239, 0.01), 1.23)
+
+    def test_floor_size_to_lot_preserves_exact_lot_multiple(self):
+        self.assertEqual(floor_size_to_lot(30.83, 0.01), 30.83)
 
     def test_cap_size_by_available_margin_reduces_oversized_open(self):
         capped_size, required_margin, usable_margin, was_capped = cap_size_by_available_margin(

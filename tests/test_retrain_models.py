@@ -63,6 +63,16 @@ def build_summary(**overrides):
 
 
 class RetrainBacktestValidationTests(unittest.TestCase):
+    def test_hard_gates_cannot_drop_below_absolute_safety_floor(self):
+        self.assertGreaterEqual(
+            retrain_models.HARD_MIN_CLOSED_TRADES,
+            retrain_models.ABSOLUTE_MIN_CLOSED_TRADES,
+        )
+        self.assertGreaterEqual(
+            retrain_models.HARD_MIN_PROFIT_FACTOR,
+            retrain_models.ABSOLUTE_MIN_PROFIT_FACTOR,
+        )
+
     def test_validation_accepts_trade_performance_metrics(self):
         retrain_models.validate_backtest_summary(build_summary())
 

@@ -7,6 +7,7 @@ from utils.trade_audit import (
     append_trade_record,
     build_trade_record,
     load_trade_records,
+    trade_record_exists,
     write_daily_report,
 )
 
@@ -64,6 +65,15 @@ class TradeAuditTests(unittest.TestCase):
             records = load_trade_records(path)
             self.assertEqual(len(records), 2)
             self.assertEqual(records[0]["action"], "OPEN")
+
+    def test_trade_record_exists_matches_exchange_order_id(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "fills.jsonl")
+            append_trade_record({"ord_id": "order-1", "cl_ord_id": "client-1"}, path=path)
+
+            self.assertTrue(trade_record_exists(ord_id="order-1", path=path))
+            self.assertTrue(trade_record_exists(cl_ord_id="client-1", path=path))
+            self.assertFalse(trade_record_exists(ord_id="order-2", path=path))
 
     def test_daily_report_writes_markdown_and_json(self):
         with tempfile.TemporaryDirectory() as tmpdir:

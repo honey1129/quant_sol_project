@@ -16,7 +16,12 @@ from core.regime_filter import derive_market_regime
 from utils.utils import log_info, log_error, notify_important, BASE_DIR, LOGS_DIR
 from utils.utils import DISPLAY_TIMEZONE
 from utils.runtime_dashboard import write_runtime_dashboard_snapshot
-from utils.trade_audit import build_trade_record, append_trade_record, write_daily_report
+from utils.trade_audit import (
+    append_trade_record,
+    build_trade_record,
+    trade_record_exists,
+    write_daily_report,
+)
 from config import config
 from core.okx_api import OKXClient
 from core.position_manager import PositionManager
@@ -268,6 +273,8 @@ class LiveTrader:
 
         self._restored_take_profit = persisted.get("take_profit")
         self._restored_stop_loss = persisted.get("stop_loss")
+        self._restored_position_qty = persisted.get("position_qty")
+        self._restored_entry_price = persisted.get("entry_price")
         self._restored_algo_id = str(persisted.get("active_algo_id", "") or "")
         self._startup_position_verified = False
         self._startup_position_qty = None
@@ -1557,6 +1564,146 @@ class LiveTrader:
             self._tpsl_coverage_verified = False
         return bool(canceled)
 
+    @staticmethod
+    def _exchange_tpsl_reason(pos_qty_before, entry_price_before, order):
+        fill_price = float(order.get("avgPx") or order.get("fillPx") or 0)
+        if fill_price <= 0 or float(entry_price_before) <= 0:
+            return "ExchangeTPSL"
+        profitable = (
+            fill_price >= float(entry_price_before)
+            if float(pos_qty_before) > 0
+            else fill_price <= float(entry_price_before)
+        )
+        return "TakeProfitExchange" if profitable else "StopLossExchange"
+
+    def _reconcile_exchange_tpsl_execution(
+        self,
+        actual_pos_qty,
+        actual_entry_price,
+        *,
+        tracked_pos_qty=None,
+        tracked_entry_price=None,
+    ):
+        algo_id = str(getattr(self, "_active_algo_id", "") or "")
+        if not algo_id:
+            return False
+
+        if tracked_pos_qty is None or tracked_entry_price is None:
+            tracked_pos_qty, tracked_entry_price, _ = self.core.get_state()
+        tracked_pos_qty = float(tracked_pos_qty or 0)
+        tracked_entry_price = float(tracked_entry_price or 0)
+        actual_pos_qty = float(actual_pos_qty or 0)
+        actual_entry_price = float(actual_entry_price or 0)
+        tolerance = max(1e-9, float(config.LOT_SIZE) / 2.0)
+        same_side = (
+            abs(actual_pos_qty) <= tolerance
+            or tracked_pos_qty * actual_pos_qty > 0
+        )
+        reduced_qty = abs(tracked_pos_qty) - abs(actual_pos_qty)
+        if abs(tracked_pos_qty) <= tolerance or not same_side or reduced_qty <= tolerance:
+            return False
+
+        try:
+            algo_detail, child_orders = self.client.fetch_algo_child_orders(algo_id)
+        except Exception as exc:
+            log_error(f"交易所 TP/SL 成交对账失败: algoId={algo_id}, err={exc}")
+            return False
+
+        filled_orders = [
+            order for order in child_orders
+            if float(order.get("accFillSz") or order.get("fillSz") or 0) > 0
+        ]
+        if not filled_orders:
+            return False
+
+        try:
+            account_after = self._get_account_snapshot()
+        except Exception as exc:
+            log_error(f"TP/SL 成交后账户快照获取失败，继续记录成交: {exc}")
+            account_after = dict(getattr(self, "last_dashboard_account", {}) or {})
+        account_before = dict(getattr(self, "last_dashboard_account", {}) or account_after)
+        signal_snapshot = dict(getattr(self, "last_signal_snapshot", {}) or {})
+        bar_ts = self.last_bar_ts or pd.Timestamp.now(tz="UTC")
+        running_pos_qty = tracked_pos_qty
+        recorded_reasons = []
+
+        for order in filled_orders:
+            fill_size = abs(float(order.get("accFillSz") or order.get("fillSz") or 0))
+            if fill_size <= 0:
+                continue
+            delta_qty = -fill_size if running_pos_qty > 0 else fill_size
+            next_pos_qty = running_pos_qty + delta_qty
+            if running_pos_qty * next_pos_qty < 0 or abs(next_pos_qty) <= tolerance:
+                next_pos_qty = 0.0
+            reason = self._exchange_tpsl_reason(running_pos_qty, tracked_entry_price, order)
+            recorded_reasons.append(reason)
+            if not trade_record_exists(
+                ord_id=order.get("ordId"),
+                cl_ord_id=order.get("clOrdId"),
+            ):
+                reference_price = float(order.get("avgPx") or order.get("fillPx") or 0)
+                self._record_trade_execution(
+                    order_result=order,
+                    action="CLOSE",
+                    reason=reason,
+                    delta_qty=delta_qty,
+                    reference_price=reference_price,
+                    bar_ts=bar_ts,
+                    signal_snapshot=signal_snapshot,
+                    decision={
+                        "action": "CLOSE",
+                        "reason": reason,
+                        "source": "exchange_tpsl",
+                        "algo_id": algo_id,
+                        "algo_state": (algo_detail or {}).get("state"),
+                    },
+                    account_before=account_before,
+                    pos_qty_before=running_pos_qty,
+                    entry_price_before=tracked_entry_price,
+                    account_after=account_after,
+                    pos_qty_after=next_pos_qty,
+                    entry_price_after=tracked_entry_price if next_pos_qty else 0.0,
+                )
+            running_pos_qty = next_pos_qty
+
+        self._active_algo_id = ""
+        self._tpsl_coverage_verified = abs(actual_pos_qty) <= tolerance
+        self.hold_bars = 0 if abs(actual_pos_qty) <= tolerance else int(self.hold_bars)
+        if any(reason.startswith("StopLoss") for reason in recorded_reasons):
+            self.cooldown_bars_remaining = max(
+                int(self.cooldown_bars_remaining),
+                int(config.STOP_LOSS_COOLDOWN_BARS),
+            )
+        elif recorded_reasons:
+            self.cooldown_bars_remaining = max(
+                int(self.cooldown_bars_remaining),
+                int(config.TAKE_PROFIT_COOLDOWN_BARS),
+            )
+        self.reverse_signal_bars = 0
+        self.loss_guard_exit_bars = 0
+        self.core.set_state(
+            actual_pos_qty,
+            actual_entry_price,
+            self.hold_bars,
+            cooldown_bars_remaining=self.cooldown_bars_remaining,
+            reverse_signal_bars=0,
+            loss_guard_exit_bars=0,
+        )
+        self._startup_position_verified = True
+        self._startup_position_qty = actual_pos_qty
+        self._startup_entry_price = actual_entry_price
+        self._restored_position_qty = actual_pos_qty
+        self._restored_entry_price = actual_entry_price
+        self._persist_last_bar_state(self.last_bar_ts)
+        notify_important(
+            "[交易所TP/SL成交已对账]\n"
+            f"原因: {recorded_reasons[-1] if recorded_reasons else 'ExchangeTPSL'}\n"
+            f"算法单: {algo_id}\n"
+            f"原仓位: {tracked_pos_qty:.6f}\n"
+            f"当前仓位: {actual_pos_qty:.6f}"
+        )
+        return True
+
     def _reconcile_exchange_tpsl_on_startup(self):
         if not bool(config.EXCHANGE_TPSL_ENABLED):
             self._tpsl_coverage_verified = True
@@ -1565,6 +1712,24 @@ class LiveTrader:
             self._tpsl_coverage_verified = False
             return False
 
+        qty = float(self._startup_position_qty)
+        tolerance = max(1e-9, float(config.LOT_SIZE) / 2.0)
+        restored_qty = getattr(self, "_restored_position_qty", None)
+        restored_entry = getattr(self, "_restored_entry_price", None)
+        if (
+            self._active_algo_id
+            and restored_qty is not None
+            and abs(float(restored_qty)) - abs(qty) > tolerance
+        ):
+            self._reconcile_exchange_tpsl_execution(
+                qty,
+                self._startup_entry_price,
+                tracked_pos_qty=restored_qty,
+                tracked_entry_price=restored_entry,
+            )
+            if abs(qty) <= tolerance and not self._active_algo_id:
+                return True
+
         try:
             pending = self.client.list_pending_tpsl_algo_orders()
         except Exception as exc:
@@ -1572,8 +1737,6 @@ class LiveTrader:
             log_error(f"启动时无法核验交易所 TP/SL 覆盖: {exc}")
             return False
 
-        qty = float(self._startup_position_qty)
-        tolerance = max(1e-9, float(config.LOT_SIZE) / 2.0)
         if abs(qty) <= tolerance:
             all_canceled = True
             for order in pending:
@@ -1663,10 +1826,19 @@ class LiveTrader:
 
     def run_realtime_risk_check(self):
         """Check local TP/SL against a live ticker independently of bar generation."""
+        tracked_pos_qty, tracked_entry_price, _ = self.core.get_state()
         pos_qty, entry_price = self._get_net_position()
         if pos_qty is None:
             log_error("实时风控检测到双边仓位，交由仓位恢复流程处理。")
             return False
+        reconciled_tpsl = self._reconcile_exchange_tpsl_execution(
+            pos_qty,
+            entry_price,
+            tracked_pos_qty=tracked_pos_qty,
+            tracked_entry_price=tracked_entry_price,
+        )
+        if reconciled_tpsl and abs(float(pos_qty)) < 1e-9:
+            return True
         if abs(float(pos_qty)) < 1e-9 or float(entry_price) <= 0:
             return False
 
@@ -1704,6 +1876,10 @@ class LiveTrader:
             f"实时风控触发 {reason}: price={price:.6f}, entry={float(entry_price):.6f}, "
             f"pnl={pnl_pct:.4%}"
         )
+        try:
+            account_before = self._get_account_snapshot()
+        except Exception:
+            account_before = dict(getattr(self, "last_dashboard_account", {}) or {})
         self._cancel_exchange_tpsl()
         leverage = int(config.LEVERAGE)
         if pos_qty > 0:
@@ -1724,12 +1900,33 @@ class LiveTrader:
         if not self._sync_after_trade():
             raise RuntimeError("实时风控平仓后仓位状态无法确认")
         self._tpsl_coverage_verified = True
-        self.last_execution = {
-            "action": "CLOSE",
-            "reason": reason,
-            "success": True,
-            "timestamp": normalize_ts(pd.Timestamp.now(tz="UTC")),
-        }
+        try:
+            account_after = self._get_account_snapshot()
+        except Exception:
+            account_after = account_before
+        trade_record = self._record_trade_execution(
+            order_result=success,
+            action="CLOSE",
+            reason=reason,
+            delta_qty=-float(pos_qty),
+            reference_price=price,
+            bar_ts=pd.Timestamp.now(tz="UTC"),
+            signal_snapshot=dict(getattr(self, "last_signal_snapshot", {}) or {}),
+            decision={"action": "CLOSE", "reason": reason, "source": "local_realtime_risk"},
+            account_before=account_before,
+            pos_qty_before=float(pos_qty),
+            entry_price_before=float(entry_price),
+            account_after=account_after,
+            pos_qty_after=0.0,
+            entry_price_after=0.0,
+        )
+        if trade_record is None:
+            self.last_execution = {
+                "action": "CLOSE",
+                "reason": reason,
+                "success": True,
+                "timestamp": normalize_ts(pd.Timestamp.now(tz="UTC")),
+            }
         self._persist_last_bar_state(self.last_bar_ts)
         notify_important(
             "[实时风控平仓]\n"

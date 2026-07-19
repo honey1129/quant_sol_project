@@ -1,6 +1,8 @@
 import math
 import time
 import uuid
+from decimal import Decimal, ROUND_FLOOR
+
 import pandas as pd
 from config import config
 import okx.Account as Account
@@ -60,11 +62,12 @@ class OrderStateUnknownError(RuntimeError):
 
 
 def floor_size_to_lot(size, lot_size):
-    size = float(size)
-    lot_size = float(lot_size)
-    if lot_size <= 0:
+    size_decimal = Decimal(str(size))
+    lot_decimal = Decimal(str(lot_size))
+    if lot_decimal <= 0:
         raise ValueError("lot_size must be positive")
-    return round(math.floor(size / lot_size) * lot_size, 6)
+    steps = (size_decimal / lot_decimal).to_integral_value(rounding=ROUND_FLOOR)
+    return float(steps * lot_decimal)
 
 
 def cap_size_by_available_margin(
@@ -1143,7 +1146,7 @@ class OKXClient:
             return None
 
         lot_size = float(config.LOT_SIZE)
-        sz_floors = round(math.floor(float(sz) / lot_size) * lot_size, 6)
+        sz_floors = floor_size_to_lot(sz, lot_size)
         if sz_floors <= 0:
             log_error(f"place_tpsl_algo_order: 下单数量为0，跳过")
             return None
@@ -1201,6 +1204,54 @@ class OKXClient:
             orders = [item for item in orders if str(item.get("posSide", "")) == str(pos_side)]
         return orders
 
+    def get_algo_order_details(self, algo_id):
+        if not algo_id:
+            return None
+        result = self._call_with_retry(
+            "查询 TP/SL 算法单详情",
+            lambda: self.trade_api.get_algo_order_details(algoId=str(algo_id)),
+        )
+        if str(result.get("code", "")) != "0":
+            raise RuntimeError(f"查询 TP/SL 算法单详情失败: {result}")
+        data = result.get("data", []) or []
+        return data[0] if data else None
+
+    def get_order_by_id(self, ord_id):
+        if not ord_id:
+            return None
+        result = self._call_with_retry(
+            "按 ordId 查询订单",
+            lambda: self.trade_api.get_order(instId=config.SYMBOL, ordId=str(ord_id)),
+        )
+        if str(result.get("code", "")) != "0":
+            raise RuntimeError(f"按 ordId 查询订单失败: {result}")
+        data = result.get("data", []) or []
+        return self._attach_order_fills(data[0]) if data else None
+
+    def fetch_algo_child_orders(self, algo_id):
+        detail = self.get_algo_order_details(algo_id)
+        if not detail:
+            return None, []
+
+        order_ids = detail.get("ordIdList") or []
+        if isinstance(order_ids, str):
+            order_ids = [order_ids] if order_ids else []
+        fallback_order_id = str(detail.get("ordId", "") or "")
+        if fallback_order_id:
+            order_ids = list(order_ids) + [fallback_order_id]
+
+        child_orders = []
+        seen = set()
+        for order_id in order_ids:
+            order_id = str(order_id or "")
+            if not order_id or order_id in seen:
+                continue
+            seen.add(order_id)
+            order = self.get_order_by_id(order_id)
+            if order:
+                child_orders.append(order)
+        return detail, child_orders
+
     def cancel_algo_order(
         self,
         algo_id: str,
@@ -1238,10 +1289,10 @@ class OKXClient:
                     time.sleep(poll_interval_sec)
                 log_error(f"⚠ TP/SL 撤单请求已受理但未确认终态: algoId={algo_id}")
                 return False
-            # 51603: 算法单不存在（可能已触发或已撤销），视为成功
+            # 51400/51603/51609: 算法单已触发、已撤销或不存在，都已是终态。
             data = result.get("data", [{}])
             s_code = data[0].get("sCode", "") if data else ""
-            if s_code in ("51603", "51609"):
+            if s_code in ("51400", "51603", "51609"):
                 log_info(f"交易所端 TP/SL 算法单不存在（已触发/已撤），algoId={algo_id}")
                 return True
             log_error(f"⚠ 撤销 TP/SL 算法单失败: {result}")
