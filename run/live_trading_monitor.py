@@ -571,8 +571,9 @@ class LiveTrader:
         long_prob, short_prob = float(avg[1]), float(avg[0])
         return long_prob, short_prob
 
-    def _get_latest_features(self):
-        data_dict = self.client.fetch_data()
+    def _get_latest_features(self, client=None):
+        data_client = client or self.client
+        data_dict = data_client.fetch_data()
         merged_df = ml_feature_engineering.merge_multi_period_features(data_dict)
         merged_df = ml_feature_engineering.add_advanced_features(merged_df)
         merged_df = merged_df.dropna().copy()
@@ -584,7 +585,7 @@ class LiveTrader:
         row = merged_df.iloc[-1]
         bar_ts = ensure_utc_timestamp(merged_df.index[-1])
         try:
-            price = float(self.client.get_price())
+            price = float(data_client.get_price())
         except Exception as exc:
             log_error(f"get_price 失败，回退使用 bar 收盘价: {exc}")
             price = float(row["5m_close"])
@@ -2075,8 +2076,21 @@ class LiveTrader:
         return False
 
     def run_once_on_new_bar(self):
+        return self._process_latest_features(self._get_latest_features())
+
+    def _process_latest_features(self, latest_features):
         self.loop_count += 1
-        bar_ts, price, long_prob, short_prob, money_flow_ratio, volatility, atr_ratio, trend_context, regime_context = self._get_latest_features()
+        (
+            bar_ts,
+            price,
+            long_prob,
+            short_prob,
+            money_flow_ratio,
+            volatility,
+            atr_ratio,
+            trend_context,
+            regime_context,
+        ) = latest_features
         signal_snapshot = {
             "long_prob": float(long_prob),
             "short_prob": float(short_prob),
@@ -2458,6 +2472,7 @@ class LiveTrader:
 
 def run():
     import atexit
+    from concurrent.futures import ThreadPoolExecutor
     POLL_SEC = max(1, int(config.POLL_SEC))
     BAR_POLL_SEC = max(POLL_SEC, int(getattr(config, "BAR_POLL_SEC", 10)))
 
@@ -2542,36 +2557,50 @@ def run():
         "🟢 Live trading monitor started "
         f"(risk_poll_sec={POLL_SEC}, bar_poll_sec={BAR_POLL_SEC})"
     )
+    bar_client = OKXClient()
+    bar_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bar-features")
+    bar_future = None
     next_bar_poll_at = 0.0
-    while True:
-        try:
-            risk_check_started_at = time.monotonic()
+    try:
+        while True:
             try:
-                risk_action_executed = trader.run_realtime_risk_check()
-            finally:
-                trader._record_realtime_risk_timing(risk_check_started_at)
-            now = time.monotonic()
-            if not risk_action_executed and now >= next_bar_poll_at:
-                trader.run_once_on_new_bar()
-                next_bar_poll_at = time.monotonic() + BAR_POLL_SEC
-            trader.consecutive_loop_errors = 0
-            trader.last_error_notified_count = 0
-        except Exception as e:
-            trader.consecutive_loop_errors += 1
-            trader._write_dashboard_snapshot(
-                runtime_status="error",
-                latest_closed_bar_ts=trader.last_bar_ts,
-                decision={
-                    "action": "ERROR",
-                    "reason": "LoopException",
-                },
-                error_message=str(e),
-            )
-            log_error(f"实盘循环异常: {e}")
-            log_error(traceback.format_exc())
-            trader._notify_consecutive_loop_error(e)
+                risk_check_started_at = time.monotonic()
+                try:
+                    trader.run_realtime_risk_check()
+                finally:
+                    trader._record_realtime_risk_timing(risk_check_started_at)
 
-        time.sleep(int(POLL_SEC))
+                if bar_future is not None and bar_future.done():
+                    completed_future = bar_future
+                    bar_future = None
+                    try:
+                        trader._process_latest_features(completed_future.result())
+                    finally:
+                        next_bar_poll_at = time.monotonic() + BAR_POLL_SEC
+
+                if bar_future is None and time.monotonic() >= next_bar_poll_at:
+                    bar_future = bar_executor.submit(trader._get_latest_features, bar_client)
+
+                trader.consecutive_loop_errors = 0
+                trader.last_error_notified_count = 0
+            except Exception as e:
+                trader.consecutive_loop_errors += 1
+                trader._write_dashboard_snapshot(
+                    runtime_status="error",
+                    latest_closed_bar_ts=trader.last_bar_ts,
+                    decision={
+                        "action": "ERROR",
+                        "reason": "LoopException",
+                    },
+                    error_message=str(e),
+                )
+                log_error(f"实盘循环异常: {e}")
+                log_error(traceback.format_exc())
+                trader._notify_consecutive_loop_error(e)
+
+            time.sleep(int(POLL_SEC))
+    finally:
+        bar_executor.shutdown(wait=False, cancel_futures=True)
 
 
 if __name__ == "__main__":

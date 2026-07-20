@@ -161,6 +161,18 @@ class LiveRuntimeStateTests(unittest.TestCase):
         mock_log_error.assert_called_once()
         self.assertIn("interval=5000ms", mock_log_error.call_args.args[0])
 
+    def test_run_once_fetches_features_before_processing_them(self):
+        trader = LiveTrader.__new__(LiveTrader)
+        latest_features = object()
+
+        with patch.object(trader, "_get_latest_features", return_value=latest_features) as mock_fetch:
+            with patch.object(trader, "_process_latest_features", return_value="processed") as mock_process:
+                result = trader.run_once_on_new_bar()
+
+        self.assertEqual(result, "processed")
+        mock_fetch.assert_called_once_with()
+        mock_process.assert_called_once_with(latest_features)
+
     def test_write_dashboard_snapshot_preserves_last_position_when_not_provided(self):
         trader = LiveTrader.__new__(LiveTrader)
         trader.loop_count = 3
