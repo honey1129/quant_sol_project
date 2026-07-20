@@ -977,18 +977,19 @@ class OKXClient:
 
         for attempt in range(max_retry):
             # 重试时先查既有订单：避免重复下单（幂等保护）
-            existing_order = self.get_order_by_client_id(cl_ord_id)
-            if order_is_filled(existing_order):
-                log_info(f"✅ 订单已成交（查询确认，sz模式）: clOrdId={cl_ord_id}, state={existing_order.get('state')}")
-                return self._attach_order_fills(existing_order)
-            if order_is_terminal(existing_order):
-                return self._terminal_order_result(existing_order)
-            if order_is_acknowledged(existing_order):
-                final_order = self.wait_until_filled(cl_ord_id, fill_timeout_sec)
-                if final_order is not None:
-                    log_info(f"✅ 订单已受理后成交(sz模式): clOrdId={cl_ord_id}")
-                    return final_order
-                return False
+            if attempt > 0:
+                existing_order = self.get_order_by_client_id(cl_ord_id)
+                if order_is_filled(existing_order):
+                    log_info(f"✅ 订单已成交（查询确认，sz模式）: clOrdId={cl_ord_id}, state={existing_order.get('state')}")
+                    return self._attach_order_fills(existing_order)
+                if order_is_terminal(existing_order):
+                    return self._terminal_order_result(existing_order)
+                if order_is_acknowledged(existing_order):
+                    final_order = self.wait_until_filled(cl_ord_id, fill_timeout_sec)
+                    if final_order is not None:
+                        log_info(f"✅ 订单已受理后成交(sz模式): clOrdId={cl_ord_id}")
+                        return final_order
+                    return False
 
             try:
                 if not reduce_only:
@@ -1087,23 +1088,31 @@ class OKXClient:
     def open_long_sz(self, sz, leverage):
         return self.place_order_with_size("buy", "long", sz, leverage, reduce_only=False)
 
-    def close_long_sz(self, sz, leverage):
-        long_pos, _ = self.get_position()
-        if long_pos['size'] <= 0:
+    def close_long_sz(self, sz, leverage, known_position_size=None):
+        if known_position_size is None:
+            long_pos, _ = self.get_position()
+            position_size = float(long_pos['size'])
+        else:
+            position_size = max(0.0, float(known_position_size))
+        if position_size <= 0:
             log_info("🟢 无多仓位，跳过平多")
             return False
-        close_size = min(float(sz), float(long_pos['size']))
+        close_size = min(float(sz), position_size)
         return self.place_order_with_size("sell", "long", close_size, leverage, reduce_only=True)
 
     def open_short_sz(self, sz, leverage):
         return self.place_order_with_size("sell", "short", sz, leverage, reduce_only=False)
 
-    def close_short_sz(self, sz, leverage):
-        _, short_pos = self.get_position()
-        if short_pos['size'] <= 0:
+    def close_short_sz(self, sz, leverage, known_position_size=None):
+        if known_position_size is None:
+            _, short_pos = self.get_position()
+            position_size = float(short_pos['size'])
+        else:
+            position_size = max(0.0, float(known_position_size))
+        if position_size <= 0:
             log_info("🟢 无空仓位，跳过平空")
             return False
-        close_size = min(float(sz), float(short_pos['size']))
+        close_size = min(float(sz), position_size)
         return self.place_order_with_size("buy", "short", close_size, leverage, reduce_only=True)
 
     # ─────────────────────────────────────────────────────────────

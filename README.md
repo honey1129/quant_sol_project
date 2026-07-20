@@ -272,7 +272,7 @@ MODEL_WALK_FORWARD_ENABLED=False           # 当模型 recall ≈ 0 时可关闭
 
 - `reduceOnly=True`，只平仓不反向开仓
 - 触发价类型为 **mark price**（`TPSL_TRIGGER_PX_TYPE=mark`），比 last price 抗插针
-- 平仓 / 反手前会先撤销残留算法单，避免旧止损单触发后意外反向开仓
+- 常规平仓 / 反手前先撤销残留算法单；本地实时风控先提交 `reduceOnly` 紧急平仓，成交后再清理 OCO，避免撤单确认阻塞止损
 - 若算法单下单失败，会立即市价平掉刚开的仓位（`_close_unprotected_position`），绝不留裸仓
 
 ```env
@@ -285,6 +285,8 @@ OKX_WEBSOCKET_STALE_SEC=5            # 缓存超过该时长自动降级到 REST
 ```
 
 运行快照同时记录本地风控检查的最近/最大耗时、相邻间隔和累计慢检查次数。实时价格与仓位由 OKX public/private WebSocket 推送，数据断流或过期时自动降级到 REST。多周期行情拉取与特征计算在独立只读工作线程执行，不阻塞本地实时风控；策略状态更新和交易决策仍由主线程串行执行。持仓期间若实际检查间隔超过阈值，主日志与 Dashboard 观测接口会产生 `risk_loop_latency` 告警；交易所端 OCO 保护不依赖该本地循环。
+
+成交审计会记录触发来源、止盈/止损阈值、检测价格、下单确认耗时、触发到成交耗时，以及检测阶段、订单执行阶段和阈值到成交的分段滑点。每日复盘的最近成交表会直接展示阈值滑点与触发到成交耗时。
 
 ### 账户级熔断与 Kill Switch
 
@@ -406,7 +408,7 @@ cd dashboard-ui && npm install && npm run dev
 | 文件 | 说明 |
 |------|------|
 | `logs/live_trading.log` | 主日志，每根 bar 的完整决策诊断 |
-| `logs/live_fills.jsonl` | 真实成交结构化记录（含原始订单、PnL、信号快照） |
+| `logs/live_fills.jsonl` | 真实成交结构化记录（含原始订单、PnL、信号快照、触发延迟与分段滑点） |
 | `logs/daily_reports/YYYY-MM-DD.md` | 每日成交复盘（按原因、方向归因） |
 | `logs/live_trading_state.json` | 持久化状态（最近 bar 时间戳、冷却期） |
 | `logs/model_retrain_*.log` | 每次重训详细日志 |

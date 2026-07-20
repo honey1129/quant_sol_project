@@ -169,8 +169,8 @@ class LiveRuntimeStateTests(unittest.TestCase):
             def get_price(self):
                 raise AssertionError("REST price should not be used")
 
-            def close_long_sz(self, qty, leverage):
-                self.closed = (qty, leverage)
+            def close_long_sz(self, qty, leverage, known_position_size=None):
+                self.closed = (qty, leverage, known_position_size)
                 return {"state": "filled"}
 
         class Stream:
@@ -218,7 +218,7 @@ class LiveRuntimeStateTests(unittest.TestCase):
                                 triggered = trader.run_realtime_risk_check()
 
         self.assertTrue(triggered)
-        self.assertEqual(trader.client.closed, (2.0, 3))
+        self.assertEqual(trader.client.closed, (2.0, 3, 2.0))
         self.assertEqual(trader.last_risk_position_source, "websocket")
         self.assertEqual(trader.last_risk_price_source, "websocket")
 
@@ -391,6 +391,7 @@ class LiveRuntimeStateTests(unittest.TestCase):
         class Client:
             def __init__(self):
                 self.closed = None
+                self.events = []
 
             def get_position(self):
                 return (
@@ -401,9 +402,14 @@ class LiveRuntimeStateTests(unittest.TestCase):
             def get_price(self):
                 return 98.0
 
-            def close_long_sz(self, qty, leverage):
-                self.closed = (qty, leverage)
+            def close_long_sz(self, qty, leverage, known_position_size=None):
+                self.events.append("close")
+                self.closed = (qty, leverage, known_position_size)
                 return {"state": "filled"}
+
+            def cancel_algo_order(self, algo_id):
+                self.events.append("cancel")
+                return True
 
         class Core:
             def get_state(self):
@@ -415,7 +421,7 @@ class LiveRuntimeStateTests(unittest.TestCase):
         trader = LiveTrader.__new__(LiveTrader)
         trader.client = Client()
         trader.core = Core()
-        trader._active_algo_id = ""
+        trader._active_algo_id = "algo-1"
         trader._tpsl_coverage_verified = True
         trader._last_tpsl_reconcile_at = None
         trader.cooldown_bars_remaining = 0
@@ -431,19 +437,35 @@ class LiveRuntimeStateTests(unittest.TestCase):
                 with patch("run.live_trading_monitor.config.STOP_LOSS_COOLDOWN_BARS", 12):
                     with patch.object(trader, "_sync_after_trade", return_value=True):
                         with patch.object(trader, "_persist_last_bar_state"):
-                            with patch.object(trader, "_record_trade_execution", return_value={"action": "CLOSE"}):
+                            with patch.object(trader, "_record_trade_execution", return_value={"action": "CLOSE"}) as record:
                                 with patch("run.live_trading_monitor.notify_important"):
                                     triggered = trader.run_realtime_risk_check()
 
         self.assertTrue(triggered)
-        self.assertEqual(trader.client.closed, (2.0, 3))
+        self.assertEqual(trader.client.closed, (2.0, 3, 2.0))
+        self.assertEqual(trader.client.events, ["close", "cancel"])
+        self.assertEqual(trader._active_algo_id, "")
         self.assertEqual(trader.cooldown_bars_remaining, 12)
+        self.assertAlmostEqual(record.call_args.kwargs["reference_price"], 98.0)
+        execution_context = record.call_args.kwargs["execution_context"]
+        self.assertEqual(execution_context["trigger_source"], "local_realtime_risk")
+        self.assertEqual(execution_context["trigger_type"], "sl")
+        self.assertAlmostEqual(execution_context["trigger_price"], 98.0)
+        self.assertAlmostEqual(execution_context["threshold_price"], 99.0)
+        self.assertGreaterEqual(execution_context["order_round_trip_ms"], 0.0)
 
     def test_exchange_tpsl_execution_is_recorded_and_clears_algo(self):
         class Client:
             def fetch_algo_child_orders(self, algo_id):
                 return (
-                    {"algoId": algo_id, "state": "effective"},
+                    {
+                        "algoId": algo_id,
+                        "state": "effective",
+                        "actualSide": "tp",
+                        "triggerTime": "1784293908300",
+                        "tpTriggerPx": "73.70",
+                        "slTriggerPx": "76.10",
+                    },
                     [{
                         "ordId": "order-1",
                         "state": "filled",
@@ -492,9 +514,47 @@ class LiveRuntimeStateTests(unittest.TestCase):
         self.assertEqual(trader.cooldown_bars_remaining, 6)
         self.assertEqual(record.call_args.kwargs["reason"], "TakeProfitExchange")
         self.assertAlmostEqual(record.call_args.kwargs["delta_qty"], 30.83)
+        self.assertAlmostEqual(record.call_args.kwargs["reference_price"], 73.70)
+        execution_context = record.call_args.kwargs["execution_context"]
+        self.assertEqual(execution_context["trigger_source"], "exchange_oco")
+        self.assertEqual(execution_context["trigger_type"], "tp")
+        self.assertEqual(execution_context["trigger_detected_at"], "1784293908300")
+        self.assertAlmostEqual(execution_context["threshold_price"], 73.70)
 
 
 class OkxOrderHelperTests(unittest.TestCase):
+    def test_reduce_only_size_order_skips_preflight_query_on_first_attempt(self):
+        client = OKXClient.__new__(OKXClient)
+
+        class TradeAPI:
+            @staticmethod
+            def place_order(**kwargs):
+                return {"code": "0", "data": [{"ordId": "order-1"}]}
+
+        client.trade_api = TradeAPI()
+        with patch("core.okx_api.config.LOT_SIZE", 0.01):
+            with patch.object(client, "get_order_by_client_id", side_effect=AssertionError("unexpected preflight query")):
+                with patch.object(client, "wait_until_filled", return_value={"state": "filled"}):
+                    result = client.place_order_with_size(
+                        "sell",
+                        "long",
+                        2.0,
+                        3,
+                        reduce_only=True,
+                        max_retry=1,
+                    )
+
+        self.assertEqual(result["state"], "filled")
+
+    def test_close_long_uses_known_position_without_rest_query(self):
+        client = OKXClient.__new__(OKXClient)
+        with patch.object(client, "get_position", side_effect=AssertionError("unexpected position query")):
+            with patch.object(client, "place_order_with_size", return_value={"state": "filled"}) as place:
+                result = client.close_long_sz(2.0, 3, known_position_size=2.5)
+
+        self.assertEqual(result["state"], "filled")
+        place.assert_called_once_with("sell", "long", 2.0, 3, reduce_only=True)
+
     def test_build_client_order_id_is_short_and_unique(self):
         cl_ord_id_1 = build_client_order_id("SOL-USDT-SWAP", "buy", "long", False)
         cl_ord_id_2 = build_client_order_id("SOL-USDT-SWAP", "buy", "long", False)

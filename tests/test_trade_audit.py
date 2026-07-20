@@ -55,6 +55,49 @@ class TradeAuditTests(unittest.TestCase):
         self.assertAlmostEqual(record["avail_eq_before"], 900.0)
         self.assertAlmostEqual(record["sizing_eq_after"], 960.0)
         self.assertEqual(record["risk_context"]["trend_bias"], "long")
+        self.assertEqual(record["schema_version"], 2)
+
+    def test_build_trade_record_calculates_realtime_execution_quality(self):
+        record = build_trade_record(
+            {
+                "state": "filled",
+                "side": "sell",
+                "posSide": "long",
+                "avgPx": "98.7",
+                "accFillSz": "2",
+                "fillTime": "1784304000250",
+            },
+            bar_ts="2026-07-17T16:00:00Z",
+            action="CLOSE",
+            reason="StopLossRealtime",
+            delta_qty=-2.0,
+            reference_price=98.8,
+            pos_qty_before=2.0,
+            entry_price_before=100.0,
+            pos_qty_after=0.0,
+            entry_price_after=0.0,
+            account_before={},
+            account_after={},
+            signal_snapshot={},
+            decision={"source": "local_realtime_risk"},
+            execution_context={
+                "trigger_source": "local_realtime_risk",
+                "trigger_type": "sl",
+                "trigger_detected_at": "1784304000000",
+                "trigger_price": 98.8,
+                "threshold_price": 99.0,
+                "order_round_trip_ms": 180.5,
+            },
+        )
+
+        quality = record["execution_quality"]
+        self.assertEqual(quality["trigger_source"], "local_realtime_risk")
+        self.assertEqual(quality["trigger_type"], "sl")
+        self.assertAlmostEqual(quality["trigger_to_fill_ms"], 250.0)
+        self.assertAlmostEqual(quality["order_round_trip_ms"], 180.5)
+        self.assertAlmostEqual(quality["detection_slippage_bps"], (99.0 - 98.8) / 99.0 * 10000)
+        self.assertAlmostEqual(quality["execution_slippage_bps"], (98.8 - 98.7) / 98.8 * 10000)
+        self.assertAlmostEqual(quality["threshold_to_fill_slippage_bps"], (99.0 - 98.7) / 99.0 * 10000)
 
     def test_append_and_load_records_round_trip(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -126,7 +169,10 @@ class TradeAuditTests(unittest.TestCase):
             self.assertTrue(os.path.exists(json_path))
             self.assertTrue(os.path.exists(md_path))
             with open(md_path, "r", encoding="utf-8") as f:
-                self.assertIn("每日交易复盘", f.read())
+                report = f.read()
+            self.assertIn("每日交易复盘", report)
+            self.assertIn("阈值滑点(bps)", report)
+            self.assertIn("触发到成交(ms)", report)
 
 
 if __name__ == "__main__":

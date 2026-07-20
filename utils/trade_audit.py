@@ -54,6 +54,29 @@ def normalize_ts(value=None):
     return ts.isoformat()
 
 
+def normalize_event_ts(value):
+    if value in ("", None):
+        return None
+    try:
+        if isinstance(value, (int, float)) or str(value).isdigit():
+            return pd.to_datetime(float(value), unit="ms", utc=True).isoformat()
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return normalize_ts(value)
+
+
+def elapsed_ms(start, end):
+    start_ts = normalize_event_ts(start)
+    end_ts = normalize_event_ts(end)
+    if start_ts is None or end_ts is None:
+        return None
+    try:
+        value = (pd.Timestamp(end_ts) - pd.Timestamp(start_ts)).total_seconds() * 1000.0
+    except Exception:
+        return None
+    return float(value) if value >= 0 else None
+
+
 def display_date(value):
     ts = pd.Timestamp(normalize_ts(value))
     return ts.tz_convert(DISPLAY_TIMEZONE).strftime("%Y-%m-%d")
@@ -69,9 +92,9 @@ def _extract_timestamp(order, fills, fallback_ts):
 
     for raw in candidates:
         try:
-            if isinstance(raw, (int, float)) or str(raw).isdigit():
-                return pd.to_datetime(float(raw), unit="ms", utc=True).isoformat()
-            return normalize_ts(raw)
+            normalized = normalize_event_ts(raw)
+            if normalized is not None:
+                return normalized
         except Exception:
             continue
     return normalize_ts(fallback_ts)
@@ -204,6 +227,7 @@ def build_trade_record(
     account_after,
     signal_snapshot,
     decision,
+    execution_context=None,
 ):
     order = order if isinstance(order, dict) else {}
     fills = order.get("_fills") or []
@@ -240,8 +264,40 @@ def build_trade_record(
         equity_delta = after_eq - before_eq
 
     executed_at = _extract_timestamp(order, fills, bar_ts)
+    execution_context = execution_context if isinstance(execution_context, dict) else {}
+    trigger_detected_at = normalize_event_ts(execution_context.get("trigger_detected_at"))
+    trigger_price = safe_optional_float(execution_context.get("trigger_price"))
+    threshold_price = safe_optional_float(execution_context.get("threshold_price"))
+    order_round_trip_ms = safe_optional_float(execution_context.get("order_round_trip_ms"))
+    if order_round_trip_ms is not None and order_round_trip_ms < 0:
+        order_round_trip_ms = None
+
+    _, detection_slippage_bps = _calculate_slippage(
+        side,
+        fill_size,
+        trigger_price,
+        threshold_price,
+    )
+    _, threshold_to_fill_slippage_bps = _calculate_slippage(
+        side,
+        fill_size,
+        fill_price,
+        threshold_price,
+    )
+    execution_quality = {
+        "trigger_source": execution_context.get("trigger_source"),
+        "trigger_type": execution_context.get("trigger_type"),
+        "trigger_detected_at": trigger_detected_at,
+        "trigger_price": trigger_price,
+        "threshold_price": threshold_price,
+        "trigger_to_fill_ms": elapsed_ms(trigger_detected_at, executed_at),
+        "order_round_trip_ms": order_round_trip_ms,
+        "detection_slippage_bps": detection_slippage_bps,
+        "execution_slippage_bps": slippage_bps,
+        "threshold_to_fill_slippage_bps": threshold_to_fill_slippage_bps,
+    }
     record = {
-        "schema_version": 1,
+        "schema_version": 2,
         "executed_at": executed_at,
         "trade_date": display_date(executed_at),
         "bar_ts": normalize_ts(bar_ts),
@@ -289,6 +345,7 @@ def build_trade_record(
             "take_profit": safe_optional_float(getattr(config, "TAKE_PROFIT", None)),
             "stop_loss": safe_optional_float(getattr(config, "STOP_LOSS", None)),
         },
+        "execution_quality": execution_quality,
         "signal": signal_snapshot or {},
         "decision": decision or {},
         "raw_order": order,
@@ -445,15 +502,18 @@ def format_daily_report_markdown(summary):
     lines.append("")
     lines.append("## 最近成交")
     lines.append("")
-    lines.append("| 时间 | 动作 | 原因 | 方向 | 均价 | 数量 | 净实现PnL | 手续费 |")
-    lines.append("| --- | --- | --- | --- | ---: | ---: | ---: | ---: |")
+    lines.append("| 时间 | 动作 | 原因 | 方向 | 均价 | 数量 | 净实现PnL | 手续费 | 阈值滑点(bps) | 触发到成交(ms) |")
+    lines.append("| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |")
     for record in summary.get("last_records", []):
+        execution_quality = record.get("execution_quality") or {}
         lines.append(
             "| "
             f"{record.get('executed_at')} | {record.get('action')} | {record.get('reason')} | "
             f"{record.get('pos_side')} | {_fmt(record.get('fill_price'), 4)} | "
             f"{_fmt(record.get('fill_size'), 6)} | {_fmt(record.get('net_realized_pnl'))} | "
-            f"{_fmt(record.get('fee_abs'))} |"
+            f"{_fmt(record.get('fee_abs'))} | "
+            f"{_fmt(execution_quality.get('threshold_to_fill_slippage_bps'), 2)} | "
+            f"{_fmt(execution_quality.get('trigger_to_fill_ms'), 1)} |"
         )
     return "\n".join(lines) + "\n"
 

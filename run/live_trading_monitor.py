@@ -1077,6 +1077,7 @@ class LiveTrader:
         account_after,
         pos_qty_after,
         entry_price_after,
+        execution_context=None,
     ):
         if not isinstance(order_result, dict):
             return None
@@ -1096,13 +1097,18 @@ class LiveTrader:
             account_after=account_after,
             signal_snapshot=signal_snapshot,
             decision=decision,
+            execution_context=execution_context,
         )
         append_trade_record(record)
         try:
             summary, json_path, md_path = write_daily_report(record["trade_date"])
+            execution_quality = record.get("execution_quality") or {}
             log_info(
                 f"成交已记录: date={record['trade_date']}, action={record['action']}, "
                 f"net_pnl={record['net_realized_pnl']:.2f}, fee={record['fee_abs']:.2f}, "
+                f"trigger_to_fill_ms={fmt_optional(execution_quality.get('trigger_to_fill_ms'), 1)}, "
+                f"threshold_slippage_bps="
+                f"{fmt_optional(execution_quality.get('threshold_to_fill_slippage_bps'), 2)}, "
                 f"report={md_path}"
             )
             self.last_execution = {
@@ -1113,6 +1119,8 @@ class LiveTrader:
                 "fill_price": record["fill_price"],
                 "fee_abs": record["fee_abs"],
                 "net_realized_pnl": record["net_realized_pnl"],
+                "slippage_bps": record["slippage_bps"],
+                "execution_quality": record["execution_quality"],
                 "report_path": md_path,
             }
         except Exception as exc:
@@ -1688,7 +1696,12 @@ class LiveTrader:
         return bool(canceled)
 
     @staticmethod
-    def _exchange_tpsl_reason(pos_qty_before, entry_price_before, order):
+    def _exchange_tpsl_reason(pos_qty_before, entry_price_before, order, algo_detail=None):
+        actual_side = str((algo_detail or {}).get("actualSide") or "").lower()
+        if actual_side == "tp":
+            return "TakeProfitExchange"
+        if actual_side == "sl":
+            return "StopLossExchange"
         fill_price = float(order.get("avgPx") or order.get("fillPx") or 0)
         if fill_price <= 0 or float(entry_price_before) <= 0:
             return "ExchangeTPSL"
@@ -1698,6 +1711,36 @@ class LiveTrader:
             else fill_price <= float(entry_price_before)
         )
         return "TakeProfitExchange" if profitable else "StopLossExchange"
+
+    @staticmethod
+    def _risk_trigger_threshold(entry_price, pos_qty, reason, take_profit, stop_loss):
+        ratio = float(take_profit) if str(reason).startswith("TakeProfit") else float(stop_loss)
+        favorable_direction = str(reason).startswith("TakeProfit")
+        if float(pos_qty) > 0:
+            multiplier = 1.0 + ratio if favorable_direction else 1.0 - ratio
+        else:
+            multiplier = 1.0 - ratio if favorable_direction else 1.0 + ratio
+        return float(entry_price) * multiplier
+
+    @staticmethod
+    def _exchange_tpsl_execution_context(algo_detail, order, reason):
+        detail = algo_detail or {}
+        trigger_type = str(detail.get("actualSide") or "").lower()
+        if trigger_type not in {"tp", "sl"}:
+            trigger_type = "sl" if str(reason).startswith("StopLoss") else "tp"
+        threshold_key = "slTriggerPx" if trigger_type == "sl" else "tpTriggerPx"
+        try:
+            threshold_price = float(detail.get(threshold_key) or 0)
+        except (TypeError, ValueError):
+            threshold_price = 0.0
+        return {
+            "trigger_source": "exchange_oco",
+            "trigger_type": trigger_type,
+            "trigger_detected_at": detail.get("triggerTime") or (order or {}).get("cTime"),
+            "trigger_price": None,
+            "threshold_price": threshold_price if threshold_price > 0 else None,
+            "order_round_trip_ms": None,
+        }
 
     def _reconcile_exchange_tpsl_execution(
         self,
@@ -1758,13 +1801,20 @@ class LiveTrader:
             next_pos_qty = running_pos_qty + delta_qty
             if running_pos_qty * next_pos_qty < 0 or abs(next_pos_qty) <= tolerance:
                 next_pos_qty = 0.0
-            reason = self._exchange_tpsl_reason(running_pos_qty, tracked_entry_price, order)
+            reason = self._exchange_tpsl_reason(
+                running_pos_qty,
+                tracked_entry_price,
+                order,
+                algo_detail,
+            )
+            execution_context = self._exchange_tpsl_execution_context(algo_detail, order, reason)
             recorded_reasons.append(reason)
             if not trade_record_exists(
                 ord_id=order.get("ordId"),
                 cl_ord_id=order.get("clOrdId"),
             ):
-                reference_price = float(order.get("avgPx") or order.get("fillPx") or 0)
+                fill_price = float(order.get("avgPx") or order.get("fillPx") or 0)
+                reference_price = execution_context.get("threshold_price") or fill_price
                 self._record_trade_execution(
                     order_result=order,
                     action="CLOSE",
@@ -1779,6 +1829,7 @@ class LiveTrader:
                         "source": "exchange_tpsl",
                         "algo_id": algo_id,
                         "algo_state": (algo_detail or {}).get("state"),
+                        "actual_side": (algo_detail or {}).get("actualSide"),
                     },
                     account_before=account_before,
                     pos_qty_before=running_pos_qty,
@@ -1786,6 +1837,7 @@ class LiveTrader:
                     account_after=account_after,
                     pos_qty_after=next_pos_qty,
                     entry_price_after=tracked_entry_price if next_pos_qty else 0.0,
+                    execution_context=execution_context,
                 )
             running_pos_qty = next_pos_qty
 
@@ -2006,23 +2058,42 @@ class LiveTrader:
         if reason is None:
             return False
 
+        trigger_detected_at = pd.Timestamp.now(tz="UTC")
+        threshold_price = self._risk_trigger_threshold(
+            entry_price,
+            pos_qty,
+            reason,
+            take_profit,
+            stop_loss,
+        )
         log_error(
             f"实时风控触发 {reason}: price={price:.6f}, entry={float(entry_price):.6f}, "
-            f"pnl={pnl_pct:.4%}"
+            f"threshold={threshold_price:.6f}, pnl={pnl_pct:.4%}"
         )
-        try:
-            account_before = self._get_account_snapshot()
-        except Exception:
-            account_before = dict(getattr(self, "last_dashboard_account", {}) or {})
-        self._cancel_exchange_tpsl()
+        account_before = dict(getattr(self, "last_dashboard_account", {}) or {})
         leverage = int(config.LEVERAGE)
+        order_started_at = time.monotonic()
         if pos_qty > 0:
-            success = self.client.close_long_sz(abs(float(pos_qty)), leverage)
+            success = self.client.close_long_sz(
+                abs(float(pos_qty)),
+                leverage,
+                known_position_size=abs(float(pos_qty)),
+            )
         else:
-            success = self.client.close_short_sz(abs(float(pos_qty)), leverage)
+            success = self.client.close_short_sz(
+                abs(float(pos_qty)),
+                leverage,
+                known_position_size=abs(float(pos_qty)),
+            )
+        order_round_trip_ms = (time.monotonic() - order_started_at) * 1000.0
         if not success:
-            log_error(f"实时风控平仓未确认成交: reason={reason}")
+            log_error(
+                f"实时风控平仓未确认成交: reason={reason}, "
+                f"order_round_trip_ms={order_round_trip_ms:.1f}"
+            )
             return False
+
+        self._cancel_exchange_tpsl()
 
         self.cooldown_bars_remaining = int(
             config.STOP_LOSS_COOLDOWN_BARS
@@ -2053,6 +2124,14 @@ class LiveTrader:
             account_after=account_after,
             pos_qty_after=0.0,
             entry_price_after=0.0,
+            execution_context={
+                "trigger_source": "local_realtime_risk",
+                "trigger_type": "sl" if reason.startswith("StopLoss") else "tp",
+                "trigger_detected_at": trigger_detected_at,
+                "trigger_price": price,
+                "threshold_price": threshold_price,
+                "order_round_trip_ms": order_round_trip_ms,
+            },
         )
         if trade_record is None:
             self.last_execution = {
@@ -2066,7 +2145,8 @@ class LiveTrader:
             "[实时风控平仓]\n"
             f"原因: {reason}\n"
             f"价格: {price:.6f}\n"
-            f"PnL: {pnl_pct:.4%}"
+            f"PnL: {pnl_pct:.4%}\n"
+            f"下单确认耗时: {order_round_trip_ms:.1f}ms"
         )
         return True
 
