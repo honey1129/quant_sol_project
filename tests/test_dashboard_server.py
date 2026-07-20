@@ -306,6 +306,32 @@ class DashboardObservabilityTests(unittest.TestCase):
         self.assertEqual(snapshot["health"], "error")
         self.assertEqual(snapshot["alerts"][0]["code"], "runtime_last_error")
 
+    def test_observability_warns_on_slow_risk_loop_with_open_position(self):
+        status = {
+            "runtime": {
+                "risk_check_slow_active": True,
+                "risk_check_last_interval_ms": 5100.0,
+                "risk_check_last_duration_ms": 900.0,
+            },
+            "position": {"net_qty": -2.0},
+        }
+        with patch("run.dashboard_server.build_model_observability_snapshot", return_value={"health": "ok", "warnings": []}):
+            snapshot = dashboard_server.build_observability_snapshot(status)
+
+        self.assertEqual(snapshot["health"], "warning")
+        self.assertEqual(snapshot["alerts"][0]["code"], "risk_loop_latency")
+
+    def test_observability_ignores_slow_risk_loop_while_flat(self):
+        status = {
+            "runtime": {"risk_check_slow_active": True},
+            "position": {"net_qty": 0.0},
+        }
+        with patch("run.dashboard_server.build_model_observability_snapshot", return_value={"health": "ok", "warnings": []}):
+            snapshot = dashboard_server.build_observability_snapshot(status)
+
+        self.assertEqual(snapshot["health"], "ok")
+        self.assertEqual(snapshot["alerts"], [])
+
     def test_enrich_status_ignores_tmp_runtime_dashboard_corruption_from_tests(self):
         log_lines = [
             "2026-05-17 21:20:00,000 - ERROR - ⚠ runtime_dashboard JSON 损坏，已备份到 /tmp/tmpabc/history.json.corrupt-20260517T192008Z: Expecting value",

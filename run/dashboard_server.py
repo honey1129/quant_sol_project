@@ -273,10 +273,21 @@ def build_model_observability_snapshot():
 
 def build_observability_snapshot(status):
     runtime = status.get("runtime", {}) if isinstance(status, dict) else {}
+    position = (status.get("position") or {}) if isinstance(status, dict) else {}
     model_snapshot = build_model_observability_snapshot()
     alerts = []
     if runtime.get("last_error"):
         alerts.append({"level": "error", "code": "runtime_last_error", "message": runtime.get("last_error")})
+    net_qty = safe_float(position.get("net_qty"))
+    if runtime.get("risk_check_slow_active") and net_qty is not None and abs(net_qty) > 1e-9:
+        alerts.append({
+            "level": "warning",
+            "code": "risk_loop_latency",
+            "message": (
+                f"risk interval={runtime.get('risk_check_last_interval_ms')}ms, "
+                f"duration={runtime.get('risk_check_last_duration_ms')}ms"
+            ),
+        })
     if model_snapshot.get("health") != "ok":
         alerts.append({
             "level": "warning" if model_snapshot.get("health") == "warning" else "error",

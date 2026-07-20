@@ -29,6 +29,7 @@ from core.position_manager import PositionManager
 
 LIVE_STATE_PATH = os.path.join(BASE_DIR, "logs", "live_trading_state.json")
 HEARTBEAT_LOG_INTERVAL_SEC = 30.0
+RISK_TIMING_WARNING_COOLDOWN_SEC = 60.0
 TELEGRAM_RUNTIME_SUMMARY_INTERVAL_SEC = 3600.0
 TELEGRAM_HOLD_ALERT_MIN_BARS = 3
 TELEGRAM_HOLD_ALERT_COOLDOWN_SEC = 1800.0
@@ -328,6 +329,16 @@ class LiveTrader:
         self.same_bar_skip_count = 0
         self.last_heartbeat_logged_at = None
         self.heartbeat_log_interval_sec = HEARTBEAT_LOG_INTERVAL_SEC
+        self.risk_check_count = 0
+        self.risk_check_last_started_at = None
+        self.risk_check_last_completed_at = None
+        self.risk_check_last_duration_ms = None
+        self.risk_check_last_interval_ms = None
+        self.risk_check_max_duration_ms = 0.0
+        self.risk_check_max_interval_ms = 0.0
+        self.risk_check_slow_count = 0
+        self.risk_check_slow_active = False
+        self.last_risk_timing_warning_at = None
         self.last_dashboard_account = {}
         self.last_signal_snapshot = {}
         self.last_position_snapshot = {}
@@ -686,6 +697,63 @@ class LiveTrader:
             "short_qty": short_size,
         }
 
+    def _record_realtime_risk_timing(self, started_at, finished_at=None):
+        finished_at = time.monotonic() if finished_at is None else float(finished_at)
+        started_at = float(started_at)
+        previous_started_at = getattr(self, "risk_check_last_started_at", None)
+        duration_ms = max(0.0, finished_at - started_at) * 1000.0
+        interval_ms = None
+        if previous_started_at is not None:
+            interval_ms = max(0.0, started_at - float(previous_started_at)) * 1000.0
+
+        self.risk_check_count = int(getattr(self, "risk_check_count", 0)) + 1
+        self.risk_check_last_started_at = started_at
+        self.risk_check_last_completed_at = normalize_ts(pd.Timestamp.now(tz="UTC"))
+        self.risk_check_last_duration_ms = duration_ms
+        self.risk_check_last_interval_ms = interval_ms
+        self.risk_check_max_duration_ms = max(
+            float(getattr(self, "risk_check_max_duration_ms", 0.0)),
+            duration_ms,
+        )
+        if interval_ms is not None:
+            self.risk_check_max_interval_ms = max(
+                float(getattr(self, "risk_check_max_interval_ms", 0.0)),
+                interval_ms,
+            )
+
+        warn_sec = max(
+            float(getattr(config, "POLL_SEC", 1)),
+            float(getattr(config, "RISK_LOOP_WARN_SEC", 3.0)),
+        )
+        slow = duration_ms > warn_sec * 1000.0 or (
+            interval_ms is not None and interval_ms > warn_sec * 1000.0
+        )
+        self.risk_check_slow_active = slow
+        if not slow:
+            return
+
+        self.risk_check_slow_count = int(getattr(self, "risk_check_slow_count", 0)) + 1
+        try:
+            tracked_pos_qty, _, _ = self.core.get_state()
+        except Exception:
+            tracked_pos_qty = 0.0
+        if abs(float(tracked_pos_qty or 0.0)) < 1e-9:
+            return
+        if not should_emit_interval_log(
+            getattr(self, "last_risk_timing_warning_at", None),
+            finished_at,
+            RISK_TIMING_WARNING_COOLDOWN_SEC,
+        ):
+            return
+
+        self.last_risk_timing_warning_at = finished_at
+        interval_text = "n/a" if interval_ms is None else f"{interval_ms:.0f}ms"
+        log_error(
+            "实时风控循环延迟: "
+            f"interval={interval_text}, duration={duration_ms:.0f}ms, "
+            f"threshold={warn_sec:.1f}s, position={float(tracked_pos_qty):.6f}"
+        )
+
     def _write_dashboard_snapshot(
         self,
         *,
@@ -717,6 +785,15 @@ class LiveTrader:
                 "same_bar_skip_count": int(self.same_bar_skip_count),
                 "poll_sec": int(config.POLL_SEC),
                 "heartbeat_interval_sec": float(self.heartbeat_log_interval_sec),
+                "risk_check_count": int(getattr(self, "risk_check_count", 0)),
+                "risk_check_last_completed_at": getattr(self, "risk_check_last_completed_at", None),
+                "risk_check_last_duration_ms": getattr(self, "risk_check_last_duration_ms", None),
+                "risk_check_last_interval_ms": getattr(self, "risk_check_last_interval_ms", None),
+                "risk_check_max_duration_ms": float(getattr(self, "risk_check_max_duration_ms", 0.0)),
+                "risk_check_max_interval_ms": float(getattr(self, "risk_check_max_interval_ms", 0.0)),
+                "risk_check_slow_count": int(getattr(self, "risk_check_slow_count", 0)),
+                "risk_check_slow_active": bool(getattr(self, "risk_check_slow_active", False)),
+                "risk_check_warn_sec": float(getattr(config, "RISK_LOOP_WARN_SEC", 3.0)),
                 "cooldown_bars_remaining": int(getattr(self, "cooldown_bars_remaining", 0)),
                 "reverse_signal_bars": int(getattr(self, "reverse_signal_bars", 0)),
                 "loss_guard_exit_bars": int(getattr(self, "loss_guard_exit_bars", 0)),
@@ -2468,11 +2545,15 @@ def run():
     next_bar_poll_at = 0.0
     while True:
         try:
-            risk_action_executed = trader.run_realtime_risk_check()
+            risk_check_started_at = time.monotonic()
+            try:
+                risk_action_executed = trader.run_realtime_risk_check()
+            finally:
+                trader._record_realtime_risk_timing(risk_check_started_at)
             now = time.monotonic()
             if not risk_action_executed and now >= next_bar_poll_at:
                 trader.run_once_on_new_bar()
-                next_bar_poll_at = now + BAR_POLL_SEC
+                next_bar_poll_at = time.monotonic() + BAR_POLL_SEC
             trader.consecutive_loop_errors = 0
             trader.last_error_notified_count = 0
         except Exception as e:

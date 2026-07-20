@@ -160,6 +160,15 @@ export interface ApiDashboardRuntime {
   same_bar_skip_count?: number;
   poll_sec?: number;
   heartbeat_interval_sec?: number;
+  risk_check_count?: number;
+  risk_check_last_completed_at?: string | null;
+  risk_check_last_duration_ms?: number | null;
+  risk_check_last_interval_ms?: number | null;
+  risk_check_max_duration_ms?: number;
+  risk_check_max_interval_ms?: number;
+  risk_check_slow_count?: number;
+  risk_check_slow_active?: boolean;
+  risk_check_warn_sec?: number;
   last_error?: string | null;
 }
 

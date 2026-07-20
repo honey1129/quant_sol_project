@@ -121,6 +121,46 @@ class LiveRuntimeStateTests(unittest.TestCase):
         self.assertFalse(should_emit_interval_log(100.0, 120.0, 30.0))
         self.assertTrue(should_emit_interval_log(100.0, 130.0, 30.0))
 
+    def test_realtime_risk_timing_tracks_actual_interval_and_slow_checks(self):
+        class Core:
+            @staticmethod
+            def get_state():
+                return 0.0, 0.0, 0
+
+        trader = LiveTrader.__new__(LiveTrader)
+        trader.core = Core()
+
+        with patch("run.live_trading_monitor.config.POLL_SEC", 1):
+            with patch("run.live_trading_monitor.config.RISK_LOOP_WARN_SEC", 3.0):
+                trader._record_realtime_risk_timing(100.0, 101.0)
+                trader._record_realtime_risk_timing(105.0, 106.0)
+
+        self.assertEqual(trader.risk_check_count, 2)
+        self.assertAlmostEqual(trader.risk_check_last_duration_ms, 1000.0)
+        self.assertAlmostEqual(trader.risk_check_last_interval_ms, 5000.0)
+        self.assertAlmostEqual(trader.risk_check_max_duration_ms, 1000.0)
+        self.assertAlmostEqual(trader.risk_check_max_interval_ms, 5000.0)
+        self.assertEqual(trader.risk_check_slow_count, 1)
+        self.assertTrue(trader.risk_check_slow_active)
+
+    def test_realtime_risk_timing_logs_slow_check_while_position_is_open(self):
+        class Core:
+            @staticmethod
+            def get_state():
+                return 2.0, 100.0, 1
+
+        trader = LiveTrader.__new__(LiveTrader)
+        trader.core = Core()
+        trader.risk_check_last_started_at = 100.0
+
+        with patch("run.live_trading_monitor.config.POLL_SEC", 1):
+            with patch("run.live_trading_monitor.config.RISK_LOOP_WARN_SEC", 3.0):
+                with patch("run.live_trading_monitor.log_error") as mock_log_error:
+                    trader._record_realtime_risk_timing(105.0, 106.0)
+
+        mock_log_error.assert_called_once()
+        self.assertIn("interval=5000ms", mock_log_error.call_args.args[0])
+
     def test_write_dashboard_snapshot_preserves_last_position_when_not_provided(self):
         trader = LiveTrader.__new__(LiveTrader)
         trader.loop_count = 3
@@ -132,6 +172,13 @@ class LiveRuntimeStateTests(unittest.TestCase):
         trader.last_signal_snapshot = {"long_prob": 0.61, "short_prob": 0.39}
         trader.last_dashboard_account = {"total_eq": 1000.0, "avail_eq": 900.0}
         trader.last_position_snapshot = {"direction": "long", "net_qty": 2.5, "entry_price": 150.0}
+        trader.risk_check_count = 12
+        trader.risk_check_last_duration_ms = 240.0
+        trader.risk_check_last_interval_ms = 1240.0
+        trader.risk_check_max_duration_ms = 800.0
+        trader.risk_check_max_interval_ms = 2400.0
+        trader.risk_check_slow_count = 0
+        trader.risk_check_slow_active = False
 
         with patch("run.live_trading_monitor.write_runtime_dashboard_snapshot") as mock_write:
             trader._write_dashboard_snapshot(
@@ -144,6 +191,8 @@ class LiveRuntimeStateTests(unittest.TestCase):
         payload = mock_write.call_args.kwargs.get("snapshot") or mock_write.call_args.args[0]
         self.assertEqual(payload["position"]["direction"], "long")
         self.assertAlmostEqual(payload["position"]["net_qty"], 2.5)
+        self.assertEqual(payload["runtime"]["risk_check_count"], 12)
+        self.assertAlmostEqual(payload["runtime"]["risk_check_last_interval_ms"], 1240.0)
 
     def test_live_reward_risk_uses_configured_value(self):
         trader = LiveTrader.__new__(LiveTrader)

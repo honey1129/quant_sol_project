@@ -278,7 +278,11 @@ MODEL_WALK_FORWARD_ENABLED=False           # 当模型 recall ≈ 0 时可关闭
 ```env
 EXCHANGE_TPSL_ENABLED=1              # 开启交易所端 TP/SL
 TPSL_TRIGGER_PX_TYPE=mark            # mark / last / index
+POLL_SEC=1                           # 本地实时风控目标轮询间隔
+RISK_LOOP_WARN_SEC=3                 # 实际检查耗时或相邻间隔超过该值时记录告警
 ```
+
+运行快照同时记录本地风控检查的最近/最大耗时、相邻间隔和累计慢检查次数。持仓期间若实际检查间隔超过阈值，主日志与 Dashboard 观测接口会产生 `risk_loop_latency` 告警；交易所端 OCO 保护不依赖该本地循环。
 
 ### 账户级熔断与 Kill Switch
 
