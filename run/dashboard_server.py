@@ -288,6 +288,19 @@ def build_observability_snapshot(status):
                 f"duration={runtime.get('risk_check_last_duration_ms')}ms"
             ),
         })
+    ws_ticker_age_ms = safe_float(runtime.get("ws_ticker_age_ms"))
+    websocket_stale_ms = float(config.OKX_WEBSOCKET_STALE_SEC) * 1000.0
+    websocket_unhealthy = (
+        runtime.get("ws_ticker_connected") is False
+        or runtime.get("ws_position_connected") is False
+        or (ws_ticker_age_ms is not None and ws_ticker_age_ms > websocket_stale_ms)
+    )
+    if websocket_unhealthy and net_qty is not None and abs(net_qty) > 1e-9:
+        alerts.append({
+            "level": "warning",
+            "code": "risk_websocket_unavailable",
+            "message": "Realtime WebSocket is stale or disconnected; REST fallback is active",
+        })
     if model_snapshot.get("health") != "ok":
         alerts.append({
             "level": "warning" if model_snapshot.get("health") == "warning" else "error",
@@ -971,6 +984,14 @@ def build_risk_snapshot(status, history, recent_events):
         ws_status = "Disconnected" if latest_error else "Lagging"
     elif runtime_status in {"starting", "paused"}:
         api_status = "Degraded"
+        ws_status = "Lagging"
+    websocket_stale_ms = float(getattr(config, "OKX_WEBSOCKET_STALE_SEC", 5.0)) * 1000.0
+    ws_ticker_age_ms = safe_float(runtime.get("ws_ticker_age_ms"))
+    if (
+        runtime.get("ws_ticker_connected") is False
+        or runtime.get("ws_position_connected") is False
+        or (ws_ticker_age_ms is not None and ws_ticker_age_ms > websocket_stale_ms)
+    ):
         ws_status = "Lagging"
 
     risk_triggered = bool(latest_error) or runtime_status == "error"

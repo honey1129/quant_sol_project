@@ -24,6 +24,7 @@ from utils.trade_audit import (
 )
 from config import config
 from core.okx_api import OKXClient
+from core.okx_ws import OKXRealtimeStream
 from core.position_manager import PositionManager
 
 
@@ -241,6 +242,9 @@ def net_position_from_sides(long_pos, short_pos, tolerance=1e-9):
 class LiveTrader:
     def __init__(self, client):
         self.client = client
+        self.realtime_stream = None
+        self.last_risk_price_source = "rest"
+        self.last_risk_position_source = "rest"
         self.position_manager = PositionManager()
         self.dynamic_risk_controller = DynamicRiskController()
 
@@ -755,6 +759,31 @@ class LiveTrader:
             f"threshold={warn_sec:.1f}s, position={float(tracked_pos_qty):.6f}"
         )
 
+    def _get_realtime_position(self):
+        stream = getattr(self, "realtime_stream", None)
+        if stream is not None:
+            positions = stream.get_position(float(config.OKX_WEBSOCKET_STALE_SEC))
+            if positions is not None:
+                qty, entry_price = net_position_from_sides(
+                    positions[0],
+                    positions[1],
+                    tolerance=max(1e-9, float(config.LOT_SIZE) / 2.0),
+                )
+                self.last_risk_position_source = "websocket"
+                return qty, entry_price
+        self.last_risk_position_source = "rest"
+        return self._get_net_position()
+
+    def _get_realtime_price(self):
+        stream = getattr(self, "realtime_stream", None)
+        if stream is not None:
+            price = stream.get_price(float(config.OKX_WEBSOCKET_STALE_SEC))
+            if price is not None and float(price) > 0:
+                self.last_risk_price_source = "websocket"
+                return float(price)
+        self.last_risk_price_source = "rest"
+        return float(self.client.get_price())
+
     def _write_dashboard_snapshot(
         self,
         *,
@@ -779,6 +808,14 @@ class LiveTrader:
         if position_snapshot is not None:
             self.last_position_snapshot = position_snapshot
 
+        stream_snapshot = {}
+        stream = getattr(self, "realtime_stream", None)
+        if stream is not None:
+            try:
+                stream_snapshot = stream.snapshot()
+            except Exception as exc:
+                stream_snapshot = {"last_error": str(exc)}
+
         payload = {
             "runtime": {
                 "last_status": runtime_status,
@@ -795,6 +832,14 @@ class LiveTrader:
                 "risk_check_slow_count": int(getattr(self, "risk_check_slow_count", 0)),
                 "risk_check_slow_active": bool(getattr(self, "risk_check_slow_active", False)),
                 "risk_check_warn_sec": float(getattr(config, "RISK_LOOP_WARN_SEC", 3.0)),
+                "risk_price_source": getattr(self, "last_risk_price_source", "rest"),
+                "risk_position_source": getattr(self, "last_risk_position_source", "rest"),
+                "websocket_enabled": bool(getattr(config, "OKX_WEBSOCKET_ENABLED", True)),
+                "ws_ticker_connected": stream_snapshot.get("ticker_connected"),
+                "ws_position_connected": stream_snapshot.get("position_connected"),
+                "ws_ticker_age_ms": stream_snapshot.get("ticker_age_ms"),
+                "ws_position_age_ms": stream_snapshot.get("position_age_ms"),
+                "ws_last_error": stream_snapshot.get("last_error"),
                 "cooldown_bars_remaining": int(getattr(self, "cooldown_bars_remaining", 0)),
                 "reverse_signal_bars": int(getattr(self, "reverse_signal_bars", 0)),
                 "loss_guard_exit_bars": int(getattr(self, "loss_guard_exit_bars", 0)),
@@ -1905,7 +1950,7 @@ class LiveTrader:
     def run_realtime_risk_check(self):
         """Check local TP/SL against a live ticker independently of bar generation."""
         tracked_pos_qty, tracked_entry_price, _ = self.core.get_state()
-        pos_qty, entry_price = self._get_net_position()
+        pos_qty, entry_price = self._get_realtime_position()
         if pos_qty is None:
             log_error("实时风控检测到双边仓位，交由仓位恢复流程处理。")
             return False
@@ -1915,6 +1960,17 @@ class LiveTrader:
             tracked_pos_qty=tracked_pos_qty,
             tracked_entry_price=tracked_entry_price,
         )
+        tolerance = max(1e-9, float(config.LOT_SIZE) / 2.0)
+        if (
+            not reconciled_tpsl
+            and abs(float(tracked_pos_qty or 0.0)) > tolerance
+            and abs(float(pos_qty or 0.0)) <= tolerance
+            and self.last_risk_position_source == "websocket"
+        ):
+            self.last_risk_position_source = "rest_verify"
+            pos_qty, entry_price = self._get_net_position()
+            if pos_qty is None:
+                return False
         if reconciled_tpsl and abs(float(pos_qty)) < 1e-9:
             return True
         if abs(float(pos_qty)) < 1e-9 or float(entry_price) <= 0:
@@ -1935,7 +1991,7 @@ class LiveTrader:
             self._startup_entry_price = entry_price
             self._reconcile_exchange_tpsl_on_startup()
 
-        price = float(self.client.get_price())
+        price = self._get_realtime_price()
         take_profit, stop_loss = self.core.get_risk_thresholds()
         pnl_pct = (
             (price - float(entry_price)) / float(entry_price)
@@ -2513,6 +2569,23 @@ def run():
     trader = LiveTrader(client)
     trader.ensure_runtime_ready()
 
+    realtime_stream = None
+    if bool(getattr(config, "OKX_WEBSOCKET_ENABLED", True)):
+        realtime_stream = OKXRealtimeStream(
+            symbol=config.SYMBOL,
+            api_key=config.OKX_API_KEY,
+            secret_key=config.OKX_SECRET,
+            passphrase=config.OKX_PASSWORD,
+            simulated=str(config.USE_SERVER) == "1",
+            reconnect_max_sec=float(config.OKX_WEBSOCKET_RECONNECT_MAX_SEC),
+        )
+        trader.realtime_stream = realtime_stream
+        realtime_stream.start()
+        if realtime_stream.wait_until_ready(float(config.OKX_WEBSOCKET_STARTUP_TIMEOUT_SEC)):
+            log_info("OKX realtime WebSocket ready: ticker=1 positions=1")
+        else:
+            log_error("OKX realtime WebSocket startup incomplete; REST fallback remains active")
+
     startup_account = {}
     startup_position = {}
     startup_price = None
@@ -2601,6 +2674,8 @@ def run():
             time.sleep(int(POLL_SEC))
     finally:
         bar_executor.shutdown(wait=False, cancel_futures=True)
+        if realtime_stream is not None:
+            realtime_stream.stop()
 
 
 if __name__ == "__main__":

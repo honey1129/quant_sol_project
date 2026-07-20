@@ -169,6 +169,14 @@ export interface ApiDashboardRuntime {
   risk_check_slow_count?: number;
   risk_check_slow_active?: boolean;
   risk_check_warn_sec?: number;
+  risk_price_source?: string;
+  risk_position_source?: string;
+  websocket_enabled?: boolean;
+  ws_ticker_connected?: boolean | null;
+  ws_position_connected?: boolean | null;
+  ws_ticker_age_ms?: number | null;
+  ws_position_age_ms?: number | null;
+  ws_last_error?: string | null;
   last_error?: string | null;
 }
 

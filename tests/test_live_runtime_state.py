@@ -161,6 +161,67 @@ class LiveRuntimeStateTests(unittest.TestCase):
         mock_log_error.assert_called_once()
         self.assertIn("interval=5000ms", mock_log_error.call_args.args[0])
 
+    def test_realtime_risk_uses_fresh_websocket_position_and_price(self):
+        class Client:
+            def get_position(self):
+                raise AssertionError("REST position should not be used")
+
+            def get_price(self):
+                raise AssertionError("REST price should not be used")
+
+            def close_long_sz(self, qty, leverage):
+                self.closed = (qty, leverage)
+                return {"state": "filled"}
+
+        class Stream:
+            @staticmethod
+            def get_position(max_age_sec):
+                return (
+                    {"size": 2.0, "entry_price": 100.0},
+                    {"size": 0.0, "entry_price": 0.0},
+                )
+
+            @staticmethod
+            def get_price(max_age_sec):
+                return 98.0
+
+        class Core:
+            @staticmethod
+            def get_state():
+                return 2.0, 100.0, 1
+
+            @staticmethod
+            def get_risk_thresholds():
+                return 0.03, 0.01
+
+        trader = LiveTrader.__new__(LiveTrader)
+        trader.client = Client()
+        trader.realtime_stream = Stream()
+        trader.core = Core()
+        trader._active_algo_id = ""
+        trader._tpsl_coverage_verified = True
+        trader._last_tpsl_reconcile_at = None
+        trader.cooldown_bars_remaining = 0
+        trader.reverse_signal_bars = 0
+        trader.loss_guard_exit_bars = 0
+        trader.last_bar_ts = pd.Timestamp("2026-07-12T00:00:00Z")
+        trader.last_execution = {}
+        trader.last_dashboard_account = {}
+        trader.last_signal_snapshot = {}
+
+        with patch("run.live_trading_monitor.config.LEVERAGE", 3):
+            with patch("run.live_trading_monitor.config.STOP_LOSS_COOLDOWN_BARS", 12):
+                with patch.object(trader, "_sync_after_trade", return_value=True):
+                    with patch.object(trader, "_persist_last_bar_state"):
+                        with patch.object(trader, "_record_trade_execution", return_value={"action": "CLOSE"}):
+                            with patch("run.live_trading_monitor.notify_important"):
+                                triggered = trader.run_realtime_risk_check()
+
+        self.assertTrue(triggered)
+        self.assertEqual(trader.client.closed, (2.0, 3))
+        self.assertEqual(trader.last_risk_position_source, "websocket")
+        self.assertEqual(trader.last_risk_price_source, "websocket")
+
     def test_run_once_fetches_features_before_processing_them(self):
         trader = LiveTrader.__new__(LiveTrader)
         latest_features = object()

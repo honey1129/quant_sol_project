@@ -424,6 +424,10 @@ POLL_SEC = int(os.getenv("POLL_SEC", 1))
 BAR_POLL_SEC = int(os.getenv("BAR_POLL_SEC", 10))
 # Emit a health warning when API latency or bar work delays consecutive risk checks.
 RISK_LOOP_WARN_SEC = float(os.getenv("RISK_LOOP_WARN_SEC", 3.0))
+OKX_WEBSOCKET_ENABLED = parse_env_bool(os.getenv("OKX_WEBSOCKET_ENABLED"), True)
+OKX_WEBSOCKET_STALE_SEC = float(os.getenv("OKX_WEBSOCKET_STALE_SEC", 5.0))
+OKX_WEBSOCKET_STARTUP_TIMEOUT_SEC = float(os.getenv("OKX_WEBSOCKET_STARTUP_TIMEOUT_SEC", 10.0))
+OKX_WEBSOCKET_RECONNECT_MAX_SEC = float(os.getenv("OKX_WEBSOCKET_RECONNECT_MAX_SEC", 30.0))
 
 # ✅ 账户级熔断和紧急控制
 # MAX_DAILY_LOSS_PCT：当日权益亏损超过该比例时拒绝新开仓（0.05=5%，0 表示不启用）

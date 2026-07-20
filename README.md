@@ -280,9 +280,11 @@ EXCHANGE_TPSL_ENABLED=1              # 开启交易所端 TP/SL
 TPSL_TRIGGER_PX_TYPE=mark            # mark / last / index
 POLL_SEC=1                           # 本地实时风控目标轮询间隔
 RISK_LOOP_WARN_SEC=3                 # 实际检查耗时或相邻间隔超过该值时记录告警
+OKX_WEBSOCKET_ENABLED=1              # 实时价格和仓位优先使用 OKX WebSocket
+OKX_WEBSOCKET_STALE_SEC=5            # 缓存超过该时长自动降级到 REST
 ```
 
-运行快照同时记录本地风控检查的最近/最大耗时、相邻间隔和累计慢检查次数。多周期行情拉取与特征计算在独立只读工作线程执行，不阻塞本地实时风控；策略状态更新和交易决策仍由主线程串行执行。持仓期间若实际检查间隔超过阈值，主日志与 Dashboard 观测接口会产生 `risk_loop_latency` 告警；交易所端 OCO 保护不依赖该本地循环。
+运行快照同时记录本地风控检查的最近/最大耗时、相邻间隔和累计慢检查次数。实时价格与仓位由 OKX public/private WebSocket 推送，数据断流或过期时自动降级到 REST。多周期行情拉取与特征计算在独立只读工作线程执行，不阻塞本地实时风控；策略状态更新和交易决策仍由主线程串行执行。持仓期间若实际检查间隔超过阈值，主日志与 Dashboard 观测接口会产生 `risk_loop_latency` 告警；交易所端 OCO 保护不依赖该本地循环。
 
 ### 账户级熔断与 Kill Switch
 
