@@ -259,9 +259,16 @@ def build_trade_record(
     after_avail_eq = safe_optional_float((account_after or {}).get("avail_eq"))
     before_sizing_eq = safe_optional_float((account_before or {}).get("sizing_eq"))
     after_sizing_eq = safe_optional_float((account_after or {}).get("sizing_eq"))
+    before_equity_usdt = safe_optional_float((account_before or {}).get("equity_usdt"))
+    after_equity_usdt = safe_optional_float((account_after or {}).get("equity_usdt"))
+    before_cash_balance_usdt = safe_optional_float((account_before or {}).get("cash_balance_usdt"))
+    after_cash_balance_usdt = safe_optional_float((account_after or {}).get("cash_balance_usdt"))
     equity_delta = None
     if before_eq is not None and after_eq is not None:
         equity_delta = after_eq - before_eq
+    equity_usdt_delta = None
+    if before_equity_usdt is not None and after_equity_usdt is not None:
+        equity_usdt_delta = after_equity_usdt - before_equity_usdt
 
     executed_at = _extract_timestamp(order, fills, bar_ts)
     execution_context = execution_context if isinstance(execution_context, dict) else {}
@@ -331,6 +338,11 @@ def build_trade_record(
         "equity_before": before_eq,
         "equity_after": after_eq,
         "equity_delta": equity_delta,
+        "equity_usdt_before": before_equity_usdt,
+        "equity_usdt_after": after_equity_usdt,
+        "equity_usdt_delta": equity_usdt_delta,
+        "cash_balance_usdt_before": before_cash_balance_usdt,
+        "cash_balance_usdt_after": after_cash_balance_usdt,
         "avail_eq_before": before_avail_eq,
         "avail_eq_after": after_avail_eq,
         "sizing_eq_before": before_sizing_eq,
@@ -434,8 +446,22 @@ def summarize_daily_records(records, trade_date):
         _add_to_bucket(by_side[str(record.get("pos_side") or "unknown")], record)
 
     closing_records = [r for r in day_records if safe_float(r.get("closed_qty"), 0.0) > 0]
-    first_equity = day_records[0].get("equity_before") if day_records else None
-    last_equity = day_records[-1].get("equity_after") if day_records else None
+    usdt_equity_records = [
+        record
+        for record in day_records
+        if record.get("equity_usdt_before") is not None
+        and record.get("equity_usdt_after") is not None
+    ]
+    if usdt_equity_records:
+        first_equity = usdt_equity_records[0].get("equity_usdt_before")
+        last_equity = usdt_equity_records[-1].get("equity_usdt_after")
+        equity_source = "usdt_equity"
+        equity_currency = "USDT"
+    else:
+        first_equity = day_records[0].get("equity_before") if day_records else None
+        last_equity = day_records[-1].get("equity_after") if day_records else None
+        equity_source = "usd_total_equity"
+        equity_currency = "USD"
     equity_delta = None
     if first_equity is not None and last_equity is not None:
         equity_delta = safe_float(last_equity) - safe_float(first_equity)
@@ -447,6 +473,8 @@ def summarize_daily_records(records, trade_date):
         "first_equity": first_equity,
         "last_equity": last_equity,
         "equity_delta": equity_delta,
+        "equity_source": equity_source,
+        "equity_currency": equity_currency,
         "totals": dict(summary),
         "by_action": {k: dict(v) for k, v in sorted(by_action.items())},
         "by_reason": {k: dict(v) for k, v in sorted(by_reason.items())},
@@ -478,6 +506,7 @@ def _format_bucket_table(title, buckets):
 
 def format_daily_report_markdown(summary):
     totals = summary["totals"]
+    equity_currency = summary.get("equity_currency") or "USD"
     lines = [
         f"# 每日交易复盘 {summary['trade_date']}",
         "",
@@ -485,9 +514,9 @@ def format_daily_report_markdown(summary):
         "",
         f"- 成交记录数: {summary['record_count']}",
         f"- 平仓/减仓记录数: {summary['closing_trade_count']}",
-        f"- 起始权益: {_fmt(summary.get('first_equity'))} USDT",
-        f"- 结束权益: {_fmt(summary.get('last_equity'))} USDT",
-        f"- 权益变化: {_fmt(summary.get('equity_delta'))} USDT",
+        f"- 起始权益: {_fmt(summary.get('first_equity'))} {equity_currency}",
+        f"- 结束权益: {_fmt(summary.get('last_equity'))} {equity_currency}",
+        f"- 权益变化: {_fmt(summary.get('equity_delta'))} {equity_currency}",
         f"- 毛实现PnL: {_fmt(totals.get('gross_realized_pnl'))} USDT",
         f"- 净实现PnL: {_fmt(totals.get('net_realized_pnl'))} USDT",
         f"- 手续费: {_fmt(totals.get('fee_abs'))} USDT",

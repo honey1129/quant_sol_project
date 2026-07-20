@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 from run import dashboard_server
@@ -64,7 +65,12 @@ class DashboardServerTests(unittest.TestCase):
             "2026-04-24 10:47:40,655 - ERROR - 实盘循环异常: ❌ 无法拉取任何K线数据，请检查API权限/网络",
         ]
 
-        status = dashboard_server.enrich_status_with_fallbacks({}, log_lines, log_lines)
+        status = dashboard_server.enrich_status_with_fallbacks(
+            {},
+            log_lines,
+            log_lines,
+            now=datetime(2026, 4, 24, 2, 48, tzinfo=timezone.utc),
+        )
 
         self.assertEqual(status["runtime"]["last_status"], "error")
         self.assertIn("无法拉取任何K线数据", status["runtime"]["last_error"])
@@ -125,6 +131,78 @@ class DashboardServerTests(unittest.TestCase):
         )
 
         self.assertEqual(metrics["open_positions"], 1)
+
+    def test_metrics_and_daily_pnl_prefer_usdt_equity_without_mixing_sources(self):
+        history = [
+            {"bar_ts": "2026-07-18T00:00:00+00:00", "total_eq": 900.0},
+            {"bar_ts": "2026-07-19T00:00:00+00:00", "total_eq": 890.0, "equity_usdt": 1000.0},
+            {"bar_ts": "2026-07-20T00:00:00+00:00", "total_eq": 880.0, "equity_usdt": 1010.0},
+        ]
+        metrics = dashboard_server.build_metrics_snapshot(
+            {
+                "account": {"total_eq": 880.0, "equity_usdt": 1010.0},
+                "performance": {"current_total_eq": 1010.0},
+                "position": {"direction": "flat", "net_qty": 0.0},
+            },
+            history=history,
+            risk_snapshot={"risk_level": "Low"},
+            backtest_summary={},
+            backtest_csv_metrics={},
+        )
+
+        self.assertAlmostEqual(metrics["equity"], 1010.0)
+        self.assertEqual(metrics["equity_source"], "usdt_equity")
+        self.assertAlmostEqual(metrics["daily_pnl"], 10.0)
+        self.assertAlmostEqual(metrics["max_drawdown_pct"], 0.0)
+
+    def test_daily_pnl_returns_zero_when_usdt_history_is_under_24_hours(self):
+        history = [
+            {"bar_ts": "2026-07-20T00:00:00+00:00", "equity_usdt": 1000.0},
+            {"bar_ts": "2026-07-20T12:00:00+00:00", "equity_usdt": 1010.0},
+        ]
+
+        self.assertAlmostEqual(dashboard_server.compute_daily_pnl(history), 0.0)
+
+    def test_daily_pnl_ignores_zero_usdt_placeholder(self):
+        history = [
+            {"bar_ts": "2026-07-19T00:00:00+00:00", "total_eq": 900.0, "equity_usdt": 0.0},
+            {"bar_ts": "2026-07-20T00:00:00+00:00", "total_eq": 910.0, "equity_usdt": 0.0},
+        ]
+
+        self.assertAlmostEqual(dashboard_server.compute_daily_pnl(history), 10.0)
+
+    def test_enrich_status_discards_expired_log_error(self):
+        log_lines = [
+            "2026-07-20 13:31:26,678 - ERROR - OKX ticker WebSocket reconnecting: closed",
+            "2026-07-20 13:31:28,812 - INFO - OKX ticker WebSocket connected",
+            "2026-07-20 16:20:00,000 - INFO - 心跳: 运行中",
+        ]
+
+        status = dashboard_server.enrich_status_with_fallbacks(
+            {},
+            log_lines,
+            log_lines,
+            now=datetime(2026, 7, 20, 8, 20, 30, tzinfo=timezone.utc),
+        )
+
+        self.assertIsNone(status["runtime"].get("last_error"))
+        self.assertEqual(status["runtime"]["last_status"], "starting")
+
+    def test_enrich_status_clears_recent_websocket_error_after_recovery(self):
+        log_lines = [
+            "2026-07-20 16:19:20,000 - ERROR - OKX ticker WebSocket reconnecting: closed",
+            "2026-07-20 16:19:22,000 - INFO - OKX ticker WebSocket connected",
+            "2026-07-20 16:19:50,000 - INFO - 心跳: 运行中",
+        ]
+
+        status = dashboard_server.enrich_status_with_fallbacks(
+            {},
+            log_lines,
+            log_lines,
+            now=datetime(2026, 7, 20, 8, 20, tzinfo=timezone.utc),
+        )
+
+        self.assertIsNone(status["runtime"].get("last_error"))
 
     def test_build_metrics_snapshot_counts_mixed_position_legs(self):
         metrics = dashboard_server.build_metrics_snapshot(
@@ -368,6 +446,26 @@ class DashboardObservabilityTests(unittest.TestCase):
             self.assertEqual(snapshot["artifact_hash_count"], 1)
             self.assertTrue(snapshot["metadata_file"]["exists"])
             self.assertTrue(snapshot["latest_retrain_log_file"]["exists"])
+
+    def test_model_observability_treats_insufficient_trades_as_expected_skip(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            metadata_path = os.path.join(tmpdir, "models", "training_metadata.json")
+            logs_dir = os.path.join(tmpdir, "logs")
+            os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
+            os.makedirs(logs_dir, exist_ok=True)
+            with open(metadata_path, "w", encoding="utf-8") as f:
+                f.write('{"schema_version":2,"artifact_hashes":{"a":"b"}}')
+            with open(os.path.join(logs_dir, "model_retrain_state.json"), "w", encoding="utf-8") as f:
+                f.write('{"last_status":"failed","last_error":"平仓交易数不足: closed_trade_count=2 < 10"}')
+
+            with patch("run.dashboard_server.BASE_DIR", tmpdir), patch("run.dashboard_server.LOGS_DIR", logs_dir):
+                with patch.object(dashboard_server.config, "TRAINING_METADATA_PATH", "models/training_metadata.json"):
+                    snapshot = dashboard_server.build_model_observability_snapshot()
+
+            self.assertEqual(snapshot["health"], "ok")
+            self.assertNotIn("last_retrain_failed", snapshot["warnings"])
+            self.assertEqual(snapshot["retrain_state"]["last_status"], "skipped_insufficient_data")
+            self.assertEqual(snapshot["retrain_state"]["raw_last_status"], "failed")
 
     def test_observability_escalates_runtime_error(self):
         with patch("run.dashboard_server.build_model_observability_snapshot", return_value={"health": "ok", "warnings": []}):

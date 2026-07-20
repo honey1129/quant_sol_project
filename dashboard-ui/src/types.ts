@@ -209,6 +209,8 @@ export interface ApiDashboardSignal {
 export interface ApiDashboardAccount {
   total_eq?: number | null;
   avail_eq?: number | null;
+  equity_usdt?: number | null;
+  cash_balance_usdt?: number | null;
   currency?: string;
 }
 
@@ -249,6 +251,8 @@ export interface ApiDashboardPerformance {
   return_pct?: number | null;
   drawdown_pct?: number | null;
   history_points?: number | null;
+  equity_source?: string;
+  currency?: string;
 }
 
 export interface ApiDashboardStrategyMeta {
@@ -282,6 +286,7 @@ export interface ApiDashboardStrategyParams {
 
 export interface ApiDashboardMetrics {
   equity?: number | null;
+  equity_source?: string;
   daily_pnl?: number | null;
   total_return_pct?: number | null;
   max_drawdown_pct?: number | null;
@@ -376,6 +381,8 @@ export interface ApiDashboardHistoryPoint {
   timestamp?: string;
   total_eq?: number | null;
   avail_eq?: number | null;
+  equity_usdt?: number | null;
+  cash_balance_usdt?: number | null;
   price?: number | null;
   position_qty?: number | null;
   net_pnl?: number | null;

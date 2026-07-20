@@ -654,6 +654,8 @@ class LiveTrader:
         snapshot = {
             "total_eq": float(balance.get("totalEq", 0) or 0),
             "avail_eq": float(balance.get("availEq", 0) or 0),
+            "equity_usdt": float(balance.get("usdtEq", 0) or 0),
+            "cash_balance_usdt": float(balance.get("cashBal", 0) or 0),
             "currency": "USDT",
         }
         snapshot["sizing_eq"] = self._get_sizing_equity(snapshot)
@@ -868,6 +870,8 @@ class LiveTrader:
                 "bar_ts": normalize_ts(latest_closed_bar_ts or self.last_bar_ts),
                 "total_eq": account_for_history.get("total_eq"),
                 "avail_eq": account_for_history.get("avail_eq"),
+                "equity_usdt": account_for_history.get("equity_usdt"),
+                "cash_balance_usdt": account_for_history.get("cash_balance_usdt"),
                 "price": current_price,
                 "position_qty": (payload.get("position") or {}).get("net_qty"),
             }

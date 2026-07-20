@@ -57,6 +57,46 @@ class RuntimeDashboardTests(unittest.TestCase):
         self.assertAlmostEqual(payload["performance"]["drawdown_pct"], (1050.0 - 1100.0) / 1100.0 * 100.0)
         self.assertEqual(payload["performance"]["history_points"], 3)
 
+    def test_usdt_equity_uses_independent_baseline_and_series(self):
+        dashboard.write_runtime_dashboard_snapshot(
+            {
+                "runtime": {"last_status": "running"},
+                "account": {"total_eq": 990, "avail_eq": 900, "equity_usdt": 1000},
+            },
+            history_point={
+                "bar_ts": "2026-07-20T06:00:00+00:00",
+                "total_eq": 990,
+                "avail_eq": 900,
+                "equity_usdt": 1000,
+                "cash_balance_usdt": 1000,
+            },
+        )
+        payload = dashboard.write_runtime_dashboard_snapshot(
+            {
+                "runtime": {"last_status": "running"},
+                "account": {"total_eq": 985, "avail_eq": 910, "equity_usdt": 1010},
+            },
+            history_point={
+                "bar_ts": "2026-07-20T06:05:00+00:00",
+                "total_eq": 985,
+                "avail_eq": 910,
+                "equity_usdt": 1010,
+                "cash_balance_usdt": 1005,
+            },
+        )
+
+        self.assertEqual(payload["performance"]["equity_source"], "usdt_equity")
+        self.assertEqual(payload["performance"]["currency"], "USDT")
+        self.assertAlmostEqual(payload["performance"]["baseline_total_eq"], 1000.0)
+        self.assertAlmostEqual(payload["performance"]["current_total_eq"], 1010.0)
+        self.assertAlmostEqual(payload["performance"]["net_pnl"], 10.0)
+        self.assertAlmostEqual(payload["performance"]["return_pct"], 1.0)
+        self.assertEqual(payload["performance"]["history_points"], 2)
+        with open(dashboard.RUNTIME_DASHBOARD_BASELINE_PATH, "r", encoding="utf-8") as f:
+            baseline = json.load(f)
+        self.assertAlmostEqual(baseline["baseline_total_eq"], 990.0)
+        self.assertAlmostEqual(baseline["baseline_equity_usdt"], 1000.0)
+
     def test_same_bar_history_point_overwrites_last_record(self):
         dashboard.write_runtime_dashboard_snapshot(
             {

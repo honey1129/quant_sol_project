@@ -497,10 +497,18 @@ class OKXClient:
         if usdt_detail:
             avail_eq_raw = usdt_detail.get('availEq', '0')
             avail_eq = float(avail_eq_raw) if avail_eq_raw not in ['', None] else 0.0
+            usdt_eq_raw = usdt_detail.get('eq', '0')
+            usdt_eq = float(usdt_eq_raw) if usdt_eq_raw not in ['', None] else 0.0
+            cash_bal_raw = usdt_detail.get('cashBal', '0')
+            cash_bal = float(cash_bal_raw) if cash_bal_raw not in ['', None] else 0.0
         else:
             avail_eq = 0.0
+            usdt_eq = 0.0
+            cash_bal = 0.0
 
         result['data'][0]['availEq'] = avail_eq
+        result['data'][0]['usdtEq'] = usdt_eq
+        result['data'][0]['cashBal'] = cash_bal
 
         return result
 

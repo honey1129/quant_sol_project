@@ -78,7 +78,7 @@ def load_runtime_dashboard_history():
     return history if isinstance(history, list) else []
 
 
-def _load_or_initialize_baseline(total_eq):
+def _load_or_initialize_baseline(total_eq, equity_usdt=None):
     file_corrupt = False
     baseline = {}
 
@@ -91,24 +91,39 @@ def _load_or_initialize_baseline(total_eq):
             _backup_corrupt_file(RUNTIME_DASHBOARD_BASELINE_PATH, exc)
             baseline = {}
 
-    baseline_total_eq = _safe_float(baseline.get("baseline_total_eq"))
-    if baseline_total_eq is not None and baseline_total_eq > 0:
-        return baseline_total_eq, baseline
-
     # 损坏时拒绝静默重置：保留基线为空，等待人工修复
     if file_corrupt:
-        return None, {}
+        return None, {}, "unavailable"
 
     total_eq = _safe_float(total_eq)
-    if total_eq is None or total_eq <= 0:
-        return None, baseline
+    equity_usdt = _safe_float(equity_usdt)
+    baseline_total_eq = _safe_float(baseline.get("baseline_total_eq"))
+    baseline_equity_usdt = _safe_float(baseline.get("baseline_equity_usdt"))
+    changed = False
 
-    baseline = {
-        "baseline_total_eq": total_eq,
-        "initialized_at": _utc_now_iso(),
-    }
-    _write_json_atomic(RUNTIME_DASHBOARD_BASELINE_PATH, baseline)
-    return total_eq, baseline
+    if (baseline_total_eq is None or baseline_total_eq <= 0) and total_eq is not None and total_eq > 0:
+        baseline["baseline_total_eq"] = total_eq
+        baseline_total_eq = total_eq
+        changed = True
+
+    if (
+        (baseline_equity_usdt is None or baseline_equity_usdt <= 0)
+        and equity_usdt is not None
+        and equity_usdt > 0
+    ):
+        baseline["baseline_equity_usdt"] = equity_usdt
+        baseline_equity_usdt = equity_usdt
+        changed = True
+
+    if changed:
+        baseline.setdefault("initialized_at", _utc_now_iso())
+        if baseline_equity_usdt is not None:
+            baseline.setdefault("usdt_initialized_at", _utc_now_iso())
+        _write_json_atomic(RUNTIME_DASHBOARD_BASELINE_PATH, baseline)
+
+    if equity_usdt is not None and equity_usdt > 0:
+        return baseline_equity_usdt, baseline, "usdt_equity"
+    return baseline_total_eq, baseline, "usd_total_equity"
 
 
 def _upsert_history_point(history, point, max_points=RUNTIME_DASHBOARD_MAX_HISTORY_POINTS):
@@ -127,37 +142,40 @@ def _upsert_history_point(history, point, max_points=RUNTIME_DASHBOARD_MAX_HISTO
     return history
 
 
-def _compute_performance(history, baseline_total_eq):
-    total_eq_values = [
-        _safe_float(item.get("total_eq"))
+def _compute_performance(history, baseline_equity, equity_source):
+    equity_field = "equity_usdt" if equity_source == "usdt_equity" else "total_eq"
+    equity_values = [
+        _safe_float(item.get(equity_field))
         for item in history
     ]
-    total_eq_values = [value for value in total_eq_values if value is not None and value > 0]
+    equity_values = [value for value in equity_values if value is not None and value > 0]
 
-    current_total_eq = total_eq_values[-1] if total_eq_values else None
-    peak_total_eq = max(total_eq_values) if total_eq_values else None
-    min_total_eq = min(total_eq_values) if total_eq_values else None
+    current_equity = equity_values[-1] if equity_values else None
+    peak_equity = max(equity_values) if equity_values else None
+    min_equity = min(equity_values) if equity_values else None
 
     net_pnl = None
     return_pct = None
     drawdown_pct = None
 
-    if current_total_eq is not None and baseline_total_eq is not None and baseline_total_eq > 0:
-        net_pnl = current_total_eq - baseline_total_eq
-        return_pct = net_pnl / baseline_total_eq * 100.0
+    if current_equity is not None and baseline_equity is not None and baseline_equity > 0:
+        net_pnl = current_equity - baseline_equity
+        return_pct = net_pnl / baseline_equity * 100.0
 
-    if current_total_eq is not None and peak_total_eq is not None and peak_total_eq > 0:
-        drawdown_pct = (current_total_eq - peak_total_eq) / peak_total_eq * 100.0
+    if current_equity is not None and peak_equity is not None and peak_equity > 0:
+        drawdown_pct = (current_equity - peak_equity) / peak_equity * 100.0
 
     return {
-        "baseline_total_eq": baseline_total_eq,
-        "current_total_eq": current_total_eq,
-        "peak_total_eq": peak_total_eq,
-        "min_total_eq": min_total_eq,
+        "baseline_total_eq": baseline_equity,
+        "current_total_eq": current_equity,
+        "peak_total_eq": peak_equity,
+        "min_total_eq": min_equity,
         "net_pnl": net_pnl,
         "return_pct": return_pct,
         "drawdown_pct": drawdown_pct,
-        "history_points": len(history),
+        "history_points": len(equity_values),
+        "equity_source": equity_source,
+        "currency": "USDT" if equity_source == "usdt_equity" else "USD",
     }
 
 
@@ -170,12 +188,18 @@ def write_runtime_dashboard_snapshot(snapshot, *, history_point=None):
 
     total_eq = _safe_float(account.get("total_eq"))
     avail_eq = _safe_float(account.get("avail_eq"))
+    equity_usdt = _safe_float(account.get("equity_usdt"))
+    cash_balance_usdt = _safe_float(account.get("cash_balance_usdt"))
     if total_eq is not None:
         account["total_eq"] = total_eq
     if avail_eq is not None:
         account["avail_eq"] = avail_eq
+    if equity_usdt is not None:
+        account["equity_usdt"] = equity_usdt
+    if cash_balance_usdt is not None:
+        account["cash_balance_usdt"] = cash_balance_usdt
 
-    baseline_total_eq, baseline_payload = _load_or_initialize_baseline(total_eq)
+    baseline_equity, baseline_payload, equity_source = _load_or_initialize_baseline(total_eq, equity_usdt)
     payload["baseline"] = baseline_payload
 
     history = load_runtime_dashboard_history()
@@ -184,19 +208,27 @@ def write_runtime_dashboard_snapshot(snapshot, *, history_point=None):
         point["timestamp"] = point.get("timestamp") or payload["updated_at"]
         point_total_eq = _safe_float(point.get("total_eq"))
         point_avail_eq = _safe_float(point.get("avail_eq"))
+        point_equity_usdt = _safe_float(point.get("equity_usdt"))
+        point_cash_balance_usdt = _safe_float(point.get("cash_balance_usdt"))
         if point_total_eq is not None:
             point["total_eq"] = point_total_eq
         if point_avail_eq is not None:
             point["avail_eq"] = point_avail_eq
+        if point_equity_usdt is not None:
+            point["equity_usdt"] = point_equity_usdt
+        if point_cash_balance_usdt is not None:
+            point["cash_balance_usdt"] = point_cash_balance_usdt
 
-        if baseline_total_eq is not None and point_total_eq is not None and baseline_total_eq > 0:
-            point["net_pnl"] = point_total_eq - baseline_total_eq
-            point["return_pct"] = point["net_pnl"] / baseline_total_eq * 100.0
+        point_equity = point_equity_usdt if equity_source == "usdt_equity" else point_total_eq
+        if baseline_equity is not None and point_equity is not None and baseline_equity > 0:
+            point["net_pnl"] = point_equity - baseline_equity
+            point["return_pct"] = point["net_pnl"] / baseline_equity * 100.0
+            point["equity_source"] = equity_source
 
         history = _upsert_history_point(history, point)
         _write_json_atomic(RUNTIME_DASHBOARD_HISTORY_PATH, history)
 
-    performance = _compute_performance(history, baseline_total_eq)
+    performance = _compute_performance(history, baseline_equity, equity_source)
     payload["performance"] = performance
     runtime["last_status"] = runtime.get("last_status") or "unknown"
     runtime["loop_count"] = _safe_int(runtime.get("loop_count"), 0)

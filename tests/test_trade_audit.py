@@ -7,6 +7,7 @@ from utils.trade_audit import (
     append_trade_record,
     build_trade_record,
     load_trade_records,
+    summarize_daily_records,
     trade_record_exists,
     write_daily_report,
 )
@@ -40,8 +41,20 @@ class TradeAuditTests(unittest.TestCase):
             entry_price_before=100.0,
             pos_qty_after=0.0,
             entry_price_after=0.0,
-            account_before={"total_eq": 1000, "avail_eq": 900, "sizing_eq": 950},
-            account_after={"total_eq": 1010, "avail_eq": 910, "sizing_eq": 960},
+            account_before={
+                "total_eq": 1000,
+                "avail_eq": 900,
+                "sizing_eq": 950,
+                "equity_usdt": 1002,
+                "cash_balance_usdt": 998,
+            },
+            account_after={
+                "total_eq": 1010,
+                "avail_eq": 910,
+                "sizing_eq": 960,
+                "equity_usdt": 1013,
+                "cash_balance_usdt": 1008,
+            },
             signal_snapshot={"long_prob": 0.6, "trend_bias": "long", "trend_gap": 0.01},
             decision={"action": "CLOSE"},
         )
@@ -54,6 +67,11 @@ class TradeAuditTests(unittest.TestCase):
         self.assertEqual(record["trade_date"], "2026-05-05")
         self.assertAlmostEqual(record["avail_eq_before"], 900.0)
         self.assertAlmostEqual(record["sizing_eq_after"], 960.0)
+        self.assertAlmostEqual(record["equity_usdt_before"], 1002.0)
+        self.assertAlmostEqual(record["equity_usdt_after"], 1013.0)
+        self.assertAlmostEqual(record["equity_usdt_delta"], 11.0)
+        self.assertAlmostEqual(record["cash_balance_usdt_before"], 998.0)
+        self.assertAlmostEqual(record["cash_balance_usdt_after"], 1008.0)
         self.assertEqual(record["risk_context"]["trend_bias"], "long")
         self.assertEqual(record["schema_version"], 2)
 
@@ -173,6 +191,32 @@ class TradeAuditTests(unittest.TestCase):
             self.assertIn("每日交易复盘", report)
             self.assertIn("阈值滑点(bps)", report)
             self.assertIn("触发到成交(ms)", report)
+
+    def test_daily_summary_uses_one_equity_source_across_mixed_records(self):
+        records = [
+            {
+                "trade_date": "2026-07-20",
+                "executed_at": "2026-07-20T01:00:00+00:00",
+                "equity_before": 900.0,
+                "equity_after": 899.0,
+            },
+            {
+                "trade_date": "2026-07-20",
+                "executed_at": "2026-07-20T02:00:00+00:00",
+                "equity_before": 898.0,
+                "equity_after": 897.0,
+                "equity_usdt_before": 1000.0,
+                "equity_usdt_after": 1005.0,
+            },
+        ]
+
+        summary = summarize_daily_records(records, "2026-07-20")
+
+        self.assertEqual(summary["equity_source"], "usdt_equity")
+        self.assertEqual(summary["equity_currency"], "USDT")
+        self.assertAlmostEqual(summary["first_equity"], 1000.0)
+        self.assertAlmostEqual(summary["last_equity"], 1005.0)
+        self.assertAlmostEqual(summary["equity_delta"], 5.0)
 
 
 if __name__ == "__main__":

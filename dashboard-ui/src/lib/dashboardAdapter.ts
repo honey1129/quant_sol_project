@@ -356,10 +356,11 @@ function buildEquityCurve(
   currentPrice: number | null,
   updatedAt: string,
 ): EquityPoint[] {
+  const useUsdtEquity = history.some((point) => (toNumber(point.equity_usdt) ?? 0) > 0);
   const normalizedHistory = history
     .map((point) => ({
       timestamp: toIsoString(point.bar_ts || point.timestamp, ""),
-      totalEq: toNumber(point.total_eq),
+      totalEq: toNumber(useUsdtEquity ? point.equity_usdt : point.total_eq),
       price: toNumber(point.price),
     }))
     .filter((point) => point.timestamp && point.totalEq !== null);
@@ -824,6 +825,7 @@ export function buildDashboardSnapshotFromApi(bundle: ApiDashboardBundle | null 
   );
 
   const currentEquity = toNumber(liveMetrics?.equity)
+    ?? toNumber(account.equity_usdt)
     ?? toNumber(account.total_eq)
     ?? toNumber(performance.current_total_eq)
     ?? mockSnapshot.metrics.equity;

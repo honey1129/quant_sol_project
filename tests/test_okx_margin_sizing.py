@@ -1,6 +1,7 @@
 import unittest
 import sys
 import types
+from types import SimpleNamespace
 
 try:
     import pandas  # noqa: F401
@@ -31,10 +32,35 @@ except ModuleNotFoundError:
         module = types.ModuleType(f"okx.{name}")
         sys.modules[f"okx.{name}"] = module
 
-from core.okx_api import cap_size_by_available_margin, floor_size_to_lot, is_insufficient_margin_error
+from core.okx_api import OKXClient, cap_size_by_available_margin, floor_size_to_lot, is_insufficient_margin_error
 
 
 class OKXMarginSizingTests(unittest.TestCase):
+    def test_account_balance_exposes_usdt_equity_and_cash_balance(self):
+        client = OKXClient.__new__(OKXClient)
+        client.account_api = SimpleNamespace(
+            get_account_balance=lambda: {
+                "code": "0",
+                "data": [{
+                    "totalEq": "998.5",
+                    "details": [{
+                        "ccy": "USDT",
+                        "eq": "1000.25",
+                        "cashBal": "995.75",
+                        "availEq": "900.5",
+                    }],
+                }],
+            }
+        )
+        client._call_with_retry = lambda _label, func, **_kwargs: func()
+
+        balance = client.get_account_balance()["data"][0]
+
+        self.assertAlmostEqual(balance["totalEq"], 998.5)
+        self.assertAlmostEqual(balance["usdtEq"], 1000.25)
+        self.assertAlmostEqual(balance["cashBal"], 995.75)
+        self.assertAlmostEqual(balance["availEq"], 900.5)
+
     def test_floor_size_to_lot_rounds_down(self):
         self.assertAlmostEqual(floor_size_to_lot(1.239, 0.01), 1.23)
 

@@ -33,6 +33,7 @@ DASHBOARD_TRADE_LIMIT = int(os.getenv("DASHBOARD_TRADE_LIMIT", "18"))
 DASHBOARD_LOG_TAIL_LINES = int(os.getenv("DASHBOARD_LOG_TAIL_LINES", "18000"))
 DASHBOARD_EXECUTION_LATENCY_WARN_MS = float(os.getenv("DASHBOARD_EXECUTION_LATENCY_WARN_MS", "2000"))
 DASHBOARD_THRESHOLD_SLIPPAGE_WARN_BPS = float(os.getenv("DASHBOARD_THRESHOLD_SLIPPAGE_WARN_BPS", "20"))
+DASHBOARD_ERROR_MAX_AGE_SEC = float(os.getenv("DASHBOARD_ERROR_MAX_AGE_SEC", "300"))
 # 访问密码（留空则不开启认证）。在 .env 中设置 DASHBOARD_PASSWORD=yourpassword
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "").strip()
 ENV_FILE_PATH = os.getenv("ENV_FILE", os.path.join(BASE_DIR, ".env"))
@@ -212,6 +213,10 @@ def latest_retrain_log_path():
     return paths[-1] if paths else None
 
 
+def retrain_failure_is_expected_skip(last_error):
+    return "平仓交易数不足:" in str(last_error or "")
+
+
 def build_model_observability_snapshot():
     metadata_path = os.path.join(BASE_DIR, getattr(config, "TRAINING_METADATA_PATH", "models/training_metadata.json"))
     state_path = os.path.join(LOGS_DIR, "model_retrain_state.json")
@@ -226,6 +231,8 @@ def build_model_observability_snapshot():
         missing_artifacts = []
     last_status = state.get("last_status")
     last_error = state.get("last_error")
+    retrain_skipped = last_status == "failed" and retrain_failure_is_expected_skip(last_error)
+    effective_last_status = "skipped_insufficient_data" if retrain_skipped else last_status
     health = "ok"
     warnings = []
     if not metadata:
@@ -237,7 +244,7 @@ def build_model_observability_snapshot():
     if missing_artifacts:
         health = "error"
         warnings.append("model_artifacts_missing")
-    if last_status == "failed":
+    if last_status == "failed" and not retrain_skipped:
         health = "warning" if health == "ok" else health
         warnings.append("last_retrain_failed")
     if state.get("last_status") == "running":
@@ -261,7 +268,8 @@ def build_model_observability_snapshot():
         "oos_end": metadata.get("oos_end") if isinstance(metadata, dict) else None,
         "validation_metrics": metadata.get("validation_metrics", {}) if isinstance(metadata, dict) else {},
         "retrain_state": {
-            "last_status": last_status,
+            "last_status": effective_last_status,
+            "raw_last_status": last_status,
             "last_attempt_at": state.get("last_attempt_at"),
             "last_success_at": state.get("last_success_at"),
             "last_finished_at": state.get("last_finished_at"),
@@ -437,7 +445,40 @@ def should_ignore_log_error_message(message):
     return "runtime_dashboard JSON 损坏" in text and "/tmp/" in text
 
 
-def enrich_status_with_fallbacks(status, log_lines, recent_events):
+def latest_fresh_log_error(log_lines, *, now=None):
+    now = now or utc_now()
+    max_age = max(0.0, float(DASHBOARD_ERROR_MAX_AGE_SEC))
+    recovered_websocket_channels = set()
+    for line in reversed(log_lines or []):
+        parsed = parse_log_line(line)
+        if not parsed:
+            continue
+        message = parsed["message"]
+        if parsed["level"] == "INFO" and "WebSocket connected" in message:
+            if "ticker WebSocket connected" in message:
+                recovered_websocket_channels.add("ticker")
+            if "positions WebSocket connected" in message:
+                recovered_websocket_channels.add("positions")
+            continue
+        if parsed["level"] != "ERROR":
+            continue
+        if should_ignore_log_error_message(message):
+            continue
+        if "ticker WebSocket reconnecting" in message and "ticker" in recovered_websocket_channels:
+            continue
+        if "positions WebSocket reconnecting" in message and "positions" in recovered_websocket_channels:
+            continue
+        event_iso = log_ts_to_iso(parsed.get("ts"))
+        event_dt = parse_any_timestamp_to_utc(event_iso)
+        if event_dt is None:
+            continue
+        age_sec = (now - event_dt).total_seconds()
+        if -60.0 <= age_sec <= max_age:
+            return message
+    return None
+
+
+def enrich_status_with_fallbacks(status, log_lines, recent_events, *, now=None):
     status = dict(status or {})
     runtime = dict(status.get("runtime") or {})
     market = dict(status.get("market") or {})
@@ -448,8 +489,7 @@ def enrich_status_with_fallbacks(status, log_lines, recent_events):
     decision = dict(status.get("decision") or {})
     last_execution = dict(status.get("last_execution") or {})
 
-    latest_error = None
-    fallback_error = None
+    latest_error = latest_fresh_log_error(log_lines, now=now)
     last_event_iso = None
     for line in reversed(log_lines):
         parsed = parse_log_line(line)
@@ -457,16 +497,8 @@ def enrich_status_with_fallbacks(status, log_lines, recent_events):
             continue
         if last_event_iso is None:
             last_event_iso = log_ts_to_iso(parsed["ts"])
-        if parsed["level"] == "ERROR":
-            message = parsed["message"]
-            if should_ignore_log_error_message(message):
-                continue
-            if fallback_error is None:
-                fallback_error = message
-            if not message.startswith("Traceback"):
-                latest_error = message
-                break
-    latest_error = latest_error or fallback_error
+        if last_event_iso is not None:
+            break
 
     new_bar = maybe_parse_latest_new_bar(log_lines)
     progress = maybe_parse_bar_progress(recent_events or log_lines)
@@ -834,16 +866,19 @@ def build_signal_summary(status):
 
 
 def compute_daily_pnl(history):
+    equity_field = "equity_usdt" if any(
+        (safe_float(point.get("equity_usdt")) or 0.0) > 0 for point in (history or [])
+    ) else "total_eq"
     normalized = []
     for point in history or []:
         ts = point.get("bar_ts") or point.get("timestamp")
-        total_eq = safe_float(point.get("total_eq"))
-        if not ts or total_eq is None:
+        equity = safe_float(point.get(equity_field))
+        if not ts or equity is None:
             continue
         dt = parse_any_timestamp_to_utc(ts)
         if dt is None:
             continue
-        normalized.append((dt, total_eq))
+        normalized.append((dt, equity))
 
     if not normalized:
         return None
@@ -852,11 +887,12 @@ def compute_daily_pnl(history):
     latest_dt, latest_eq = normalized[-1]
     threshold = latest_dt - timedelta(days=1)
 
-    # 找24小时前的锚点
+    # 使用不晚于24小时前的最近锚点，历史不足24小时则不外推。
     anchor_eq = None
     for dt, eq in normalized:
-        if dt >= threshold:
+        if dt <= threshold:
             anchor_eq = eq
+        else:
             break
 
     # 如果历史数据不足24小时，返回0（避免用第一个点导致虚高）
@@ -1002,7 +1038,11 @@ def build_risk_snapshot(status, history, recent_events):
     account = status.get("account") or {}
     position = status.get("position") or {}
 
-    total_eq = safe_float(account.get("total_eq")) or safe_float((status.get("performance") or {}).get("current_total_eq"))
+    total_eq = (
+        safe_float(account.get("equity_usdt"))
+        or safe_float(account.get("total_eq"))
+        or safe_float((status.get("performance") or {}).get("current_total_eq"))
+    )
     notional = safe_float(position.get("notional"))
     leverage = safe_float(market.get("leverage")) or safe_float(getattr(config, "LEVERAGE", 0)) or 0.0
     margin_usage_pct = 0.0
@@ -1016,11 +1056,7 @@ def build_risk_snapshot(status, history, recent_events):
 
     latest_error = runtime.get("last_error")
     if not latest_error:
-        for line in reversed(recent_events):
-            parsed = parse_log_line(line)
-            if parsed and parsed["level"] == "ERROR":
-                latest_error = parsed["message"]
-                break
+        latest_error = latest_fresh_log_error(recent_events)
 
     runtime_status = str(runtime.get("last_status") or "").lower()
     api_status = "Connected"
@@ -1197,7 +1233,11 @@ def build_metrics_snapshot(status, history, risk_snapshot, backtest_summary, bac
     performance = status.get("performance") or {}
     position = status.get("position") or {}
 
-    current_equity = safe_float(account.get("total_eq")) or safe_float(performance.get("current_total_eq"))
+    current_equity = (
+        safe_float(account.get("equity_usdt"))
+        or safe_float(performance.get("current_total_eq"))
+        or safe_float(account.get("total_eq"))
+    )
     daily_pnl = compute_daily_pnl(history)
     total_return_pct = safe_float(performance.get("return_pct"))
     if total_return_pct is None:
@@ -1206,8 +1246,11 @@ def build_metrics_snapshot(status, history, risk_snapshot, backtest_summary, bac
     max_drawdown_pct = None
     curve_drawdowns = []
     peak = None
+    equity_field = "equity_usdt" if any(
+        (safe_float(point.get("equity_usdt")) or 0.0) > 0 for point in (history or [])
+    ) else "total_eq"
     for point in history:
-        total_eq = safe_float(point.get("total_eq"))
+        total_eq = safe_float(point.get(equity_field))
         if total_eq is None:
             continue
         peak = total_eq if peak is None else max(peak, total_eq)
@@ -1231,6 +1274,11 @@ def build_metrics_snapshot(status, history, risk_snapshot, backtest_summary, bac
 
     return {
         "equity": current_equity,
+        "equity_source": (
+            "usdt_equity"
+            if (safe_float(account.get("equity_usdt")) or 0.0) > 0
+            else "usd_total_equity"
+        ),
         "daily_pnl": daily_pnl,
         "total_return_pct": total_return_pct,
         "max_drawdown_pct": max_drawdown_pct,
