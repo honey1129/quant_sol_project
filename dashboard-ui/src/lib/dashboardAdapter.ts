@@ -87,6 +87,10 @@ function humanizeReasonCode(reason: string): string {
     DualSidePosition: "检测到账户同时存在多仓和空仓，系统进入保护性对账流程，优先处理异常双向持仓。",
     LoopException: "主循环中出现异常，系统已记录错误并等待下一轮恢复执行。",
     MonitorBoot: "监控进程刚完成启动，当前展示的是启动后的首次状态快照。",
+    StopLossRealtime: "本地实时风控检测到止损阈值，系统使用实时仓位提交紧急平仓。",
+    TakeProfitRealtime: "本地实时风控检测到止盈阈值，系统使用实时仓位提交平仓。",
+    StopLossExchange: "OKX 交易所端保护单触发止损并完成平仓。",
+    TakeProfitExchange: "OKX 交易所端保护单触发止盈并完成平仓。",
   };
 
   return reasonMap[trimmed] || trimmed;
@@ -684,6 +688,11 @@ function buildTradeRows(bundle: ApiDashboardBundle): TradeRow[] {
       feeSource: trade.fee_source || (toNumber(trade.fee) !== null ? "exchange_fill" : "not_recorded"),
       slippage: toNumber(trade.slippage),
       slippageSource: trade.slippage_source || (toNumber(trade.slippage) !== null ? "exchange_fill" : "not_recorded"),
+      triggerToFillMs: toNumber(trade.trigger_to_fill_ms),
+      orderRoundTripMs: toNumber(trade.order_round_trip_ms),
+      thresholdSlippageBps: toNumber(trade.threshold_slippage_bps),
+      triggerSource: trade.trigger_source,
+      action: trade.action,
       reason: humanizeTradeReason(trade.reason || "最近一次执行"),
       status: trade.status || "Filled",
     }));

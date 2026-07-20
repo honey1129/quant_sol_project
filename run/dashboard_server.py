@@ -20,6 +20,7 @@ from utils.runtime_dashboard import (
     load_runtime_dashboard_history,
     load_runtime_dashboard_status,
 )
+from utils.trade_audit import load_trade_records
 from utils.utils import BASE_DIR, LOG_FILE, LOGS_DIR
 from utils.utils import DISPLAY_TIMEZONE
 
@@ -30,6 +31,8 @@ DASHBOARD_HISTORY_LIMIT = int(os.getenv("DASHBOARD_HISTORY_LIMIT", "240"))
 DASHBOARD_EVENT_LIMIT = int(os.getenv("DASHBOARD_EVENT_LIMIT", "24"))
 DASHBOARD_TRADE_LIMIT = int(os.getenv("DASHBOARD_TRADE_LIMIT", "18"))
 DASHBOARD_LOG_TAIL_LINES = int(os.getenv("DASHBOARD_LOG_TAIL_LINES", "18000"))
+DASHBOARD_EXECUTION_LATENCY_WARN_MS = float(os.getenv("DASHBOARD_EXECUTION_LATENCY_WARN_MS", "2000"))
+DASHBOARD_THRESHOLD_SLIPPAGE_WARN_BPS = float(os.getenv("DASHBOARD_THRESHOLD_SLIPPAGE_WARN_BPS", "20"))
 # 访问密码（留空则不开启认证）。在 .env 中设置 DASHBOARD_PASSWORD=yourpassword
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "").strip()
 ENV_FILE_PATH = os.getenv("ENV_FILE", os.path.join(BASE_DIR, ".env"))
@@ -271,10 +274,29 @@ def build_model_observability_snapshot():
     }
 
 
-def build_observability_snapshot(status):
+def build_execution_observability_snapshot(record):
+    record = record if isinstance(record, dict) else {}
+    quality = record.get("execution_quality") if isinstance(record.get("execution_quality"), dict) else {}
+    trigger_to_fill_ms = safe_float(quality.get("trigger_to_fill_ms"))
+    threshold_slippage_bps = safe_float(quality.get("threshold_to_fill_slippage_bps"))
+    return {
+        "available": bool(quality),
+        "executed_at": record.get("executed_at"),
+        "reason": record.get("reason"),
+        "trigger_source": quality.get("trigger_source"),
+        "trigger_to_fill_ms": trigger_to_fill_ms,
+        "order_round_trip_ms": safe_float(quality.get("order_round_trip_ms")),
+        "threshold_slippage_bps": threshold_slippage_bps,
+        "latency_warn_ms": DASHBOARD_EXECUTION_LATENCY_WARN_MS,
+        "threshold_slippage_warn_bps": DASHBOARD_THRESHOLD_SLIPPAGE_WARN_BPS,
+    }
+
+
+def build_observability_snapshot(status, latest_trade_record=None):
     runtime = status.get("runtime", {}) if isinstance(status, dict) else {}
     position = (status.get("position") or {}) if isinstance(status, dict) else {}
     model_snapshot = build_model_observability_snapshot()
+    execution_snapshot = build_execution_observability_snapshot(latest_trade_record)
     alerts = []
     if runtime.get("last_error"):
         alerts.append({"level": "error", "code": "runtime_last_error", "message": runtime.get("last_error")})
@@ -301,6 +323,29 @@ def build_observability_snapshot(status):
             "code": "risk_websocket_unavailable",
             "message": "Realtime WebSocket is stale or disconnected; REST fallback is active",
         })
+    trigger_to_fill_ms = execution_snapshot.get("trigger_to_fill_ms")
+    if trigger_to_fill_ms is not None and trigger_to_fill_ms > DASHBOARD_EXECUTION_LATENCY_WARN_MS:
+        alerts.append({
+            "level": "warning",
+            "code": "execution_latency",
+            "message": (
+                f"trigger_to_fill={trigger_to_fill_ms:.1f}ms exceeds "
+                f"{DASHBOARD_EXECUTION_LATENCY_WARN_MS:.1f}ms"
+            ),
+        })
+    threshold_slippage_bps = execution_snapshot.get("threshold_slippage_bps")
+    if (
+        threshold_slippage_bps is not None
+        and threshold_slippage_bps > DASHBOARD_THRESHOLD_SLIPPAGE_WARN_BPS
+    ):
+        alerts.append({
+            "level": "warning",
+            "code": "execution_slippage",
+            "message": (
+                f"threshold_slippage={threshold_slippage_bps:.2f}bps exceeds "
+                f"{DASHBOARD_THRESHOLD_SLIPPAGE_WARN_BPS:.2f}bps"
+            ),
+        })
     if model_snapshot.get("health") != "ok":
         alerts.append({
             "level": "warning" if model_snapshot.get("health") == "warning" else "error",
@@ -311,6 +356,7 @@ def build_observability_snapshot(status):
         "health": "error" if any(a["level"] == "error" for a in alerts) else ("warning" if alerts else "ok"),
         "alerts": alerts,
         "model": model_snapshot,
+        "execution": execution_snapshot,
     }
 
 
@@ -1035,6 +1081,76 @@ def infer_trade_side(message, fallback_direction):
     return fallback_direction if fallback_direction in {"Long", "Short"} else "Long"
 
 
+def _audit_trade_status(record):
+    state = str((record or {}).get("state") or "").lower()
+    if state in {"canceled", "rejected", "failed", "mmp_canceled"}:
+        return "Canceled"
+    reason = str((record or {}).get("reason") or "")
+    if reason.startswith("StopLoss"):
+        return "Stopped"
+    if reason.startswith("TakeProfit"):
+        return "Take Profit"
+    return "Filled"
+
+
+def build_recent_trade_rows_from_audit(records, limit=DASHBOARD_TRADE_LIMIT):
+    records = [item for item in (records or []) if isinstance(item, dict) and item.get("executed_at")]
+    records.sort(key=lambda item: str(item.get("executed_at") or ""), reverse=True)
+    rows = []
+    for record in records[:max(0, int(limit))]:
+        action = str(record.get("action") or "").upper()
+        fill_price = safe_float(record.get("fill_price"))
+        entry_price_before = safe_float(record.get("entry_price_before"))
+        closed_qty = safe_float(record.get("closed_qty")) or 0.0
+        is_exit = action == "CLOSE" or closed_qty > 0
+        quality = record.get("execution_quality") if isinstance(record.get("execution_quality"), dict) else {}
+        threshold_slippage_bps = safe_float(quality.get("threshold_to_fill_slippage_bps"))
+        reference_slippage_bps = safe_float(record.get("slippage_bps"))
+        displayed_slippage_bps = (
+            threshold_slippage_bps
+            if threshold_slippage_bps is not None
+            else reference_slippage_bps
+        )
+        pnl = safe_float(record.get("net_realized_pnl")) if is_exit else None
+        rows.append({
+            "time": record.get("executed_at"),
+            "symbol": record.get("symbol") or getattr(config, "SYMBOL", "SOL-USDT-SWAP"),
+            "side": "Short" if str(record.get("pos_side") or "").lower() == "short" else "Long",
+            "action": action,
+            "entry": entry_price_before if is_exit else fill_price,
+            "entry_source": (
+                "position_entry"
+                if is_exit and entry_price_before is not None
+                else "exchange_fill"
+                if not is_exit and fill_price is not None
+                else "not_recorded"
+            ),
+            "exit": fill_price if is_exit else None,
+            "exit_source": "exchange_fill" if is_exit and fill_price is not None else "not_recorded",
+            "pnl": pnl,
+            "pnl_source": "trade_audit" if pnl is not None else "not_realized",
+            "fee": safe_float(record.get("fee_abs")),
+            "fee_source": record.get("fee_source") or "trade_audit",
+            "slippage": displayed_slippage_bps,
+            "slippage_source": (
+                "threshold_to_fill_bps"
+                if threshold_slippage_bps is not None
+                else "reference_to_fill_bps"
+                if reference_slippage_bps is not None
+                else "not_recorded"
+            ),
+            "trigger_to_fill_ms": safe_float(quality.get("trigger_to_fill_ms")),
+            "order_round_trip_ms": safe_float(quality.get("order_round_trip_ms")),
+            "threshold_slippage_bps": threshold_slippage_bps,
+            "trigger_source": quality.get("trigger_source"),
+            "reason": record.get("reason") or "RecordedExecution",
+            "status": _audit_trade_status(record),
+            "schema_version": safe_int(record.get("schema_version"), 1),
+            "record_source": "live_fills",
+        })
+    return rows
+
+
 def parse_recent_trade_rows(log_lines, status, limit=DASHBOARD_TRADE_LIMIT):
     market = status.get("market") or {}
     position = status.get("position") or {}
@@ -1138,8 +1254,17 @@ def build_dashboard_bundle():
     backtest_summary = parse_latest_backtest_summary(log_lines)
     backtest_csv_metrics = parse_latest_backtest_csv_metrics()
     risk_snapshot = build_risk_snapshot(status, history, recent_events)
+    audit_records = load_trade_records()
+    audit_trade_rows = build_recent_trade_rows_from_audit(audit_records, limit=DASHBOARD_TRADE_LIMIT)
+    latest_audit_record = None
+    if audit_records:
+        latest_audit_record = max(
+            (item for item in audit_records if isinstance(item, dict)),
+            key=lambda item: str(item.get("executed_at") or ""),
+            default=None,
+        )
 
-    observability = build_observability_snapshot(status)
+    observability = build_observability_snapshot(status, latest_audit_record)
 
     return {
         "generated_at": utc_now_iso(),
@@ -1152,7 +1277,11 @@ def build_dashboard_bundle():
         "signal_summary": build_signal_summary(status),
         "risk_snapshot": risk_snapshot,
         "metrics": build_metrics_snapshot(status, history, risk_snapshot, backtest_summary, backtest_csv_metrics),
-        "recent_trades": parse_recent_trade_rows(log_lines, status, limit=DASHBOARD_TRADE_LIMIT),
+        "recent_trades": audit_trade_rows or parse_recent_trade_rows(
+            log_lines,
+            status,
+            limit=DASHBOARD_TRADE_LIMIT,
+        ),
         "observability": observability,
         "model_observability": observability["model"],
         "research_metrics": {

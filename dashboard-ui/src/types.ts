@@ -101,6 +101,11 @@ export interface TradeRow {
   feeSource?: string;
   slippage: number | null;
   slippageSource?: string;
+  triggerToFillMs?: number | null;
+  orderRoundTripMs?: number | null;
+  thresholdSlippageBps?: number | null;
+  triggerSource?: string | null;
+  action?: string;
   reason: string;
   status: "Filled" | "Stopped" | "Take Profit" | "Canceled" | string;
 }
@@ -324,6 +329,13 @@ export interface ApiDashboardTradeRow {
   fee_source?: string;
   slippage?: number | null;
   slippage_source?: string;
+  trigger_to_fill_ms?: number | null;
+  order_round_trip_ms?: number | null;
+  threshold_slippage_bps?: number | null;
+  trigger_source?: string | null;
+  action?: string;
+  schema_version?: number;
+  record_source?: string;
   reason?: string;
   status?: TradeRow["status"] | string;
 }

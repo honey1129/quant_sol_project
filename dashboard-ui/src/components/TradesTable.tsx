@@ -1,5 +1,5 @@
 import type { TradeRow } from "../types";
-import { formatDateTime, formatOptionalCurrency } from "../lib/format";
+import { formatDateTime, formatOptionalCurrency, formatOptionalNumber } from "../lib/format";
 import { getSignalDirectionLabel, getTradeStatusLabel } from "../lib/uiText";
 import { StatusBadge } from "./StatusBadge";
 
@@ -15,6 +15,10 @@ function getStatusTone(status: TradeRow["status"]) {
     return "rose";
   }
   return "amber";
+}
+
+function formatMetric(value: number | null | undefined, digits: number, unit: string) {
+  return value === null || value === undefined ? "--" : `${formatOptionalNumber(value, digits)} ${unit}`;
 }
 
 export function TradesTable({ trades }: TradesTableProps) {
@@ -40,6 +44,9 @@ export function TradesTable({ trades }: TradesTableProps) {
                 <th className="text-right">开仓</th>
                 <th className="text-right">平仓</th>
                 <th className="text-right">盈亏</th>
+                <th className="text-right">手续费</th>
+                <th className="text-right">滑点</th>
+                <th className="text-right">执行延迟</th>
                 <th>原因</th>
                 <th>状态</th>
               </tr>
@@ -54,8 +61,15 @@ export function TradesTable({ trades }: TradesTableProps) {
                   </td>
                   <td className="text-right font-mono">{formatOptionalCurrency(trade.entry)}</td>
                   <td className="text-right font-mono">{formatOptionalCurrency(trade.exit)}</td>
-                  <td className={`text-right font-mono ${trade.pnl !== null && trade.pnl >= 0 ? "text-up" : "text-down"}`}>
+                  <td className={`text-right font-mono ${trade.pnl === null || trade.pnl === undefined ? "text-slate-400" : trade.pnl >= 0 ? "text-up" : "text-down"}`}>
                     {formatOptionalCurrency(trade.pnl)}
+                  </td>
+                  <td className="text-right font-mono text-slate-300">{formatOptionalCurrency(trade.fee)}</td>
+                  <td className="text-right font-mono text-slate-300">
+                    {formatMetric(trade.thresholdSlippageBps ?? trade.slippage, 2, "bps")}
+                  </td>
+                  <td className="text-right font-mono text-slate-300">
+                    {formatMetric(trade.triggerToFillMs ?? trade.orderRoundTripMs, 1, "ms")}
                   </td>
                   <td className="max-w-[280px] text-slate-400">{trade.reason}</td>
                   <td>

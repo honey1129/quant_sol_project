@@ -81,7 +81,7 @@
   }
 
   .cockpit-shell {
-    @apply min-h-screen gap-6 p-4 xl:grid xl:grid-cols-[248px_minmax(0,1fr)] xl:p-6;
+    @apply min-h-screen w-full max-w-full gap-6 p-4 xl:grid xl:grid-cols-[248px_minmax(0,1fr)] xl:p-6;
   }
 
   .cockpit-sidebar {
@@ -149,12 +149,12 @@
   }
 
   .terminal-panel {
-    @apply surface-1 p-5;
+    @apply surface-1 min-w-0 max-w-full overflow-hidden p-5;
     animation: panelRise 0.6s ease both;
   }
 
   .cockpit-main {
-    @apply min-w-0;
+    @apply min-w-0 max-w-full;
   }
 
   .page-banner {
@@ -183,10 +183,12 @@
 
   .dashboard-hero-grid {
     @apply grid gap-6;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .dashboard-dual-grid {
     @apply grid gap-6;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .dashboard-right-rail {
@@ -195,6 +197,7 @@
 
   .dashboard-analysis-grid {
     @apply grid gap-6;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .page-summary-grid {
@@ -569,5 +572,72 @@
 
   .status-badge-dot {
     animation: pulseDot 1.9s ease-in-out infinite;
+  }
+
+  @media (max-width: 1279px) {
+    .cockpit-shell {
+      @apply gap-0 overflow-hidden;
+    }
+
+    .cockpit-sidebar {
+      @apply mb-4 min-w-0;
+    }
+
+    .cockpit-sidebar-stack {
+      @apply min-w-0 overflow-hidden;
+    }
+
+    .cockpit-sidebar-section {
+      @apply px-4 py-3;
+    }
+
+    .cockpit-brand {
+      @apply gap-3;
+    }
+
+    .cockpit-brand-mark {
+      @apply h-10 w-10 rounded-xl text-base;
+    }
+
+    .cockpit-brand-title {
+      @apply mt-0 text-base;
+    }
+
+    .cockpit-brand-kicker {
+      @apply text-[10px] tracking-[0.2em];
+    }
+
+    .cockpit-nav {
+      @apply flex-row gap-2 overflow-x-auto;
+    }
+
+    .cockpit-nav-item {
+      @apply w-auto shrink-0 gap-2 rounded-xl px-3 py-2;
+    }
+
+    .cockpit-nav-icon {
+      @apply h-7 w-7 rounded-lg;
+    }
+
+    .cockpit-nav-meta,
+    .cockpit-sidebar-panel {
+      @apply hidden;
+    }
+
+    .cockpit-main,
+    .dashboard-right-rail,
+    .overflow-x-auto {
+      @apply min-w-0 max-w-full;
+    }
+  }
+
+  @media (max-width: 639px) {
+    .cockpit-shell {
+      @apply p-3;
+    }
+
+    .terminal-panel {
+      @apply p-4;
+    }
   }
 }

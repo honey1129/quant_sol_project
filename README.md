@@ -399,7 +399,9 @@ PYTHONPATH=. .venv/bin/python -m run.dashboard_server
 cd dashboard-ui && npm install && npm run dev
 ```
 
-**面板内容**：当前持仓、权益曲线、最近成交、K线+仓位叠加图、策略事件流。
+**面板内容**：当前持仓、权益曲线、真实成交价与费用、阈值滑点、触发到成交延迟、K线+仓位叠加图、策略事件流。最近成交优先读取 `logs/live_fills.jsonl`，仅在没有成交审计记录时降级为日志解析。
+
+执行质量告警阈值可通过 `DASHBOARD_EXECUTION_LATENCY_WARN_MS` 和 `DASHBOARD_THRESHOLD_SLIPPAGE_WARN_BPS` 调整，默认分别为 `2000ms` 和 `20bps`。
 
 ---
 

@@ -169,6 +169,75 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(trades[2]["side"], "Short")
         self.assertEqual(trades[2]["entry_source"], "position_snapshot")
 
+    def test_audit_trade_rows_use_exchange_fills_and_execution_quality(self):
+        records = [
+            {
+                "schema_version": 2,
+                "executed_at": "2026-07-20T03:00:00+00:00",
+                "symbol": "SOL-USDT-SWAP",
+                "action": "CLOSE",
+                "reason": "StopLossRealtime",
+                "pos_side": "long",
+                "state": "filled",
+                "entry_price_before": 100.0,
+                "fill_price": 98.7,
+                "closed_qty": 2.0,
+                "net_realized_pnl": -2.7,
+                "fee_abs": 0.10,
+                "fee_source": "exchange",
+                "slippage_bps": 10.1,
+                "execution_quality": {
+                    "trigger_source": "local_realtime_risk",
+                    "trigger_to_fill_ms": 250.0,
+                    "order_round_trip_ms": 180.0,
+                    "threshold_to_fill_slippage_bps": 30.3,
+                },
+                "raw_order": {"secret": "must-not-leak"},
+            },
+            {
+                "schema_version": 1,
+                "executed_at": "2026-07-19T03:00:00+00:00",
+                "action": "OPEN",
+                "reason": "OpenFromFlat",
+                "pos_side": "short",
+                "fill_price": 101.0,
+                "fee_abs": 0.05,
+            },
+        ]
+
+        trades = dashboard_server.build_recent_trade_rows_from_audit(records, limit=10)
+
+        self.assertEqual(len(trades), 2)
+        self.assertEqual(trades[0]["status"], "Stopped")
+        self.assertEqual(trades[0]["entry"], 100.0)
+        self.assertEqual(trades[0]["exit"], 98.7)
+        self.assertEqual(trades[0]["pnl"], -2.7)
+        self.assertEqual(trades[0]["fee"], 0.10)
+        self.assertEqual(trades[0]["threshold_slippage_bps"], 30.3)
+        self.assertEqual(trades[0]["trigger_to_fill_ms"], 250.0)
+        self.assertEqual(trades[0]["record_source"], "live_fills")
+        self.assertNotIn("raw_order", trades[0])
+        self.assertEqual(trades[1]["side"], "Short")
+        self.assertEqual(trades[1]["entry"], 101.0)
+        self.assertIsNone(trades[1]["exit"])
+
+    def test_dashboard_bundle_prefers_audit_trades_over_log_rows(self):
+        audit_record = {
+            "executed_at": "2026-07-20T03:00:00+00:00",
+            "action": "OPEN",
+            "pos_side": "long",
+            "fill_price": 99.0,
+        }
+        log_rows = [{"time": "log", "record_source": "log"}]
+        with patch("run.dashboard_server.load_runtime_dashboard_status", return_value={}):
+            with patch("run.dashboard_server.load_runtime_dashboard_history", return_value=[]):
+                with patch("run.dashboard_server.read_log_tail_lines", return_value=[]):
+                    with patch("run.dashboard_server.load_trade_records", return_value=[audit_record]):
+                        with patch("run.dashboard_server.parse_recent_trade_rows", return_value=log_rows):
+                            bundle = dashboard_server.build_dashboard_bundle()
+
+        self.assertEqual(bundle["recent_trades"][0]["record_source"], "live_fills")
+
     def test_save_strategy_params_persists_env_and_refreshes_config(self):
         dashboard_server.build_dashboard_bundle = lambda: {
             "strategy_params": dashboard_server.build_strategy_params(),
@@ -345,6 +414,30 @@ class DashboardObservabilityTests(unittest.TestCase):
 
         self.assertEqual(snapshot["health"], "warning")
         self.assertEqual(snapshot["alerts"][0]["code"], "risk_websocket_unavailable")
+
+    def test_observability_warns_on_execution_latency_and_slippage(self):
+        record = {
+            "executed_at": "2026-07-20T03:00:00+00:00",
+            "reason": "StopLossRealtime",
+            "execution_quality": {
+                "trigger_source": "local_realtime_risk",
+                "trigger_to_fill_ms": 2500.0,
+                "order_round_trip_ms": 2200.0,
+                "threshold_to_fill_slippage_bps": 25.0,
+            },
+        }
+        with patch("run.dashboard_server.build_model_observability_snapshot", return_value={"health": "ok", "warnings": []}):
+            with patch("run.dashboard_server.DASHBOARD_EXECUTION_LATENCY_WARN_MS", 2000.0):
+                with patch("run.dashboard_server.DASHBOARD_THRESHOLD_SLIPPAGE_WARN_BPS", 20.0):
+                    snapshot = dashboard_server.build_observability_snapshot({}, record)
+
+        self.assertEqual(snapshot["health"], "warning")
+        self.assertEqual(
+            [alert["code"] for alert in snapshot["alerts"]],
+            ["execution_latency", "execution_slippage"],
+        )
+        self.assertTrue(snapshot["execution"]["available"])
+        self.assertEqual(snapshot["execution"]["trigger_source"], "local_realtime_risk")
 
     def test_enrich_status_ignores_tmp_runtime_dashboard_corruption_from_tests(self):
         log_lines = [
