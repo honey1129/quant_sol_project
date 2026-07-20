@@ -245,6 +245,8 @@ MODEL_LABEL_LONG_TREND_WEAK_TP_AS_TRADE=0  # 慢速/高回撤 TP 不算正样本
 4. 通过所有门禁 → 替换线上模型，重启监控进程
 5. 任一门禁失败 → 保留旧模型，发送 Telegram 告警
 
+当候选模型的 OOS 平仓笔数低于 `MODEL_RETRAIN_MIN_CLOSED_TRADES` 时，线上模型不会被替换。Dashboard 将该结果显示为 `skipped_insufficient_data`，表示“样本不足，等待更多成交后再评估”，而不是模型文件损坏或运行故障；原始重训状态仍保留在状态文件中供审计。
+
 **重训门禁配置**（可通过 `.env` 调整）：
 
 ```env
@@ -403,6 +405,14 @@ cd dashboard-ui && npm install && npm run dev
 
 账户收益与权益曲线使用 USDT 本币权益，避免 `totalEq` 的美元折算汇率波动污染策略盈亏。执行质量告警阈值可通过 `DASHBOARD_EXECUTION_LATENCY_WARN_MS` 和 `DASHBOARD_THRESHOLD_SLIPPAGE_WARN_BPS` 调整，默认分别为 `2000ms` 和 `20bps`；日志回退错误默认仅保留 `300` 秒，可通过 `DASHBOARD_ERROR_MAX_AGE_SEC` 调整。
 
+### 状态口径与判读
+
+- **权益来源**：优先读取 OKX USDT 账户明细中的 `eq` 和 `cashBal`。仅在 USDT 权益缺失或无效时降级为账户 `totalEq`。
+- **基线迁移**：USDT 权益拥有独立基线；旧版美元折算历史继续保留，但不会与新 USDT 序列混算。首次启用后累计收益从新的 USDT 基线开始。
+- **日收益**：使用同一权益来源计算最近 24 小时变化。有效 USDT 历史不足 24 小时时显示 `0`，不将半日波动外推为全天收益。
+- **连接告警**：WebSocket 重连成功后，对应的旧重连错误立即失效；其他日志回退错误超过 `DASHBOARD_ERROR_MAX_AGE_SEC` 后不再显示。
+- **重训状态**：`skipped_insufficient_data` 表示成交样本不足且旧模型继续生效，不需要人工重启服务。
+
 ---
 
 ## 关键日志与状态文件
@@ -421,14 +431,7 @@ cd dashboard-ui && npm install && npm run dev
 ## 单元测试
 
 ```bash
-python -m unittest \
-  tests.test_backtest_equity \
-  tests.test_backtest_intrabar \
-  tests.test_strategy_core \
-  tests.test_live_runtime_state \
-  tests.test_stationary_features \
-  tests.test_trade_audit \
-  tests.test_rubik_features
+python -m unittest discover -s tests
 ```
 
 ---
