@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "experiment_id": "directional-v2-20260723",
+  "created_at": "2026-07-22T11:00:00Z",
+  "purpose": "Replace trend-owned binary trade-quality labels with direct flat/long/short labels.",
+  "retired_oos_evidence": {
+    "start": "2026-04-23T10:35:00Z",
+    "end": "2026-07-22T08:35:00Z",
+    "allowed_use": "old_strategy_elimination_only",
+    "forbidden_use": [
+      "directional_v2_threshold_selection",
+      "directional_v2_gate_selection",
+      "directional_v2_final_evaluation"
+    ]
+  },
+  "development": {
+    "data_end_exclusive": "2026-07-23T00:00:00Z",
+    "purge_bars": 24,
+    "policy": "Parameters are fixed before the forward holdout begins. Development metrics are diagnostic only."
+  },
+  "holdout": {
+    "start_inclusive": "2026-07-23T00:00:00Z",
+    "minimum_end_exclusive": "2026-08-22T00:00:00Z",
+    "minimum_calendar_days": 30,
+    "minimum_closed_trades": 30,
+    "policy": "No label, feature, model, signal, risk, or gate changes are allowed after holdout start. Any change creates a new experiment id and restarts the holdout clock."
+  },
+  "label": {
+    "classes": {
+      "0": "flat",
+      "1": "long",
+      "2": "short"
+    },
+    "entry": "next_bar_open",
+    "lookahead_bars": 24,
+    "take_profit_pct": 0.016,
+    "stop_loss_pct": 0.014,
+    "round_trip_fee_rate": 0.001,
+    "round_trip_slippage_rate": 0.0006,
+    "minimum_net_return": 0.002,
+    "mae_penalty": 0.25,
+    "minimum_direction_score_gap": 0.002,
+    "same_bar_tp_sl_policy": "stop_loss_first",
+    "trend_or_regime_direction_gate": false
+  },
+  "signal": {
+    "minimum_direction_probability": 0.55,
+    "minimum_direction_probability_gap": 0.1,
+    "minimum_advantage_over_flat": 0.05,
+    "hard_blocked_directions": [],
+    "trend_or_regime_direction_gate": false
+  },
+  "training": {
+    "target": "multiclass_probability",
+    "maximum_class_weight": 8.0,
+    "threshold_sweep_on_holdout": false,
+    "final_refit_end_exclusive": "2026-07-23T00:00:00Z",
+    "development_validation_ratio": 0.2,
+    "feature_list": "models/feature_list.pkl",
+    "model": {
+      "type": "lightgbm.LGBMClassifier",
+      "objective": "multiclass",
+      "num_class": 3,
+      "n_estimators": 200,
+      "learning_rate": 0.03,
+      "num_leaves": 31,
+      "subsample": 0.8,
+      "colsample_bytree": 0.8,
+      "random_state": 42
+    }
+  },
+  "execution": {
+    "initial_balance": 1000.0,
+    "position_notional_ratio": 0.15,
+    "leverage": 1.0,
+    "entry": "next_bar_open",
+    "exit": "tp_sl_or_24_bar_timeout",
+    "take_profit_pct": 0.016,
+    "stop_loss_pct": 0.014,
+    "maximum_hold_bars": 24,
+    "same_bar_tp_sl_policy": "stop_loss_first",
+    "fee_rate_per_side": 0.0005,
+    "slippage_bps_per_side": 3.0,
+    "rebalance": false,
+    "exit_on_signal_change": false
+  },
+  "evaluation": {
+    "minimum_profit_factor": 1.2,
+    "minimum_net_pnl_after_costs": 0.0,
+    "maximum_drawdown_pct": -5.0,
+    "minimum_positive_week_ratio": 0.6,
+    "must_beat_no_trade": true,
+    "must_beat_frozen_trend_baseline": true,
+    "result_if_insufficient_sample": "WATCH",
+    "result_if_any_decisive_gate_fails": "ELIMINATE",
+    "result_if_all_gates_pass": "KEEP"
+  }
+}

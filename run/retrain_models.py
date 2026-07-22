@@ -441,6 +441,45 @@ def aggregate_edge_gate_summaries(summaries):
     }
 
 
+def aggregate_performance_groups(summaries, dimension):
+    aggregate = {}
+    for summary in summaries:
+        attribution = summary.get("closed_trade_attribution") or {}
+        for group, stats in (attribution.get(dimension) or {}).items():
+            bucket = aggregate.setdefault(str(group), {
+                "closed_trade_count": 0,
+                "winning_trade_count": 0,
+                "losing_trade_count": 0,
+                "gross_profit": 0.0,
+                "gross_loss": 0.0,
+                "net_pnl_after_costs": 0.0,
+            })
+            for key in (
+                "closed_trade_count",
+                "winning_trade_count",
+                "losing_trade_count",
+            ):
+                bucket[key] += int(stats.get(key, 0))
+            for key in ("gross_profit", "gross_loss", "net_pnl_after_costs"):
+                bucket[key] += float(stats.get(key, 0.0))
+
+    for bucket in aggregate.values():
+        closed = bucket["closed_trade_count"]
+        gross_profit = bucket["gross_profit"]
+        gross_loss = bucket["gross_loss"]
+        bucket["win_rate_pct"] = (
+            bucket["winning_trade_count"] / closed * 100.0
+            if closed
+            else 0.0
+        )
+        bucket["profit_factor"] = (
+            gross_profit / gross_loss
+            if gross_loss > 0
+            else (float("inf") if gross_profit > 0 else 0.0)
+        )
+    return aggregate
+
+
 def _json_safe(value):
     if isinstance(value, dict):
         return {str(k): _json_safe(v) for k, v in value.items()}
@@ -1471,6 +1510,28 @@ def add_walk_forward_probabilities(data, feature_cols, fold_models, model_weight
     return predicted
 
 
+def add_trend_baseline_probabilities(data):
+    from core.trend_filter import derive_trend_context
+
+    predicted = data.copy()
+    long_probs = []
+    short_probs = []
+    for _, row in predicted.iterrows():
+        context = derive_trend_context(
+            row,
+            interval=config.TREND_FILTER_INTERVAL,
+            fast_col=config.TREND_FILTER_FAST_COL,
+            slow_col=config.TREND_FILTER_SLOW_COL,
+            min_gap=config.TREND_FILTER_MIN_GAP,
+        )
+        trend_bias = str(context.get("trend_bias") or "neutral")
+        long_probs.append(1.0 if trend_bias == "long" else 0.0)
+        short_probs.append(1.0 if trend_bias == "short" else 0.0)
+    predicted["long_prob"] = long_probs
+    predicted["short_prob"] = short_probs
+    return predicted
+
+
 def aggregate_backtest_summaries(summaries):
     fold_count = len(summaries)
     closed_trade_count = sum(int(item.get("closed_trade_count", 0)) for item in summaries)
@@ -1532,6 +1593,10 @@ def aggregate_backtest_summaries(summaries):
         "funding_pnl": float(funding_pnl),
         "decision_regime_signal_summary": aggregate_regime_signal_summaries(summaries),
         "decision_edge_gate_summary": aggregate_edge_gate_summaries(summaries),
+        "closed_trade_attribution": {
+            "by_direction": aggregate_performance_groups(summaries, "by_direction"),
+            "by_entry_regime": aggregate_performance_groups(summaries, "by_entry_regime"),
+        },
         "folds": summaries,
     }
 
@@ -1575,7 +1640,15 @@ def walk_forward_fold_failure_reason(fold_summary):
     return None
 
 
-def run_walk_forward_validation(log_file, context_backtester, metadata, feature_cols):
+def run_walk_forward_validation(
+    log_file,
+    context_backtester,
+    metadata,
+    feature_cols,
+    *,
+    enforce_gates=True,
+    include_trend_baseline=False,
+):
     if not bool(config.MODEL_WALK_FORWARD_ENABLED):
         return None
     if not metadata:
@@ -1736,6 +1809,50 @@ def run_walk_forward_validation(log_file, context_backtester, metadata, feature_
 
         if not fold_summary:
             raise RuntimeError(f"walk-forward fold={fold['fold']} 未返回 summary")
+        if include_trend_baseline:
+            baseline_data = add_trend_baseline_probabilities(fold_data)
+            stage_started_at = time.monotonic()
+            with open(log_file, "a", encoding="utf-8") as file:
+                with contextlib.redirect_stdout(file):
+                    baseline_backtester = Backtester(
+                        context_backtester.interval,
+                        context_backtester.window,
+                        data_dict=context_backtester.data_dict,
+                        reward_risk=context_backtester.reward_risk,
+                        precomputed_data=baseline_data,
+                        feature_cols=feature_cols,
+                        models=fold_models,
+                        model_weights=config.MODEL_WEIGHTS,
+                        model_metadata=metadata,
+                        funding_history=fold_funding_history,
+                        enable_csv_dump=False,
+                        show_progress=False,
+                        emit_diagnostics=False,
+                    )
+                    original_predict_row = baseline_backtester._predict_row
+                    baseline_backtester._predict_row = (
+                        lambda row: (row["long_prob"], row["short_prob"])
+                    )
+                    try:
+                        trend_baseline_summary = baseline_backtester.run_backtest()
+                    finally:
+                        baseline_backtester._predict_row = original_predict_row
+            if not trend_baseline_summary:
+                raise RuntimeError(
+                    f"walk-forward fold={fold['fold']} 趋势基线未返回 summary"
+                )
+            trend_baseline_summary.update({
+                "fold": fold["fold"],
+                "validation_start": validation_df.index.min().isoformat(),
+                "validation_end": validation_df.index.max().isoformat(),
+            })
+            fold_summary["trend_baseline_summary"] = trend_baseline_summary
+            write_walk_forward_stage_timing(
+                log_file,
+                fold["fold"],
+                "trend_baseline",
+                time.monotonic() - stage_started_at,
+            )
         threshold_sweep = None
         threshold_sweep_elapsed_sec = 0.0
         if _threshold_sweep_enabled() and threshold_candidates and fold_predicted_data is not None:
@@ -1801,7 +1918,7 @@ def run_walk_forward_validation(log_file, context_backtester, metadata, feature_
             )
 
         failure_reason = walk_forward_fold_failure_reason(fold_summary)
-        if failure_reason and walk_forward_fail_fast_enabled():
+        if failure_reason and enforce_gates and walk_forward_fail_fast_enabled():
             partial_summary = aggregate_backtest_summaries(fold_summaries)
             partial_summary["failed"] = True
             partial_summary["failure_reason"] = failure_reason
@@ -1818,7 +1935,14 @@ def run_walk_forward_validation(log_file, context_backtester, metadata, feature_
             raise RuntimeError(failure_reason)
 
     summary = aggregate_backtest_summaries(fold_summaries)
-    validate_walk_forward_summary(summary)
+    if include_trend_baseline:
+        summary["trend_baseline_summary"] = aggregate_backtest_summaries([
+            item["trend_baseline_summary"]
+            for item in fold_summaries
+            if item.get("trend_baseline_summary")
+        ])
+    if enforce_gates:
+        validate_walk_forward_summary(summary)
     with open(log_file, "a", encoding="utf-8") as file:
         file.write(
             "walk-forward summary "

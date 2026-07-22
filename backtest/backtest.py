@@ -148,6 +148,9 @@ class Backtester:
         self.max_drawdown = 0.0
         self.trade_log = []
         self.closed_trade_pnls = []
+        self.closed_trade_details = []
+        self.active_trade_direction = None
+        self.active_trade_entry_regime = None
         self.last_closed_balance = self.balance
         self.funding_log = []
         self.fee_rate = config.FEE_RATE
@@ -398,9 +401,18 @@ class Backtester:
         self.slippage_paid_total += slippage_cost
         return fee, slippage_cost
 
-    def _record_closed_trade_pnl(self):
+    def _record_closed_trade_pnl(self, exit_regime=None):
         net_pnl = float(self.balance) - float(self.last_closed_balance)
         self.closed_trade_pnls.append(net_pnl)
+        direction = self.active_trade_direction
+        if direction not in {"long", "short"} and self.position != 0:
+            direction = "long" if self.position > 0 else "short"
+        self.closed_trade_details.append({
+            "net_pnl_after_costs": float(net_pnl),
+            "direction": direction or "unknown",
+            "entry_regime": self.active_trade_entry_regime or "unknown",
+            "exit_regime": str(exit_regime or "unknown"),
+        })
         self.last_closed_balance = float(self.balance)
         return net_pnl
 
@@ -551,7 +563,13 @@ class Backtester:
         if self.decision_examples:
             log_info(f"HOLD样例: {self.decision_examples}")
 
-    def _maybe_execute_intrabar_tp_sl(self, exec_row, take_profit=None, stop_loss=None):
+    def _maybe_execute_intrabar_tp_sl(
+        self,
+        exec_row,
+        take_profit=None,
+        stop_loss=None,
+        market_regime=None,
+    ):
         if not self.enable_intrabar_tp_sl or self.position == 0 or self.entry_price <= 0:
             return False
 
@@ -581,7 +599,7 @@ class Backtester:
         profit = (exec_price - self.entry_price) * pos_to_close
         self.balance += profit
         self._apply_trade_costs(pos_to_close, reference_price, exec_price)
-        self._record_closed_trade_pnl()
+        self._record_closed_trade_pnl(exit_regime=market_regime)
 
         action = "止损" if hit["reason"] == "SL" else "止盈"
         if hit["reason"] == "SL":
@@ -594,6 +612,8 @@ class Backtester:
         self.position = 0.0
         self.entry_price = 0.0
         self.hold_bars = 0
+        self.active_trade_direction = None
+        self.active_trade_entry_regime = None
         self.core.set_state(
             0.0,
             0.0,
@@ -602,7 +622,7 @@ class Backtester:
         )
         return True
 
-    def _force_close_end_position(self, row):
+    def _force_close_end_position(self, row, market_regime=None):
         if not self.force_close_on_end or self.position == 0 or self.entry_price <= 0:
             return False
 
@@ -616,12 +636,14 @@ class Backtester:
         profit = (exec_price - self.entry_price) * pos_to_close
         self.balance += profit
         self._apply_trade_costs(pos_to_close, reference_price, exec_price)
-        self._record_closed_trade_pnl()
+        self._record_closed_trade_pnl(exit_regime=market_regime)
         self.trade_log.append((row.name, "期末平仓", exec_price, pos_to_close, self.balance))
 
         self.position = 0.0
         self.entry_price = 0.0
         self.hold_bars = 0
+        self.active_trade_direction = None
+        self.active_trade_entry_regime = None
         self.core.set_state(0.0, 0.0, 0, cooldown_bars_remaining=0)
         self.final_equity = self.balance
         self.max_balance = max(self.max_balance, self.final_equity)
@@ -641,6 +663,8 @@ class Backtester:
         if len(self.data) < 2:
             log_error("回测样本不足，无法使用已收盘信号 -> 下一根开盘成交的模式")
             return
+
+        last_market_regime = None
 
         # 用上一根已收盘 bar 生成信号，在下一根 bar 开盘成交，避免同 bar 未来函数。
         for i in tqdm(range(1, len(self.data)), disable=not self.show_progress):
@@ -681,6 +705,8 @@ class Backtester:
                 high_volatility_threshold=config.REGIME_HIGH_VOLATILITY_THRESHOLD,
                 money_flow_extreme_threshold=config.REGIME_MONEY_FLOW_EXTREME_THRESHOLD,
             )
+            market_regime = str(regime_context.get("regime") or "unknown")
+            last_market_regime = market_regime
 
             self._apply_funding_until(exec_row.name)
 
@@ -716,8 +742,10 @@ class Backtester:
                 profit = (exec_price - entry_price) * pos_to_close
                 self.balance += profit
                 self._apply_trade_costs(pos_to_close, price, exec_price)
-                self._record_closed_trade_pnl()
+                self._record_closed_trade_pnl(exit_regime=market_regime)
                 self.core.apply_decision(out)
+                self.active_trade_direction = None
+                self.active_trade_entry_regime = None
 
                 act = "平仓" if out.get("reason") in {"TP/SL", "TakeProfit", "StopLoss"} else "反向平仓"
                 self.trade_log.append((exec_row.name, act, exec_price, pos_to_close, self.balance))
@@ -733,6 +761,8 @@ class Backtester:
                     int(out["next_hold_bars"]),
                     cooldown_bars_remaining=int(out.get("next_cooldown_bars", 0)),
                 )
+                self.active_trade_direction = "long" if new_pos > 0 else "short"
+                self.active_trade_entry_regime = market_regime
 
                 act = "开多" if new_pos > 0 else "开空"
                 self.trade_log.append((exec_row.name, act, exec_price, new_pos, self.balance))
@@ -754,7 +784,7 @@ class Backtester:
 
                 self._apply_trade_costs(delta, price, exec_price)
                 if reduced_qty > 0:
-                    self._record_closed_trade_pnl()
+                    self._record_closed_trade_pnl(exit_regime=market_regime)
 
                 if abs(new_pos) > abs(old_pos):
                     existing_qty = abs(old_pos)
@@ -771,6 +801,9 @@ class Backtester:
                     int(out["next_hold_bars"]),
                     cooldown_bars_remaining=int(out.get("next_cooldown_bars", 0)),
                 )
+                if self.active_trade_direction is None and new_pos != 0:
+                    self.active_trade_direction = "long" if new_pos > 0 else "short"
+                    self.active_trade_entry_regime = market_regime
 
                 if new_pos > 0:
                     act = "加多" if delta > 0 else "减多"
@@ -782,7 +815,12 @@ class Backtester:
                 self.core.apply_decision(out)
 
             self.position, self.entry_price, self.hold_bars = self.core.get_state()
-            self._maybe_execute_intrabar_tp_sl(exec_row, take_profit=take_profit, stop_loss=stop_loss)
+            self._maybe_execute_intrabar_tp_sl(
+                exec_row,
+                take_profit=take_profit,
+                stop_loss=stop_loss,
+                market_regime=market_regime,
+            )
             self.position, self.entry_price, self.hold_bars = self.core.get_state()
             equity = self._mark_to_market_equity(bar_close)
             self.final_equity = equity
@@ -793,7 +831,10 @@ class Backtester:
                 self.max_drawdown = min(self.max_drawdown, drawdown)
 
 
-        self._force_close_end_position(self.data.iloc[-1])
+        self._force_close_end_position(
+            self.data.iloc[-1],
+            market_regime=last_market_regime,
+        )
         return self._summary()
 
     def _predict_row(self, row):
@@ -836,6 +877,57 @@ class Backtester:
                 "dominant_short_pct": short_count / denom * 100.0,
             }
         return summary
+
+    @staticmethod
+    def _summarize_closed_trade_group(details, key):
+        grouped = {}
+        for detail in details:
+            group_name = str(detail.get(key) or "unknown")
+            pnl = float(detail.get("net_pnl_after_costs") or 0.0)
+            bucket = grouped.setdefault(group_name, {
+                "closed_trade_count": 0,
+                "winning_trade_count": 0,
+                "losing_trade_count": 0,
+                "gross_profit": 0.0,
+                "gross_loss": 0.0,
+                "net_pnl_after_costs": 0.0,
+            })
+            bucket["closed_trade_count"] += 1
+            bucket["net_pnl_after_costs"] += pnl
+            if pnl > 0:
+                bucket["winning_trade_count"] += 1
+                bucket["gross_profit"] += pnl
+            elif pnl < 0:
+                bucket["losing_trade_count"] += 1
+                bucket["gross_loss"] += abs(pnl)
+
+        for bucket in grouped.values():
+            closed = bucket["closed_trade_count"]
+            gross_profit = bucket["gross_profit"]
+            gross_loss = bucket["gross_loss"]
+            bucket["win_rate_pct"] = (
+                bucket["winning_trade_count"] / closed * 100.0
+                if closed
+                else 0.0
+            )
+            bucket["profit_factor"] = (
+                gross_profit / gross_loss
+                if gross_loss > 0
+                else (float("inf") if gross_profit > 0 else 0.0)
+            )
+        return grouped
+
+    def _closed_trade_attribution(self):
+        return {
+            "by_direction": self._summarize_closed_trade_group(
+                self.closed_trade_details,
+                "direction",
+            ),
+            "by_entry_regime": self._summarize_closed_trade_group(
+                self.closed_trade_details,
+                "entry_regime",
+            ),
+        }
 
     def _summary(self):
         pnl = self.final_equity - config.INITIAL_BALANCE
@@ -928,6 +1020,7 @@ class Backtester:
             "decision_direction_counts": dict(self.decision_direction_counts),
             "decision_regime_counts": dict(self.decision_regime_counts),
             "decision_regime_signal_summary": self._decision_regime_signal_summary(),
+            "closed_trade_attribution": self._closed_trade_attribution(),
             "decision_regime_reason_top": self._top_counts_by_primary(self.decision_regime_reason_counts),
             "decision_direction_reason_top": self._top_counts_by_primary(self.decision_direction_reason_counts),
             "decision_probability_quantiles": {
