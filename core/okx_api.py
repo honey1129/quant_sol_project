@@ -61,6 +61,10 @@ class OrderStateUnknownError(RuntimeError):
     """Raised when an accepted order cannot be reconciled to a terminal state."""
 
 
+class OKXResponseError(RuntimeError):
+    """Raised when an OKX read endpoint returns an unsuccessful or malformed payload."""
+
+
 def floor_size_to_lot(size, lot_size):
     size_decimal = Decimal(str(size))
     lot_decimal = Decimal(str(lot_size))
@@ -140,10 +144,64 @@ class OKXClient:
 
         raise last_error
 
+    @staticmethod
+    def _validate_read_response(label, result, *, require_data=False):
+        if not isinstance(result, dict):
+            raise OKXResponseError(
+                f"{label}响应格式异常: expected=dict, actual={type(result).__name__}"
+            )
+
+        code = str(result.get("code", "") or "")
+        if code != "0":
+            message = result.get("msg") or result.get("message") or "unknown error"
+            error_id = result.get("error_id")
+            error_suffix = f", error_id={error_id}" if error_id else ""
+            raise OKXResponseError(
+                f"{label}响应失败: code={code or 'missing'}, msg={message}{error_suffix}"
+            )
+
+        if "data" not in result or result.get("data") is None:
+            raise OKXResponseError(f"{label}响应缺少 data")
+        if not isinstance(result["data"], list):
+            raise OKXResponseError(
+                f"{label}响应 data 格式异常: actual={type(result['data']).__name__}"
+            )
+        if require_data and not result["data"]:
+            raise OKXResponseError(f"{label}响应 data 为空")
+        return result
+
+    def _call_read_with_retry(
+        self,
+        label,
+        func,
+        *,
+        require_data=False,
+        transform=None,
+        max_retry=None,
+        sleep_sec=None,
+        backoff=None,
+    ):
+        def checked_call():
+            result = self._validate_read_response(
+                label,
+                func(),
+                require_data=require_data,
+            )
+            return transform(result) if transform is not None else result
+
+        return self._call_with_retry(
+            label,
+            checked_call,
+            max_retry=max_retry,
+            sleep_sec=sleep_sec,
+            backoff=backoff,
+        )
+
     def get_account_config(self):
-        result = self._call_with_retry(
+        result = self._call_read_with_retry(
             "获取账户配置",
             self.account_api.get_account_config,
+            require_data=True,
         )
         if result.get("code") != "0":
             raise RuntimeError(f"获取账户配置失败: {result}")
@@ -153,7 +211,7 @@ class OKXClient:
         return data[0]
 
     def list_pending_orders(self):
-        result = self._call_with_retry(
+        result = self._call_read_with_retry(
             "获取挂单列表",
             lambda: self.trade_api.get_order_list(
                 instType="SWAP",
@@ -168,7 +226,7 @@ class OKXClient:
         if not cl_ord_id:
             return None
         try:
-            result = self._call_with_retry(
+            result = self._call_read_with_retry(
                 "按 clOrdId 查询订单",
                 lambda: self.trade_api.get_order(instId=config.SYMBOL, clOrdId=cl_ord_id),
             )
@@ -185,7 +243,7 @@ class OKXClient:
         if not ord_id:
             return []
         try:
-            result = self._call_with_retry(
+            result = self._call_read_with_retry(
                 "查询订单成交明细",
                 lambda: self.trade_api.get_fills(
                     instType="SWAP",
@@ -409,9 +467,10 @@ class OKXClient:
         if bool(config.LIVE_RECONCILE_PENDING_ORDERS):
             self.cancel_pending_orders()
 
-        leverage_rows = self._call_with_retry(
+        leverage_rows = self._call_read_with_retry(
             "获取杠杆配置",
             lambda: self.account_api.get_leverage(mgnMode="cross", instId=config.SYMBOL),
+            require_data=True,
         )
         if leverage_rows.get("code") != "0":
             raise RuntimeError(f"获取杠杆配置失败: {leverage_rows}")
@@ -454,9 +513,10 @@ class OKXClient:
         确保换品种或 OKX 调整规格后无需手动修改 .env。
         """
         try:
-            result = self._call_with_retry(
+            result = self._call_read_with_retry(
                 "获取合约规格",
                 lambda: self.public_api.get_instruments(instType="SWAP", instId=config.SYMBOL),
+                require_data=True,
             )
             if result.get("code") != "0" or not result.get("data"):
                 log_error(f"获取合约规格失败，继续使用 .env 配置值: {result}")
@@ -480,9 +540,10 @@ class OKXClient:
 
     # 获取当前账户余额等信息
     def get_account_balance(self):
-        result = self._call_with_retry(
+        result = self._call_read_with_retry(
             "获取账户余额",
             self.account_api.get_account_balance,
+            require_data=True,
         )
         if result.get("code") != "0":
             raise RuntimeError(f"获取账户余额失败: {result}")
@@ -514,7 +575,7 @@ class OKXClient:
 
     # 获取SYMBOL当前最新仓位
     def get_position(self):
-        result = self._call_with_retry(
+        result = self._call_read_with_retry(
             "获取仓位",
             lambda: self.account_api.get_positions(instType='SWAP', instId=config.SYMBOL),
         )
@@ -545,22 +606,25 @@ class OKXClient:
 
     # 获取SYMBOL当前最新价格(以usdt计价)
     def get_price(self, max_retry=3, sleep_sec=1):
-        for attempt in range(max_retry):
-            try:
-                data = self.market_api.get_ticker(instId=config.SYMBOL)
-                price_raw = data['data'][0].get('last', '0')
-                if price_raw in ['', None]:
-                    raise Exception("❌ last价格字段为空")
-                last_price = float(price_raw)
-                return last_price
-            except Exception as e:
-                log_error(f"⚠ 获取价格失败，第{attempt + 1}次重试: {e}")
-                time.sleep(sleep_sec)
-        raise Exception("❌ 超过最大重试次数，get_price() 彻底失败")
+        def parse_price(result):
+            price_raw = result["data"][0].get("last", "0")
+            if price_raw in ["", None]:
+                raise OKXResponseError("获取价格响应 last 字段为空")
+            return float(price_raw)
+
+        return self._call_read_with_retry(
+            "获取价格",
+            lambda: self.market_api.get_ticker(instId=config.SYMBOL),
+            require_data=True,
+            transform=parse_price,
+            max_retry=max_retry,
+            sleep_sec=sleep_sec,
+            backoff=1.0,
+        )
 
     # 获取最近已平仓交易的真实收益率（计算reward_risk用）
     def fetch_recent_closed_trades(self, limit=50):
-        result = self._call_with_retry(
+        result = self._call_read_with_retry(
             "获取历史平仓",
             lambda: self.account_api.get_positions_history(instType="SWAP", instId=config.SYMBOL, limit=str(limit)),
         )
@@ -1205,7 +1269,7 @@ class OKXClient:
             return None
 
     def list_pending_tpsl_algo_orders(self, pos_side=None):
-        result = self._call_with_retry(
+        result = self._call_read_with_retry(
             "查询待触发 TP/SL 算法单",
             lambda: self.trade_api.order_algos_list(
                 ordType="oco",
@@ -1224,7 +1288,7 @@ class OKXClient:
     def get_algo_order_details(self, algo_id):
         if not algo_id:
             return None
-        result = self._call_with_retry(
+        result = self._call_read_with_retry(
             "查询 TP/SL 算法单详情",
             lambda: self.trade_api.get_algo_order_details(algoId=str(algo_id)),
         )
@@ -1236,7 +1300,7 @@ class OKXClient:
     def get_order_by_id(self, ord_id):
         if not ord_id:
             return None
-        result = self._call_with_retry(
+        result = self._call_read_with_retry(
             "按 ordId 查询订单",
             lambda: self.trade_api.get_order(instId=config.SYMBOL, ordId=str(ord_id)),
         )

@@ -2264,8 +2264,6 @@ class LiveTrader:
             return
 
         self.same_bar_skip_count = 0
-        self.last_bar_ts = bar_ts
-        self.last_heartbeat_logged_at = time.monotonic()
 
         if bool(config.LIVE_RECONCILE_PENDING_ORDERS):
             self.client.cancel_pending_orders()
@@ -2285,6 +2283,11 @@ class LiveTrader:
         self._position_uncertain = False
         account_snapshot = self._get_account_snapshot()
         equity = self._get_sizing_equity(account_snapshot)
+
+        # Only consume the bar after all pre-decision exchange reads succeed.
+        # A transient API failure can then retry this same bar on the next poll.
+        self.last_bar_ts = bar_ts
+        self.last_heartbeat_logged_at = time.monotonic()
 
         # 安全门禁：Kill Switch / 日亏损熔断（只阻止新开仓，不影响平仓/止损）
         safety_halted = self._check_safety_gates(equity)

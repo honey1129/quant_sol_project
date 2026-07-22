@@ -234,6 +234,34 @@ class LiveRuntimeStateTests(unittest.TestCase):
         mock_fetch.assert_called_once_with()
         mock_process.assert_called_once_with(latest_features)
 
+    def test_failed_pre_decision_exchange_read_does_not_consume_bar(self):
+        previous_bar = pd.Timestamp("2026-07-22T01:30:00Z")
+        next_bar = pd.Timestamp("2026-07-22T01:35:00Z")
+        trader = LiveTrader.__new__(LiveTrader)
+        trader.client = type("Client", (), {"cancel_pending_orders": lambda self: []})()
+        trader.loop_count = 0
+        trader.last_bar_ts = previous_bar
+        trader.same_bar_skip_count = 0
+        latest_features = (
+            next_bar,
+            78.3,
+            0.0,
+            0.0,
+            0.5,
+            0.001,
+            0.002,
+            {"trend_bias": "neutral", "trend_gap": 0.0},
+            {"regime": "range", "regime_reason": "NoTrend", "is_high_vol": False},
+        )
+
+        with patch("run.live_trading_monitor.config.LIVE_RECONCILE_PENDING_ORDERS", True):
+            with patch.object(trader, "_reconcile_dual_side_position", return_value=False):
+                with patch.object(trader, "_get_net_position", side_effect=RuntimeError("temporary OKX error")):
+                    with self.assertRaisesRegex(RuntimeError, "temporary OKX error"):
+                        trader._process_latest_features(latest_features)
+
+        self.assertEqual(trader.last_bar_ts, previous_bar)
+
     def test_write_dashboard_snapshot_preserves_last_position_when_not_provided(self):
         trader = LiveTrader.__new__(LiveTrader)
         trader.loop_count = 3
