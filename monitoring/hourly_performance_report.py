@@ -86,6 +86,16 @@ def _fmt_trade_pnl(trade):
     return "未记录盈亏"
 
 
+def _format_trade_time(value):
+    if not isinstance(value, datetime):
+        return "-"
+    if value.tzinfo is None:
+        display_time = value.replace(tzinfo=DISPLAY_TIMEZONE)
+    else:
+        display_time = value.astimezone(DISPLAY_TIMEZONE)
+    return display_time.strftime("%m-%d %H:%M")
+
+
 def _empty_stats(source):
     return {
         "trades": [],
@@ -311,7 +321,10 @@ def _format_pnl_line(stats):
         pct = ""
         if stats.get("return_pct") is not None:
             pct = f" ({_fmt_signed_pct(stats.get('return_pct'))})"
-        return f"净盈亏: {_fmt_signed_usdt(stats.get('net_pnl'))}{pct}"
+        return (
+            "含手续费净盈亏（区间内全部成交）: "
+            f"{_fmt_signed_usdt(stats.get('net_pnl'))}{pct}"
+        )
     return f"累计盈亏: {_fmt_signed_pct(stats.get('total_pnl'))}"
 
 
@@ -352,7 +365,7 @@ def _format_conclusion(stats_24h):
             status = "亏损"
         else:
             status = "持平"
-        pnl_text = _fmt_signed_usdt(net_pnl)
+        pnl_text = f"含手续费净盈亏 {_fmt_signed_usdt(net_pnl)}"
     else:
         total_pnl = stats_24h.get("total_pnl")
         if total_pnl > 0:
@@ -361,7 +374,7 @@ def _format_conclusion(stats_24h):
             status = "亏损"
         else:
             status = "持平"
-        pnl_text = _fmt_signed_pct(total_pnl)
+        pnl_text = f"累计盈亏 {_fmt_signed_pct(total_pnl)}"
 
     return (
         f"结论: 最近24小时{status}，"
@@ -391,12 +404,12 @@ def format_performance_report(stats_24h, stats_today, mode_name):
         report.extend(["", "最近3笔"])
         for trade in sorted(stats_24h['trades'], key=lambda x: x['time'], reverse=True)[:3]:
             report.append(
-                f"{trade['time'].strftime('%H:%M')} "
+                f"{_format_trade_time(trade.get('time'))} "
                 f"{_reason_label(trade.get('reason'))} "
-                f"{_fmt_trade_pnl(trade)}"
+                f"平仓记录净PnL {_fmt_trade_pnl(trade)}"
             )
 
-    report.extend(["", "建议: 继续观察3-5天，不因为短期盈利放松风控。"])
+    report.extend(["", "提示: 当前样本量较少，仅记录结果，不据此调整策略参数。"])
     return "\n".join(report)
 
 

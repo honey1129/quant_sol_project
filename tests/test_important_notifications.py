@@ -140,8 +140,8 @@ class ImportantNotificationTests(unittest.TestCase):
         self.assertIn("模拟盘权益（虚拟资金） 93854.22 USDT", message)
         self.assertIn("看涨概率 86.8%", message)
         self.assertIn("市场环境: 高波动震荡，趋势 中性", message)
-        self.assertIn("最近不交易的原因统计: 冷却中，避免刚交易完立刻反复进出 10次", message)
-        self.assertIn("变化 本次新增统计", message)
+        self.assertIn("本次进程累计不交易原因: 冷却中，避免刚交易完立刻反复进出 10次", message)
+        self.assertIn("较上次运行摘要 暂无可比数据（首次统计）", message)
         self.assertNotIn("long=0.868", message)
         self.assertNotIn("target=0.0000", message)
 
@@ -164,7 +164,7 @@ class ImportantNotificationTests(unittest.TestCase):
             decision={"action": "HOLD", "reason": "Cooldown(5)", "risk": {}},
         )
 
-        self.assertIn("变化 +870.50 USDT（+0.94%）", message)
+        self.assertIn("较上次运行摘要 +870.50 USDT（+0.94%）", message)
 
     def test_runtime_summary_shows_negative_equity_change(self):
         trader = LiveTrader.__new__(LiveTrader)
@@ -185,7 +185,33 @@ class ImportantNotificationTests(unittest.TestCase):
             decision={"action": "HOLD", "reason": "Cooldown(5)", "risk": {}},
         )
 
-        self.assertIn("变化 -470.00 USDT（-0.50%）", message)
+        self.assertIn("较上次运行摘要 -470.00 USDT（-0.50%）", message)
+
+    def test_runtime_summary_explains_zero_probabilities_in_neutral_trend(self):
+        trader = LiveTrader.__new__(LiveTrader)
+        trader.hold_reason_counts = Counter()
+
+        message = trader._format_runtime_summary_notification(
+            bar_ts="2026-07-23T05:00:00+00:00",
+            price=77.47,
+            equity=92846.23,
+            position_snapshot={
+                "direction": "flat",
+                "net_qty": 0,
+                "entry_price": 0,
+                "notional": 0,
+            },
+            signal_snapshot={
+                "long_prob": 0.0,
+                "short_prob": 0.0,
+                "regime": "range",
+                "trend_bias": "neutral",
+            },
+            decision={"action": "HOLD", "reason": "WeakSignal", "risk": {}},
+        )
+
+        self.assertIn("AI判断: 当前无方向信号（趋势中性）", message)
+        self.assertNotIn("看涨概率 0.0%", message)
 
 
 if __name__ == "__main__":

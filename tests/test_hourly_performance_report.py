@@ -14,9 +14,21 @@ class HourlyPerformanceReportTests(unittest.TestCase):
     def test_report_uses_simple_summary_and_realized_usdt(self):
         stats_24h = {
             "trades": [
-                {"time": datetime(2026, 6, 27, 3, 31), "reason": "TakeProfit", "net_pnl": 507.33},
-                {"time": datetime(2026, 6, 26, 22, 25), "reason": "TakeProfit", "net_pnl": 646.16},
-                {"time": datetime(2026, 6, 26, 18, 0), "reason": "StopLoss", "net_pnl": -253.29},
+                {
+                    "time": datetime(2026, 6, 27, 3, 31, tzinfo=timezone.utc),
+                    "reason": "TakeProfit",
+                    "net_pnl": 507.33,
+                },
+                {
+                    "time": datetime(2026, 6, 26, 22, 25, tzinfo=timezone.utc),
+                    "reason": "TakeProfit",
+                    "net_pnl": 646.16,
+                },
+                {
+                    "time": datetime(2026, 6, 26, 18, 0, tzinfo=timezone.utc),
+                    "reason": "StopLoss",
+                    "net_pnl": -253.29,
+                },
             ],
             "take_profits": 2,
             "stop_losses": 1,
@@ -47,12 +59,12 @@ class HourlyPerformanceReportTests(unittest.TestCase):
 
         report = format_performance_report(stats_24h, stats_today, "简单规则模式")
 
-        self.assertIn("结论: 最近24小时盈利，2赚1亏，+900.20 USDT。", report)
+        self.assertIn("结论: 最近24小时盈利，2赚1亏，含手续费净盈亏 +900.20 USDT。", report)
         self.assertIn("交易: 3笔 | 2赚1亏 | 胜率 66.7%", report)
-        self.assertIn("净盈亏: +900.20 USDT (+0.96%)", report)
-        self.assertIn("03:31 止盈 +507.33 USDT", report)
-        self.assertIn("18:00 止损 -253.29 USDT", report)
-        self.assertIn("建议: 继续观察3-5天", report)
+        self.assertIn("含手续费净盈亏（区间内全部成交）: +900.20 USDT (+0.96%)", report)
+        self.assertIn("06-27 11:31 止盈 平仓记录净PnL +507.33 USDT", report)
+        self.assertIn("06-27 02:00 止损 平仓记录净PnL -253.29 USDT", report)
+        self.assertIn("提示: 当前样本量较少，仅记录结果，不据此调整策略参数。", report)
         self.assertNotIn("N/A", report)
         self.assertNotIn("回测基线", report)
         self.assertNotIn("优秀", report)

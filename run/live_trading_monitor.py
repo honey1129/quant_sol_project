@@ -1332,18 +1332,36 @@ class LiveTrader:
         try:
             current = float(equity)
         except (TypeError, ValueError):
-            return "本次新增统计"
+            return "暂无可比数据（首次统计）"
         if prev is None:
-            return "本次新增统计"
+            return "暂无可比数据（首次统计）"
         try:
             delta = current - float(prev)
         except (TypeError, ValueError):
-            return "本次新增统计"
+            return "暂无可比数据（首次统计）"
         sign = "+" if delta >= 0 else "-"
         pct = ""
         if prev:
             pct = f"（{sign}{abs(delta) / abs(float(prev)) * 100:.2f}%）"
         return f"{sign}{abs(delta):.2f} USDT{pct}"
+
+    def _format_ai_signal_summary(self, signal_snapshot):
+        signal_snapshot = signal_snapshot or {}
+        long_prob = signal_snapshot.get("long_prob")
+        short_prob = signal_snapshot.get("short_prob")
+        try:
+            long_value = float(long_prob)
+            short_value = float(short_prob)
+        except (TypeError, ValueError):
+            return "暂无有效概率"
+
+        trend_bias = str(signal_snapshot.get("trend_bias") or "").lower()
+        if trend_bias == "neutral" and abs(long_value) <= 1e-12 and abs(short_value) <= 1e-12:
+            return "当前无方向信号（趋势中性）"
+        return (
+            f"看涨概率 {self._fmt_optional_pct_brief(long_value)}，"
+            f"看跌概率 {self._fmt_optional_pct_brief(short_value)}"
+        )
 
     def _format_risk_summary_text(self, risk):
         risk = risk or {}
@@ -1540,12 +1558,11 @@ class LiveTrader:
             f"\n"
             f"📈 行情: {config.SYMBOL} 当前价 ${fmt_optional(price, 4)}\n"
             f"💰 账户: {self._equity_label()} {fmt_optional(equity, 2)} USDT，"
-            f"变化 {self._format_equity_change(equity)}\n"
+            f"较上次运行摘要 {self._format_equity_change(equity)}\n"
             f"\n"
             f"📦 持仓: {self._format_position_summary(position_snapshot)}{unrealized_pnl_text}\n"
             f"\n"
-            f"🤖 AI判断: 看涨概率 {self._fmt_optional_pct_brief(signal_snapshot.get('long_prob'))}，"
-            f"看跌概率 {self._fmt_optional_pct_brief(signal_snapshot.get('short_prob'))}\n"
+            f"🤖 AI判断: {self._format_ai_signal_summary(signal_snapshot)}\n"
             f"🌊 市场环境: {self._humanize_regime(signal_snapshot.get('regime'))}，"
             f"趋势 {self._humanize_trend(signal_snapshot.get('trend_bias'))}\n"
             f"\n"
@@ -1559,7 +1576,7 @@ class LiveTrader:
             f"   · 止盈线/止损线: {self._fmt_optional_pct_brief(decision.get('take_profit'), 2)} / "
             f"{self._fmt_optional_pct_brief(decision.get('stop_loss'), 2)}\n"
             f"\n"
-            f"⏸️ 最近不交易的原因统计: {self._format_hold_reason_counts()}\n"
+            f"⏸️ 本次进程累计不交易原因: {self._format_hold_reason_counts()}\n"
             f"\n"
             f"🛡️ 动态风控: {self._format_risk_summary_text(risk)}"
         )
