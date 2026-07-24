@@ -213,6 +213,31 @@ class ImportantNotificationTests(unittest.TestCase):
         self.assertIn("AI判断: 当前无方向信号（趋势中性）", message)
         self.assertNotIn("看涨概率 0.0%", message)
 
+    def test_runtime_summary_shows_profitable_short_with_positive_amount(self):
+        trader = LiveTrader.__new__(LiveTrader)
+        trader.hold_reason_counts = Counter()
+
+        message = trader._format_runtime_summary_notification(
+            bar_ts="2026-07-24T04:50:00+00:00",
+            price=75.62,
+            equity=92853.78,
+            position_snapshot={
+                "direction": "short",
+                "net_qty": -21.03,
+                "entry_price": 76.71,
+                "notional": 1590.29,
+            },
+            signal_snapshot={
+                "long_prob": 0.0,
+                "short_prob": 0.374,
+                "regime": "trend_short",
+                "trend_bias": "short",
+            },
+            decision={"action": "HOLD", "reason": "WeakSignal", "risk": {}},
+        )
+
+        self.assertIn("浮盈 +22.92 USDT（+1.42%）", message)
+
 
 if __name__ == "__main__":
     unittest.main()

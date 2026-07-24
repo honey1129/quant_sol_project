@@ -424,6 +424,10 @@ POLL_SEC = int(os.getenv("POLL_SEC", 1))
 BAR_POLL_SEC = int(os.getenv("BAR_POLL_SEC", 10))
 # Emit a health warning when API latency or bar work delays consecutive risk checks.
 RISK_LOOP_WARN_SEC = float(os.getenv("RISK_LOOP_WARN_SEC", 3.0))
+# Stale WebSocket fallback must fail fast so a slow REST read cannot block the
+# one-second local risk loop. Trading/order clients keep the normal retry policy.
+RISK_REST_TIMEOUT_SEC = float(os.getenv("RISK_REST_TIMEOUT_SEC", 1.0))
+RISK_REST_MAX_RETRY = int(os.getenv("RISK_REST_MAX_RETRY", 1))
 OKX_WEBSOCKET_ENABLED = parse_env_bool(os.getenv("OKX_WEBSOCKET_ENABLED"), True)
 OKX_WEBSOCKET_STALE_SEC = float(os.getenv("OKX_WEBSOCKET_STALE_SEC", 5.0))
 OKX_WEBSOCKET_STARTUP_TIMEOUT_SEC = float(os.getenv("OKX_WEBSOCKET_STARTUP_TIMEOUT_SEC", 10.0))

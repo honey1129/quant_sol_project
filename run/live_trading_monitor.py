@@ -240,8 +240,9 @@ def net_position_from_sides(long_pos, short_pos, tolerance=1e-9):
 
 
 class LiveTrader:
-    def __init__(self, client):
+    def __init__(self, client, realtime_read_client=None):
         self.client = client
+        self.realtime_read_client = realtime_read_client or client
         self.realtime_stream = None
         self.last_risk_price_source = "rest"
         self.last_risk_position_source = "rest"
@@ -773,8 +774,17 @@ class LiveTrader:
                 )
                 self.last_risk_position_source = "websocket"
                 return qty, entry_price
-        self.last_risk_position_source = "rest"
-        return self._get_net_position()
+        self.last_risk_position_source = "rest_fast"
+        read_client = getattr(self, "realtime_read_client", self.client)
+        long_pos, short_pos = read_client.get_position(
+            max_retry=max(1, int(config.RISK_REST_MAX_RETRY)),
+            sleep_sec=0,
+        )
+        return net_position_from_sides(
+            long_pos,
+            short_pos,
+            tolerance=max(1e-9, float(config.LOT_SIZE) / 2.0),
+        )
 
     def _get_realtime_price(self):
         stream = getattr(self, "realtime_stream", None)
@@ -783,8 +793,12 @@ class LiveTrader:
             if price is not None and float(price) > 0:
                 self.last_risk_price_source = "websocket"
                 return float(price)
-        self.last_risk_price_source = "rest"
-        return float(self.client.get_price())
+        self.last_risk_price_source = "rest_fast"
+        read_client = getattr(self, "realtime_read_client", self.client)
+        return float(read_client.get_price(
+            max_retry=max(1, int(config.RISK_REST_MAX_RETRY)),
+            sleep_sec=0,
+        ))
 
     def _write_dashboard_snapshot(
         self,
@@ -1540,10 +1554,11 @@ class LiveTrader:
             try:
                 if entry and qty and price:
                     direction = str(position_snapshot.get("direction") or "").lower()
+                    position_size = abs(float(qty))
                     if direction == "long":
-                        pnl = (float(price) - float(entry)) * float(qty)
+                        pnl = (float(price) - float(entry)) * position_size
                     else:
-                        pnl = (float(entry) - float(price)) * float(qty)
+                        pnl = (float(entry) - float(price)) * position_size
                     pnl_pct = (float(price) - float(entry)) / float(entry) * 100
                     if direction == "short":
                         pnl_pct = -pnl_pct
@@ -2670,7 +2685,10 @@ def run():
     atexit.register(lambda: os.path.exists(pid_file) and os.remove(pid_file))
 
     client = OKXClient()
-    trader = LiveTrader(client)
+    realtime_read_client = OKXClient(
+        request_timeout_sec=max(0.1, float(config.RISK_REST_TIMEOUT_SEC)),
+    )
+    trader = LiveTrader(client, realtime_read_client=realtime_read_client)
     trader.ensure_runtime_ready()
 
     realtime_stream = None

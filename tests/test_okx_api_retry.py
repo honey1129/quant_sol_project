@@ -9,6 +9,33 @@ class OKXReadRetryTests(unittest.TestCase):
     def setUp(self):
         self.client = OKXClient.__new__(OKXClient)
 
+    def test_custom_request_timeout_applies_to_all_api_clients(self):
+        client = OKXClient(request_timeout_sec=1.25)
+        try:
+            for name in (
+                "account_api",
+                "trade_api",
+                "market_api",
+                "public_api",
+                "trading_data_api",
+            ):
+                api = getattr(client, name)
+                self.assertEqual(api.timeout.connect, 1.25)
+                self.assertEqual(api.timeout.read, 1.25)
+                self.assertEqual(api.timeout.write, 1.25)
+                self.assertEqual(api.timeout.pool, 1.25)
+        finally:
+            for name in (
+                "account_api",
+                "trade_api",
+                "market_api",
+                "public_api",
+                "trading_data_api",
+            ):
+                close = getattr(getattr(client, name), "close", None)
+                if callable(close):
+                    close()
+
     def test_retries_business_error_response_until_success(self):
         responses = iter([
             {
@@ -28,6 +55,21 @@ class OKXReadRetryTests(unittest.TestCase):
 
         self.assertEqual(long_pos, {"size": 2.0, "entry_price": 78.3})
         self.assertEqual(short_pos, {"size": 0.0, "entry_price": 0.0})
+
+    def test_position_read_accepts_one_shot_retry_override(self):
+        attempts = 0
+
+        def unavailable(**_kwargs):
+            nonlocal attempts
+            attempts += 1
+            return {"code": "50001", "data": [], "msg": "temporarily unavailable"}
+
+        self.client.account_api = SimpleNamespace(get_positions=unavailable)
+
+        with self.assertRaises(OKXResponseError):
+            self.client.get_position(max_retry=1, sleep_sec=0)
+
+        self.assertEqual(attempts, 1)
 
     def test_retries_response_without_okx_code(self):
         responses = iter([

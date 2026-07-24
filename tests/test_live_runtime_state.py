@@ -222,6 +222,75 @@ class LiveRuntimeStateTests(unittest.TestCase):
         self.assertEqual(trader.last_risk_position_source, "websocket")
         self.assertEqual(trader.last_risk_price_source, "websocket")
 
+    def test_realtime_position_rest_fallback_uses_dedicated_fast_client(self):
+        class PrimaryClient:
+            def get_position(self):
+                raise AssertionError("primary order client should not serve risk reads")
+
+        class ReadClient:
+            def __init__(self):
+                self.calls = []
+
+            def get_position(self, **kwargs):
+                self.calls.append(kwargs)
+                return (
+                    {"size": 0.0, "entry_price": 0.0},
+                    {"size": 2.5, "entry_price": 76.7},
+                )
+
+        class StaleStream:
+            @staticmethod
+            def get_position(max_age_sec):
+                return None
+
+        trader = LiveTrader.__new__(LiveTrader)
+        trader.client = PrimaryClient()
+        trader.realtime_read_client = ReadClient()
+        trader.realtime_stream = StaleStream()
+
+        with patch("run.live_trading_monitor.config.RISK_REST_MAX_RETRY", 1):
+            qty, entry_price = trader._get_realtime_position()
+
+        self.assertEqual((qty, entry_price), (-2.5, 76.7))
+        self.assertEqual(
+            trader.realtime_read_client.calls,
+            [{"max_retry": 1, "sleep_sec": 0}],
+        )
+        self.assertEqual(trader.last_risk_position_source, "rest_fast")
+
+    def test_realtime_price_rest_fallback_uses_dedicated_fast_client(self):
+        class PrimaryClient:
+            def get_price(self):
+                raise AssertionError("primary order client should not serve risk reads")
+
+        class ReadClient:
+            def __init__(self):
+                self.calls = []
+
+            def get_price(self, **kwargs):
+                self.calls.append(kwargs)
+                return 75.75
+
+        class StaleStream:
+            @staticmethod
+            def get_price(max_age_sec):
+                return None
+
+        trader = LiveTrader.__new__(LiveTrader)
+        trader.client = PrimaryClient()
+        trader.realtime_read_client = ReadClient()
+        trader.realtime_stream = StaleStream()
+
+        with patch("run.live_trading_monitor.config.RISK_REST_MAX_RETRY", 1):
+            price = trader._get_realtime_price()
+
+        self.assertEqual(price, 75.75)
+        self.assertEqual(
+            trader.realtime_read_client.calls,
+            [{"max_retry": 1, "sleep_sec": 0}],
+        )
+        self.assertEqual(trader.last_risk_price_source, "rest_fast")
+
     def test_run_once_fetches_features_before_processing_them(self):
         trader = LiveTrader.__new__(LiveTrader)
         latest_features = object()
@@ -421,13 +490,13 @@ class LiveRuntimeStateTests(unittest.TestCase):
                 self.closed = None
                 self.events = []
 
-            def get_position(self):
+            def get_position(self, **_kwargs):
                 return (
                     {"size": 2.0, "entry_price": 100.0},
                     {"size": 0.0, "entry_price": 0.0},
                 )
 
-            def get_price(self):
+            def get_price(self, **_kwargs):
                 return 98.0
 
             def close_long_sz(self, qty, leverage, known_position_size=None):

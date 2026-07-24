@@ -4,6 +4,7 @@ import uuid
 from decimal import Decimal, ROUND_FLOOR
 
 import pandas as pd
+from httpx import Timeout
 from config import config
 import okx.Account as Account
 import okx.Trade as Trade
@@ -117,13 +118,26 @@ def is_insufficient_margin_error(result):
 
 
 class OKXClient:
-    def __init__(self):
+    def __init__(self, request_timeout_sec=None):
         self.account_api = Account.AccountAPI(config.OKX_API_KEY, config.OKX_SECRET, config.OKX_PASSWORD, use_server_time=True, flag=config.USE_SERVER)
         self.trade_api = Trade.TradeAPI(config.OKX_API_KEY, config.OKX_SECRET, config.OKX_PASSWORD, use_server_time=True, flag=config.USE_SERVER)
         self.market_api = Market.MarketAPI(config.OKX_API_KEY, config.OKX_SECRET, config.OKX_PASSWORD, use_server_time=True, flag=config.USE_SERVER)
         self.public_api = Public.PublicAPI(config.OKX_API_KEY, config.OKX_SECRET, config.OKX_PASSWORD, use_server_time=True,flag=config.USE_SERVER)
         # Rubik 交易大数据(OI / taker / 多空比)。仅做只读统计,无需签名,但沿用同一 flag。
         self.trading_data_api = TradingData.TradingDataAPI(flag=config.USE_SERVER, debug=False)
+        if request_timeout_sec is not None:
+            timeout_sec = float(request_timeout_sec)
+            if timeout_sec <= 0:
+                raise ValueError("request_timeout_sec must be positive")
+            timeout = Timeout(timeout_sec)
+            for api in (
+                self.account_api,
+                self.trade_api,
+                self.market_api,
+                self.public_api,
+                self.trading_data_api,
+            ):
+                api.timeout = timeout
 
     def _call_with_retry(self, label, func, *, max_retry=None, sleep_sec=None, backoff=None):
         max_retry = max(1, int(max_retry if max_retry is not None else config.OKX_API_MAX_RETRY))
@@ -574,10 +588,13 @@ class OKXClient:
         return result
 
     # 获取SYMBOL当前最新仓位
-    def get_position(self):
+    def get_position(self, max_retry=None, sleep_sec=None, backoff=None):
         result = self._call_read_with_retry(
             "获取仓位",
             lambda: self.account_api.get_positions(instType='SWAP', instId=config.SYMBOL),
+            max_retry=max_retry,
+            sleep_sec=sleep_sec,
+            backoff=backoff,
         )
         if result.get("code") != "0":
             raise RuntimeError(f"获取仓位失败: {result}")
