@@ -1145,6 +1145,43 @@ class LiveTrader:
                 return self.client.close_long_sz(abs(float(actual_pos_qty)), leverage)
             return self.client.close_short_sz(abs(float(actual_pos_qty)), leverage)
 
+    def _apply_hold_state_if_position_unchanged(
+        self,
+        *,
+        expected_pos_qty,
+        expected_entry_price,
+        out,
+    ):
+        with self._get_execution_lock():
+            current_pos_qty, current_entry_price, current_hold_bars = self.core.get_state()
+            tolerance = max(1e-9, float(config.LOT_SIZE) / 2.0)
+            if abs(float(current_pos_qty) - float(expected_pos_qty)) > tolerance:
+                self.hold_bars = int(current_hold_bars)
+                self.cooldown_bars_remaining = int(self.core.get_cooldown_bars_remaining())
+                self.reverse_signal_bars = int(self.core.get_reverse_signal_bars())
+                self.loss_guard_exit_bars = int(self.core.get_loss_guard_exit_bars())
+                return float(current_pos_qty), float(current_entry_price)
+
+            self.hold_bars = int(out.get("next_hold_bars", self.hold_bars))
+            self.cooldown_bars_remaining = int(
+                out.get("next_cooldown_bars", self.cooldown_bars_remaining)
+            )
+            self.reverse_signal_bars = int(
+                out.get("next_reverse_signal_bars", self.reverse_signal_bars)
+            )
+            self.loss_guard_exit_bars = int(
+                out.get("next_loss_guard_exit_bars", self.loss_guard_exit_bars)
+            )
+            self.core.set_state(
+                expected_pos_qty,
+                expected_entry_price,
+                self.hold_bars,
+                cooldown_bars_remaining=self.cooldown_bars_remaining,
+                reverse_signal_bars=self.reverse_signal_bars,
+                loss_guard_exit_bars=self.loss_guard_exit_bars,
+            )
+            return float(expected_pos_qty), float(expected_entry_price)
+
     def _persist_last_bar_state(self, bar_ts):
         if not bool(config.LIVE_PERSIST_LAST_BAR):
             return
@@ -2414,30 +2451,31 @@ class LiveTrader:
         # 安全门禁：Kill Switch / 日亏损熔断（只阻止新开仓，不影响平仓/止损）
         safety_halted = self._check_safety_gates(equity)
 
-        if pos_qty == 0:
-            self.hold_bars = 0
-        self.core.set_state(
-            pos_qty,
-            entry_price,
-            self.hold_bars,
-            cooldown_bars_remaining=self.cooldown_bars_remaining,
-            reverse_signal_bars=self.reverse_signal_bars,
-            loss_guard_exit_bars=self.loss_guard_exit_bars,
-        )
+        with self._get_execution_lock():
+            if pos_qty == 0:
+                self.hold_bars = 0
+            self.core.set_state(
+                pos_qty,
+                entry_price,
+                self.hold_bars,
+                cooldown_bars_remaining=self.cooldown_bars_remaining,
+                reverse_signal_bars=self.reverse_signal_bars,
+                loss_guard_exit_bars=self.loss_guard_exit_bars,
+            )
 
-        out = self.core.on_bar(
-            price=price,
-            equity=equity,
-            long_prob=long_prob,
-            short_prob=short_prob,
-            money_flow_ratio=money_flow_ratio,
-            volatility=volatility,
-            atr_ratio=atr_ratio,
-            trend_bias=trend_context.get("trend_bias"),
-            trend_gap=trend_context.get("trend_gap"),
-            is_high_vol=bool(regime_context.get("is_high_vol")),
-            market_regime=regime_context.get("regime"),
-        )
+            out = self.core.on_bar(
+                price=price,
+                equity=equity,
+                long_prob=long_prob,
+                short_prob=short_prob,
+                money_flow_ratio=money_flow_ratio,
+                volatility=volatility,
+                atr_ratio=atr_ratio,
+                trend_bias=trend_context.get("trend_bias"),
+                trend_gap=trend_context.get("trend_gap"),
+                is_high_vol=bool(regime_context.get("is_high_vol")),
+                market_regime=regime_context.get("regime"),
+            )
 
         action = out["action"]
         delta = float(out["delta_qty"])
@@ -2686,17 +2724,10 @@ class LiveTrader:
             return
 
         elif action == "HOLD":
-            self.hold_bars = int(out.get("next_hold_bars", self.hold_bars))
-            self.cooldown_bars_remaining = int(out.get("next_cooldown_bars", self.cooldown_bars_remaining))
-            self.reverse_signal_bars = int(out.get("next_reverse_signal_bars", self.reverse_signal_bars))
-            self.loss_guard_exit_bars = int(out.get("next_loss_guard_exit_bars", self.loss_guard_exit_bars))
-            self.core.set_state(
-                pos_qty,
-                entry_price,
-                self.hold_bars,
-                cooldown_bars_remaining=self.cooldown_bars_remaining,
-                reverse_signal_bars=self.reverse_signal_bars,
-                loss_guard_exit_bars=self.loss_guard_exit_bars,
+            pos_qty, entry_price = self._apply_hold_state_if_position_unchanged(
+                expected_pos_qty=pos_qty,
+                expected_entry_price=entry_price,
+                out=out,
             )
             position_snapshot = self._build_position_snapshot(pos_qty, entry_price, current_price=price, pending_orders=0)
             self._write_dashboard_snapshot(

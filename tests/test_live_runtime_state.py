@@ -589,6 +589,57 @@ class LiveRuntimeStateTests(unittest.TestCase):
         self.assertFalse(success)
         self.assertEqual(trader.client.close_calls, 0)
 
+    def test_stale_hold_does_not_restore_position_closed_by_realtime_risk(self):
+        class Core:
+            def __init__(self):
+                self.position = 0.0
+                self.entry_price = 0.0
+                self.hold_bars = 0
+                self.cooldown_bars_remaining = 12
+                self.reverse_signal_bars = 0
+                self.loss_guard_exit_bars = 0
+
+            def get_state(self):
+                return self.position, self.entry_price, self.hold_bars
+
+            def get_cooldown_bars_remaining(self):
+                return self.cooldown_bars_remaining
+
+            def get_reverse_signal_bars(self):
+                return self.reverse_signal_bars
+
+            def get_loss_guard_exit_bars(self):
+                return self.loss_guard_exit_bars
+
+            def set_state(self, position, entry_price, **_kwargs):
+                self.position = position
+                self.entry_price = entry_price
+
+        trader = LiveTrader.__new__(LiveTrader)
+        trader.core = Core()
+        trader.hold_bars = 40
+        trader.cooldown_bars_remaining = 0
+        trader.reverse_signal_bars = 2
+        trader.loss_guard_exit_bars = 1
+
+        pos_qty, entry_price = trader._apply_hold_state_if_position_unchanged(
+            expected_pos_qty=-24.97,
+            expected_entry_price=74.75,
+            out={
+                "next_hold_bars": 41,
+                "next_cooldown_bars": 0,
+                "next_reverse_signal_bars": 2,
+                "next_loss_guard_exit_bars": 1,
+            },
+        )
+
+        self.assertEqual((pos_qty, entry_price), (0.0, 0.0))
+        self.assertEqual(trader.core.get_state(), (0.0, 0.0, 0))
+        self.assertEqual(trader.hold_bars, 0)
+        self.assertEqual(trader.cooldown_bars_remaining, 12)
+        self.assertEqual(trader.reverse_signal_bars, 0)
+        self.assertEqual(trader.loss_guard_exit_bars, 0)
+
     def test_startup_tpsl_reconciliation_adopts_matching_short_order(self):
         class Client:
             def list_pending_tpsl_algo_orders(self):
