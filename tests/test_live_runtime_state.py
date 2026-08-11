@@ -1,10 +1,13 @@
 import os
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
 import pandas as pd
 
+from run import live_trading_monitor as live_monitor
 from core.okx_api import (
     OKXClient,
     OrderStateUnknownError,
@@ -120,6 +123,52 @@ class LiveRuntimeStateTests(unittest.TestCase):
     def test_should_emit_interval_log_only_after_interval(self):
         self.assertFalse(should_emit_interval_log(100.0, 120.0, 30.0))
         self.assertTrue(should_emit_interval_log(100.0, 130.0, 30.0))
+
+    def test_realtime_risk_loop_survives_error_and_keeps_running(self):
+        stop_event = threading.Event()
+        enough_checks = threading.Event()
+
+        class Trader:
+            def __init__(self):
+                self.calls = 0
+                self.recorded = 0
+
+            def run_realtime_risk_check(self):
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("temporary risk check failure")
+                if self.calls >= 3:
+                    enough_checks.set()
+
+            def _record_realtime_risk_timing(self, _started_at):
+                self.recorded += 1
+                if self.recorded == 1:
+                    raise RuntimeError("temporary timing failure")
+
+        trader = Trader()
+        worker = threading.Thread(
+            target=live_monitor.run_realtime_risk_loop,
+            args=(trader, stop_event, 0.01),
+        )
+
+        with patch("run.live_trading_monitor.log_error"):
+            worker.start()
+            self.assertTrue(enough_checks.wait(0.5))
+            stop_event.set()
+            worker.join(timeout=0.5)
+
+        self.assertFalse(worker.is_alive())
+        self.assertGreaterEqual(trader.calls, 3)
+        self.assertEqual(trader.recorded, trader.calls)
+
+    def test_safety_gate_blocks_exposure_increase_but_allows_reduction(self):
+        self.assertTrue(live_monitor.safety_gate_blocks_order(True, "OPEN", 0.0, 1.0))
+        self.assertTrue(live_monitor.safety_gate_blocks_order(True, "REBALANCE", 2.0, 1.0))
+        self.assertTrue(live_monitor.safety_gate_blocks_order(True, "REBALANCE", -2.0, -1.0))
+        self.assertFalse(live_monitor.safety_gate_blocks_order(True, "REBALANCE", 2.0, -1.0))
+        self.assertFalse(live_monitor.safety_gate_blocks_order(True, "REBALANCE", -2.0, 1.0))
+        self.assertFalse(live_monitor.safety_gate_blocks_order(True, "CLOSE", 2.0, -2.0))
+        self.assertFalse(live_monitor.safety_gate_blocks_order(False, "OPEN", 0.0, 1.0))
 
     def test_realtime_risk_timing_tracks_actual_interval_and_slow_checks(self):
         class Core:
@@ -462,6 +511,83 @@ class LiveRuntimeStateTests(unittest.TestCase):
 
         self.assertFalse(success)
         self.assertFalse(trader.client.opened)
+
+    def test_execute_delta_serializes_position_check_and_order_submission(self):
+        first_position_read = threading.Event()
+        release_first_read = threading.Event()
+
+        class Client:
+            def __init__(self):
+                self.position = 0.0
+                self.position_reads = 0
+                self.open_calls = 0
+
+            def get_position(self):
+                self.position_reads += 1
+                snapshot = self.position
+                if self.position_reads == 1:
+                    first_position_read.set()
+                    release_first_read.wait(0.5)
+                return (
+                    {"size": snapshot, "entry_price": 100.0 if snapshot else 0.0},
+                    {"size": 0.0, "entry_price": 0.0},
+                )
+
+            def open_long_sz(self, qty, leverage):
+                self.open_calls += 1
+                self.position += qty
+                return True
+
+        trader = LiveTrader.__new__(LiveTrader)
+        trader.client = Client()
+        results = []
+
+        def execute():
+            results.append(trader._execute_delta(0.0, 1.0))
+
+        first = threading.Thread(target=execute)
+        second = threading.Thread(target=execute)
+
+        with patch("run.live_trading_monitor.config.LOT_SIZE", 0.01):
+            with patch("run.live_trading_monitor.config.LEVERAGE", 3):
+                with patch("run.live_trading_monitor.config.LOSS_GUARD_BLOCK_DIRECTIONS", []):
+                    first.start()
+                    self.assertTrue(first_position_read.wait(0.5))
+                    second.start()
+                    time.sleep(0.02)
+                    release_first_read.set()
+                    first.join(timeout=0.5)
+                    second.join(timeout=0.5)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(trader.client.open_calls, 1)
+        self.assertCountEqual(results, [True, False])
+
+    def test_close_position_rejects_stale_bar_position_after_realtime_close(self):
+        class Client:
+            def __init__(self):
+                self.close_calls = 0
+
+            def get_position(self):
+                return (
+                    {"size": 0.0, "entry_price": 0.0},
+                    {"size": 0.0, "entry_price": 0.0},
+                )
+
+            def close_long_sz(self, qty, leverage):
+                self.close_calls += 1
+                return True
+
+        trader = LiveTrader.__new__(LiveTrader)
+        trader.client = Client()
+
+        with patch("run.live_trading_monitor.config.LOT_SIZE", 0.01):
+            with patch("run.live_trading_monitor.log_error"):
+                success = trader._close_position_if_unchanged(2.0, {"risk": {}})
+
+        self.assertFalse(success)
+        self.assertEqual(trader.client.close_calls, 0)
 
     def test_startup_tpsl_reconciliation_adopts_matching_short_order(self):
         class Client:

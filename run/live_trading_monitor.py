@@ -3,6 +3,7 @@ import os
 import time
 import json
 import joblib
+import threading
 import traceback
 import numpy as np
 import pandas as pd
@@ -49,6 +50,52 @@ def should_emit_interval_log(last_emitted_at, now_ts, interval_sec):
     if last_emitted_at is None:
         return True
     return float(now_ts) - float(last_emitted_at) >= float(interval_sec)
+
+
+def safety_gate_blocks_order(safety_halted, action, current_pos_qty, delta_qty, tolerance=1e-9):
+    if not safety_halted:
+        return False
+
+    action = str(action or "").upper()
+    if action == "OPEN":
+        return True
+    if action != "REBALANCE":
+        return False
+
+    current = float(current_pos_qty or 0.0)
+    delta = float(delta_qty or 0.0)
+    if abs(delta) <= tolerance:
+        return False
+    target = current + delta
+    is_same_side_reduction = (
+        abs(current) > tolerance
+        and abs(target) < abs(current) - tolerance
+        and (abs(target) <= tolerance or current * target > 0)
+    )
+    return not is_same_side_reduction
+
+
+def run_realtime_risk_loop(trader, stop_event, poll_sec):
+    """Run realtime risk checks independently from bar processing."""
+    poll_sec = max(0.01, float(poll_sec))
+    next_check_at = time.monotonic()
+    while not stop_event.is_set():
+        wait_sec = max(0.0, next_check_at - time.monotonic())
+        if stop_event.wait(wait_sec):
+            break
+
+        started_at = time.monotonic()
+        try:
+            trader.run_realtime_risk_check()
+        except Exception as exc:
+            log_error(f"实时风控循环异常: {exc}")
+            log_error(traceback.format_exc())
+        finally:
+            try:
+                trader._record_realtime_risk_timing(started_at)
+            except Exception as exc:
+                log_error(f"实时风控计时记录异常: {exc}")
+        next_check_at = started_at + poll_sec
 
 
 def load_last_bar_ts(state_path):
@@ -243,6 +290,7 @@ class LiveTrader:
     def __init__(self, client, realtime_read_client=None):
         self.client = client
         self.realtime_read_client = realtime_read_client or client
+        self._execution_lock = threading.RLock()
         self.realtime_stream = None
         self.last_risk_price_source = "rest"
         self.last_risk_position_source = "rest"
@@ -1018,7 +1066,18 @@ class LiveTrader:
             leverage = int(config.LEVERAGE)
         return max(1, min(int(config.LEVERAGE), leverage))
 
+    def _get_execution_lock(self):
+        lock = getattr(self, "_execution_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._execution_lock = lock
+        return lock
+
     def _execute_delta(self, current_pos_qty: float, delta_qty: float, decision=None) -> bool:
+        with self._get_execution_lock():
+            return self._execute_delta_locked(current_pos_qty, delta_qty, decision)
+
+    def _execute_delta_locked(self, current_pos_qty: float, delta_qty: float, decision=None) -> bool:
         qty = abs(float(delta_qty))
         if qty <= 0:
             return False
@@ -1058,6 +1117,33 @@ class LiveTrader:
         if delta_qty > 0:
             return self.client.open_long_sz(qty, leverage)
         return self.client.open_short_sz(qty, leverage)
+
+    def _close_position_if_unchanged(self, current_pos_qty: float, decision=None) -> bool:
+        with self._get_execution_lock():
+            try:
+                actual_pos_qty, _ = self._get_net_position()
+            except Exception as exc:
+                log_error(f"平仓前仓位对账失败，本轮拒绝下单: {exc}")
+                return False
+
+            tolerance = max(1e-9, float(config.LOT_SIZE) / 2.0)
+            if (
+                actual_pos_qty is None
+                or abs(float(actual_pos_qty) - float(current_pos_qty)) > tolerance
+            ):
+                log_error(
+                    "平仓前仓位已变化，本轮拒绝重复下单: "
+                    f"decision_pos={float(current_pos_qty):.6f}, actual_pos={actual_pos_qty}"
+                )
+                return False
+            if abs(float(actual_pos_qty)) <= tolerance:
+                return False
+
+            self._cancel_exchange_tpsl()
+            leverage = self._resolve_order_leverage(decision)
+            if actual_pos_qty > 0:
+                return self.client.close_long_sz(abs(float(actual_pos_qty)), leverage)
+            return self.client.close_short_sz(abs(float(actual_pos_qty)), leverage)
 
     def _persist_last_bar_state(self, bar_ts):
         if not bool(config.LIVE_PERSIST_LAST_BAR):
@@ -2037,6 +2123,10 @@ class LiveTrader:
 
     def run_realtime_risk_check(self):
         """Check local TP/SL against a live ticker independently of bar generation."""
+        with self._get_execution_lock():
+            return self._run_realtime_risk_check_locked()
+
+    def _run_realtime_risk_check_locked(self):
         tracked_pos_qty, tracked_entry_price, _ = self.core.get_state()
         pos_qty, entry_price = self._get_realtime_position()
         if pos_qty is None:
@@ -2378,14 +2468,7 @@ class LiveTrader:
         }
 
         if action == "CLOSE":
-            # 平仓前先撤销交易所端 TP/SL 算法单，防止残留单触发后反向开仓
-            self._cancel_exchange_tpsl()
-            success = False
-            leverage = self._resolve_order_leverage(decision)
-            if pos_qty > 0:
-                success = self.client.close_long_sz(abs(pos_qty), leverage)
-            elif pos_qty < 0:
-                success = self.client.close_short_sz(abs(pos_qty), leverage)
+            success = self._close_position_if_unchanged(pos_qty, decision)
             if success:
                 self.cooldown_bars_remaining = int(out.get("next_cooldown_bars", self.cooldown_bars_remaining))
                 self.reverse_signal_bars = int(out.get("next_reverse_signal_bars", 0))
@@ -2439,7 +2522,7 @@ class LiveTrader:
 
         elif action == "OPEN":
             # 安全门禁：Kill Switch / 日亏损熔断触发时拒绝开仓，平仓/止损正常执行
-            if safety_halted:
+            if safety_gate_blocks_order(safety_halted, action, pos_qty, delta):
                 log_info(
                     f"HOLD (安全门禁 {self._halt_reason}): 拒绝新开仓"
                     f" target_ratio={out.get('target_ratio', 0):.4f}"
@@ -2525,6 +2608,13 @@ class LiveTrader:
             return
 
         elif action == "REBALANCE":
+            if safety_gate_blocks_order(safety_halted, action, pos_qty, delta):
+                log_info(
+                    f"HOLD (安全门禁 {self._halt_reason}): 拒绝增加风险敞口的调仓"
+                    f" current_pos={float(pos_qty):.6f} delta={delta:.6f}"
+                )
+                self._persist_last_bar_state(bar_ts)
+                return
             # 仓位不确定时拒绝加仓方向的 REBALANCE（减仓仍允许）
             if self._position_uncertain and delta > 0 and pos_qty >= 0:
                 log_error("HOLD (position_uncertain): 上一轮仓位同步失败，拒绝 REBALANCE 加仓")
@@ -2752,6 +2842,14 @@ def run():
         "🟢 Live trading monitor started "
         f"(risk_poll_sec={POLL_SEC}, bar_poll_sec={BAR_POLL_SEC})"
     )
+    risk_stop_event = threading.Event()
+    risk_thread = threading.Thread(
+        target=run_realtime_risk_loop,
+        args=(trader, risk_stop_event, POLL_SEC),
+        name="realtime-risk",
+        daemon=True,
+    )
+    risk_thread.start()
     bar_client = OKXClient()
     bar_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bar-features")
     bar_future = None
@@ -2759,12 +2857,6 @@ def run():
     try:
         while True:
             try:
-                risk_check_started_at = time.monotonic()
-                try:
-                    trader.run_realtime_risk_check()
-                finally:
-                    trader._record_realtime_risk_timing(risk_check_started_at)
-
                 if bar_future is not None and bar_future.done():
                     completed_future = bar_future
                     bar_future = None
@@ -2795,6 +2887,10 @@ def run():
 
             time.sleep(int(POLL_SEC))
     finally:
+        risk_stop_event.set()
+        risk_thread.join(timeout=max(2.0, float(POLL_SEC) * 2.0))
+        if risk_thread.is_alive():
+            log_error("实时风控线程未能在超时时间内停止")
         bar_executor.shutdown(wait=False, cancel_futures=True)
         if realtime_stream is not None:
             realtime_stream.stop()
